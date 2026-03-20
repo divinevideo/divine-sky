@@ -27,3 +27,16 @@ fn localnet_plc_and_pds_compose_files_define_required_services() {
     assert!(pds.contains("PDS_DID_PLC_URL"));
     assert!(pds.contains("PDS_IMAGE"));
 }
+
+#[test]
+fn localnet_jetstream_and_dns_slices_are_defined() {
+    let repo_root = repo_root();
+    let jetstream =
+        std::fs::read_to_string(repo_root.join("deploy/localnet/jetstream/docker-compose.yml"))
+            .unwrap();
+    let dns = std::fs::read_to_string(repo_root.join("deploy/localnet/dns/docker-compose.yml"))
+        .unwrap();
+    assert!(jetstream.contains("JETSTREAM_WS_URL"));
+    assert!(dns.contains("coredns:"));
+    assert!(dns.contains("app:"));
+}
