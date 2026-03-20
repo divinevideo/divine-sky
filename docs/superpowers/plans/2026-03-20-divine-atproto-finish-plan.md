@@ -172,16 +172,16 @@ Expected: PASS
 - Create: `docs/runbooks/login-divine-video.md`
 - Modify: `Cargo.toml`
 
-- [ ] **Step 1: Write failing tests for opt-in, status, disable, export, and `.well-known` resolution**
+- [x] **Step 1: Write failing tests for opt-in, status, disable, export, and `.well-known` resolution**
 
 Run: `cargo test -p divine-handle-gateway control_plane -- --nocapture`
 Expected: FAIL because the service and routes do not exist yet
 
-- [ ] **Step 2: Implement host-based handle resolution**
+- [x] **Step 2: Implement host-based handle resolution**
 
 Support `https://username.divine.video/.well-known/atproto-did` from stored account-link state.
 
-- [ ] **Step 3: Implement control-plane routes**
+- [x] **Step 3: Implement control-plane routes**
 
 Routes must own:
 - opt-in
@@ -190,11 +190,11 @@ Routes must own:
 - disable
 - export
 
-- [ ] **Step 4: Document operational responsibilities for `login.divine.video`**
+- [x] **Step 4: Document operational responsibilities for `login.divine.video`**
 
 Capture boundary rules, auth assumptions, and handoff to the bridge/PDS.
 
-- [ ] **Step 5: Re-run the control-plane tests**
+- [x] **Step 5: Re-run the control-plane tests**
 
 Run: `cargo test -p divine-handle-gateway control_plane -- --nocapture`
 Expected: PASS
