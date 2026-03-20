@@ -4,7 +4,7 @@ use axum::http::header::AUTHORIZATION;
 use axum::http::{Request, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::Response;
-use axum::routing::get;
+use axum::routing::{get, post};
 use axum::Router;
 use k256::ecdsa::SigningKey;
 
@@ -35,12 +35,21 @@ impl AppState {
 }
 
 pub fn app_with_state(state: AppState) -> Router {
+    let webhook_routes = Router::new()
+        .route("/webhook/moderation-result", post(routes::webhook::handler))
+        .with_state(state.clone())
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            require_webhook_auth,
+        ));
+
     Router::new()
         .route("/health", get(routes::health::handler))
         .route(
             "/xrpc/com.atproto.label.queryLabels",
             get(routes::query_labels::handler),
         )
+        .merge(webhook_routes)
         .with_state(state)
 }
 

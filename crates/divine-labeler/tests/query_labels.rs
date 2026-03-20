@@ -1,23 +1,21 @@
-use divine_labeler::routes::query_labels::build_query_response;
-use divine_bridge_db::models::LabelerEvent;
 use chrono::Utc;
+use divine_bridge_db::models::LabelerEvent;
+use divine_labeler::routes::query_labels::build_query_response;
 
 #[test]
 fn build_query_response_formats_labels_correctly() {
-    let events = vec![
-        LabelerEvent {
-            seq: 1,
-            src_did: "did:plc:test-labeler".to_string(),
-            subject_uri: "at://did:plc:user1/app.bsky.feed.post/rkey1".to_string(),
-            subject_cid: None,
-            val: "nudity".to_string(),
-            neg: false,
-            nostr_event_id: None,
-            sha256: Some("abc123".to_string()),
-            origin: "divine".to_string(),
-            created_at: Utc::now(),
-        },
-    ];
+    let events = vec![LabelerEvent {
+        seq: 1,
+        src_did: "did:plc:test-labeler".to_string(),
+        subject_uri: "at://did:plc:user1/app.bsky.feed.post/rkey1".to_string(),
+        subject_cid: None,
+        val: "nudity".to_string(),
+        neg: false,
+        nostr_event_id: None,
+        sha256: Some("abc123".to_string()),
+        origin: "divine".to_string(),
+        created_at: Utc::now(),
+    }];
 
     let (body, cursor) = build_query_response(&events);
     let json: serde_json::Value = serde_json::from_str(&body).unwrap();

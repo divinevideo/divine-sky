@@ -97,7 +97,10 @@ mod tests {
             neg: false,
             cts: "2026-03-20T00:00:00Z".to_string(),
         };
-        let label2 = UnsignedLabel { val: "porn".to_string(), ..label1.clone() };
+        let label2 = UnsignedLabel {
+            val: "porn".to_string(),
+            ..label1.clone()
+        };
         let sig1 = sign_label(&label1, &signing_key).unwrap();
         let sig2 = sign_label(&label2, &signing_key).unwrap();
         assert_ne!(sig1, sig2);
