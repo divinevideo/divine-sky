@@ -1,5 +1,16 @@
 # Divine Sky Staging Status — 2026-03-21
 
+## ATProto Remediation Tracker
+
+| Area | Current State | Evidence | Next Action |
+|------|---------------|----------|-------------|
+| Staging PDS canary smoke | Scripted locally, not yet run from this repo state | `scripts/staging-pds-did-smoke.sh`, `docs/runbooks/staging-pds-did-resolution.md` | Run the canary with staging admin credentials and paste the failing or passing capture into the runbook |
+| `divine-atbridge` and `divine-handle-gateway` tests | Verified locally with `libpq` bootstrap | `control_plane`, `provision_api`, and `provisioning_lifecycle` all passed with Homebrew `libpq` env configured | build immutable staging images from the tested revisions and replace `latest` pins |
+| `divine-name-server` internal sync + cron sync | Code-ready locally, deploy pending | local Vitest slice passes for Task 4 and Task 5 | apply D1 migration and deploy worker |
+| `divine-router` DID edge handler | Code-ready locally, README still being tightened, publish pending | route and tests exist on `feat/atproto-handle-resolution` | publish Fastly service and verify canary DID resolution |
+| keycast ATProto image | Image already pinned to immutable tag | `0e5b6cb34dad075011d3703836ca111ceb583aa8` in staging overlay | keep tag, verify staging endpoints after runtime secret wiring |
+| keycast runtime secret wiring | Landed locally in `divine-iac-coreconfig`, not yet synced | new `keycast-atproto-runtime` secret contract and env vars | sync staging overlay and verify `/api/user/atproto/*` against real control plane |
+
 ## Running Services
 
 | Service | Namespace | Pods | Public URL | Status |
@@ -34,10 +45,10 @@
 **What works:** The OLD pod (8h uptime, using divine_bridge DB) stays running on 127.0.0.1:8000 but panics on API calls because divine_bridge doesn't have PDS tables.
 
 **To fix:**
-1. Increase memory limits to 1Gi in the deployment
-2. Verify the `rsky_pds` DB has all tables: `kubectl run ... psql -c "\dt pds.*"`
-3. Check if the ExternalSecret is fetching the correct DATABASE_URL version (v2 points to rsky_pds)
-4. Consider removing the `command` override and using a Rocket.toml config file baked into the Docker image instead
+1. Run `bash scripts/staging-pds-did-smoke.sh` with a fresh canary DID and capture the exact failure shape.
+2. Isolate the DID resolution path in the forked `rsky-pds` source from the smoke output and pod logs.
+3. Pin a patched non-`latest` staging image in `../divine-iac-coreconfig`.
+4. Re-run the canary smoke until `createAccount` and `describeRepo` both pass.
 
 **Database state:**
 - `rsky_pds` database exists with PDS schema (`pds.*` tables from rsky migrations)
@@ -80,3 +91,12 @@
 | divine-handle-gateway:latest | Local Docker |
 | divine-atbridge:latest | Local Docker |
 | rsky-pds:latest | Cloud Build (E2_HIGHCPU_32) |
+| keycast:`0e5b6cb34dad075011d3703836ca111ceb583aa8` | Immutable staging pin already present |
+
+## Pending Runtime Verifications
+
+- `rsky-pds` canary handle and DID used for the next smoke run: pending
+- `divine-name-server` worker deploy timestamp: pending
+- `divine-router` publish timestamp: pending
+- keycast `/api/user/atproto/enable|status|disable` staging verification: pending
+- final canary username and DID for end-to-end rollout record: pending

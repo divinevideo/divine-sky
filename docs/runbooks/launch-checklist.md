@@ -34,6 +34,14 @@
 - Confirm disable flow clears public `atproto_did` resolution and prevents new mirrored posts.
 - Route DMCA and takedown intake into the moderation queue before enabling public creator onboarding.
 
+## Rollback Gates
+
+- Record the previously known-good `rsky-pds` image tag before deploying the DID-resolution patch.
+- If the patched PDS breaks account creation, revert the staging overlay in `../divine-iac-coreconfig` to the previous `rsky-pds` image tag and resync ArgoCD.
+- If the Fastly edge rollout is wrong, revert the `divine-router` service to the previous published package and purge the service again.
+- If the user-facing ATProto path must be shut off, disable keycast opt-in by removing the staging runtime control-plane wiring or rolling back the keycast staging overlay without deleting existing AT repos.
+- After any disable or rollback, confirm the Fastly KV record for the canary username no longer advertises `atproto_did` and `atproto_state = ready`.
+
 ## Ops
 
 - Record the active `RELAY_SOURCE_NAME`, PDS auth source, and deployed compose/image versions for each rollout.
