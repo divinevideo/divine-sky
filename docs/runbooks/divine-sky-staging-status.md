@@ -4,8 +4,8 @@
 
 | Area | Current State | Evidence | Next Action |
 |------|---------------|----------|-------------|
-| Staging PDS canary smoke | Scripted locally, not yet run from this repo state | `scripts/staging-pds-did-smoke.sh`, `docs/runbooks/staging-pds-did-resolution.md` | Run the canary with staging admin credentials and paste the failing or passing capture into the runbook |
-| `divine-atbridge` and `divine-handle-gateway` tests | Verified locally with `libpq` bootstrap | `control_plane`, `provision_api`, and `provisioning_lifecycle` all passed with Homebrew `libpq` env configured | build immutable staging images from the tested revisions and replace `latest` pins |
+| Staging PDS canary smoke | Reproduced against live staging and captured in the runbook | `scripts/staging-pds-did-smoke.sh`, `docs/runbooks/staging-pds-did-resolution.md` | deploy the patched `rsky-pds` image, then rerun the same smoke flow until `describeRepo` passes |
+| `divine-atbridge` and `divine-handle-gateway` tests | Verified locally and immutable images built | `control_plane`, `provision_api`, and `provisioning_lifecycle` all passed; staging images `divine-handle-gateway:6efafb3` and `divine-atbridge:6efafb3` were pushed to Artifact Registry | replace `latest` pins in staging and sync the overlays |
 | `divine-name-server` internal sync + cron sync | Code-ready locally, deploy pending | local Vitest slice passes for Task 4 and Task 5 | apply D1 migration and deploy worker |
 | `divine-router` DID edge handler | Code-ready locally, README still being tightened, publish pending | route and tests exist on `feat/atproto-handle-resolution` | publish Fastly service and verify canary DID resolution |
 | keycast ATProto image | Image already pinned to immutable tag | `0e5b6cb34dad075011d3703836ca111ceb583aa8` in staging overlay | keep tag, verify staging endpoints after runtime secret wiring |
@@ -19,7 +19,7 @@
 | divine-feedgen | sky | 2/2 | feed.staging.dvines.org | Healthy |
 | divine-handle-gateway | sky | 2/2 | internal | Healthy |
 | divine-atbridge | sky | 1/1 | internal | Running, connected to relay |
-| rsky-pds | sky | 1/1 (old pod) | pds.staging.dvines.org | Needs debugging (see below) |
+| rsky-pds | sky | 1/1 | pds.staging.dvines.org | Restarted on 2026-03-21 and is now intermittently failing `_health`; earlier `createAccount` traces still show the PLC DID-resolution failure |
 
 ## Labeler DID
 
@@ -35,24 +35,26 @@
 
 ## What Needs Debugging: rsky-pds
 
-**Problem:** New rsky-pds pods crash with exit code 137 (OOM) or liveness probe failures.
+**Problem:** `createAccount` reaches PLC minting, then fails while resolving the freshly minted DID document.
 
-**Root cause candidates:**
-1. Resource limits may be too low (currently 512Mi memory limit). rsky-pds with Rocket + Diesel + AWS SDK might need more.
-2. The `sh -c "ROCKET_PORT=8000 ROCKET_ADDRESS=0.0.0.0 /usr/local/bin/rsky-pds"` command override may interact badly with Rocket's config parsing.
-3. Database connection to `rsky_pds` DB may be failing (the old pod uses `divine_bridge` DB which doesn't have PDS schema).
+**Confirmed findings:**
+1. The real failure path is the PLC-minting path with `did` omitted from `createAccount`, not the imported-account path with a pre-existing DID.
+2. The `rabble/rsky` fork already contains the DID-path and S3 fixes, but `rsky-pds/Dockerfile` builds from upstream `blacksky-algorithms/rsky` and only copies `rsky-pds/src`, so the patched `rsky-identity` code never reaches the staging image.
+3. The live deployment is manually drifted beyond `../divine-iac-coreconfig`; secret-backed signing keys and AWS credentials are not declared in Git yet.
+4. Staging sets `PDS_ID_RESOLVER_TIMEOUT=30000`, but upstream `rsky-pds/src/lib.rs` currently constructs `IdResolver::new(IdentityResolverOpts { timeout: None, ... })`, so the resolver still falls back to the library default timeout unless the fork is patched.
 
-**What works:** The OLD pod (8h uptime, using divine_bridge DB) stays running on 127.0.0.1:8000 but panics on API calls because divine_bridge doesn't have PDS tables.
+**What worked before the latest pod restart:** `_health` returned `200`, PLC operations were accepted by `plc.directory`, and the failure was narrowed to the image/runtime path after PLC minting.
+
+**Current staging drift as of 2026-03-21:** the replacement `rsky-pds` pod restarted and then began failing readiness/liveness probes on `/xrpc/_health`, so the public endpoint can now return `503` before the createAccount path is even exercised.
 
 **To fix:**
-1. Run `bash scripts/staging-pds-did-smoke.sh` with a fresh canary DID and capture the exact failure shape.
-2. Isolate the DID resolution path in the forked `rsky-pds` source from the smoke output and pod logs.
-3. Pin a patched non-`latest` staging image in `../divine-iac-coreconfig`.
-4. Re-run the canary smoke until `createAccount` and `describeRepo` both pass.
+1. Build and push a new `rsky-pds` image from the fork after fixing its Dockerfile to compile the local workspace.
+2. Pin that image in `../divine-iac-coreconfig` instead of `latest`.
+3. Reconcile the missing `rsky-pds` runtime secrets and env vars into `../divine-iac-coreconfig` so ArgoCD does not roll staging back to an incomplete deployment.
+4. Re-run `bash scripts/staging-pds-did-smoke.sh` until `createAccount` and `describeRepo` both pass.
 
 **Database state:**
 - `rsky_pds` database exists with PDS schema (`pds.*` tables from rsky migrations)
-- DB user: `rsky_pds`, password: `pds-staging-db-pw-2026`
 - GCP secret `rsky-pds-database-url-staging` v2 points to rsky_pds DB
 
 ## What's Next After PDS Fix
@@ -88,14 +90,14 @@
 |-------|-----------|
 | divine-labeler:latest | Local Docker |
 | divine-feedgen:latest | Local Docker |
-| divine-handle-gateway:latest | Local Docker |
-| divine-atbridge:latest | Local Docker |
+| divine-handle-gateway:6efafb3 | Cloud Build |
+| divine-atbridge:6efafb3 | Cloud Build |
 | rsky-pds:latest | Cloud Build (E2_HIGHCPU_32) |
 | keycast:`0e5b6cb34dad075011d3703836ca111ceb583aa8` | Immutable staging pin already present |
 
 ## Pending Runtime Verifications
 
-- `rsky-pds` canary handle and DID used for the next smoke run: pending
+- `rsky-pds` patched image tag and rollout timestamp: pending
 - `divine-name-server` worker deploy timestamp: pending
 - `divine-router` publish timestamp: pending
 - keycast `/api/user/atproto/enable|status|disable` staging verification: pending
