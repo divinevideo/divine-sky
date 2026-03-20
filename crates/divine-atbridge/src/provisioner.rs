@@ -120,7 +120,8 @@ pub trait PdsAccountCreator: Send + Sync {
 pub trait AccountLinkStore: Send + Sync {
     async fn get_link_by_pubkey(&self, nostr_pubkey: &str) -> Result<Option<AccountLinkRecord>>;
     async fn get_link_by_handle(&self, handle: &str) -> Result<Option<AccountLinkRecord>>;
-    async fn save_pending_link(&self, pending: PendingAccountLink<'_>) -> Result<AccountLinkRecord>;
+    async fn save_pending_link(&self, pending: PendingAccountLink<'_>)
+        -> Result<AccountLinkRecord>;
     async fn mark_link_ready(&self, nostr_pubkey: &str, did: &str) -> Result<AccountLinkRecord>;
     async fn mark_link_failed(
         &self,
@@ -292,11 +293,7 @@ where
         }
     }
 
-    async fn create_new_link(
-        &self,
-        nostr_pubkey: &str,
-        handle: &str,
-    ) -> Result<ProvisionResult> {
+    async fn create_new_link(&self, nostr_pubkey: &str, handle: &str) -> Result<ProvisionResult> {
         let (signing_key_id, signing_keypair) = self
             .key_store
             .generate_keypair("signing-key")
@@ -509,8 +506,17 @@ mod tests {
 
     #[async_trait]
     impl AccountLinkStore for MockLinkStore {
-        async fn get_link_by_pubkey(&self, nostr_pubkey: &str) -> Result<Option<AccountLinkRecord>> {
-            Ok(self.links.records.lock().unwrap().get(nostr_pubkey).cloned())
+        async fn get_link_by_pubkey(
+            &self,
+            nostr_pubkey: &str,
+        ) -> Result<Option<AccountLinkRecord>> {
+            Ok(self
+                .links
+                .records
+                .lock()
+                .unwrap()
+                .get(nostr_pubkey)
+                .cloned())
         }
 
         async fn get_link_by_handle(&self, handle: &str) -> Result<Option<AccountLinkRecord>> {
@@ -546,7 +552,11 @@ mod tests {
             Ok(record)
         }
 
-        async fn mark_link_ready(&self, nostr_pubkey: &str, did: &str) -> Result<AccountLinkRecord> {
+        async fn mark_link_ready(
+            &self,
+            nostr_pubkey: &str,
+            did: &str,
+        ) -> Result<AccountLinkRecord> {
             let mut records = self.links.records.lock().unwrap();
             let record = records.get_mut(nostr_pubkey).expect("link must exist");
             record.did = Some(did.to_string());
@@ -572,16 +582,14 @@ mod tests {
         }
     }
 
-    fn make_provisioner(
-        links: SharedLinks,
-        plc_fail: bool,
-        pds_fail: bool,
-    ) -> (
-        AccountProvisioner<MockKeyStore, MockPlcClient, MockPdsCreator, MockLinkStore>,
-        Arc<Mutex<Vec<String>>>,
-        Arc<Mutex<Vec<PlcOperation>>>,
-        Arc<Mutex<Vec<(String, String)>>>,
-    ) {
+    struct ProvisionerHarness {
+        provisioner: AccountProvisioner<MockKeyStore, MockPlcClient, MockPdsCreator, MockLinkStore>,
+        generated: Arc<Mutex<Vec<String>>>,
+        plc_calls: Arc<Mutex<Vec<PlcOperation>>>,
+        pds_calls: Arc<Mutex<Vec<(String, String)>>>,
+    }
+
+    fn make_provisioner(links: SharedLinks, plc_fail: bool, pds_fail: bool) -> ProvisionerHarness {
         let generated = Arc::new(Mutex::new(Vec::new()));
         let plc_calls = Arc::new(Mutex::new(Vec::new()));
         let pds_calls = Arc::new(Mutex::new(Vec::new()));
@@ -604,7 +612,12 @@ mod tests {
             handle_domain: "divine.video".to_string(),
         };
 
-        (provisioner, generated, plc_calls, pds_calls)
+        ProvisionerHarness {
+            provisioner,
+            generated,
+            plc_calls,
+            pds_calls,
+        }
     }
 
     fn failed_record(pubkey: &str, handle: &str) -> AccountLinkRecord {
@@ -627,10 +640,10 @@ mod tests {
     #[tokio::test]
     async fn successful_provisioning_flow_uses_distinct_keys() {
         let links = SharedLinks::default();
-        let (provisioner, generated, plc_calls, pds_calls) =
-            make_provisioner(links.clone(), false, false);
+        let harness = make_provisioner(links.clone(), false, false);
 
-        let result = provisioner
+        let result = harness
+            .provisioner
             .provision_account("npub_abc123", "alice.divine.video")
             .await
             .expect("provisioning should succeed");
@@ -639,9 +652,9 @@ mod tests {
         assert_eq!(stored.provisioning_state, ProvisioningState::Ready);
         assert_eq!(stored.did.as_deref(), Some("did:plc:testaccount"));
         assert_ne!(stored.signing_key_id, stored.plc_rotation_key_ref);
-        assert_eq!(generated.lock().unwrap().len(), 2);
-        assert_eq!(plc_calls.lock().unwrap().len(), 1);
-        assert_eq!(pds_calls.lock().unwrap().len(), 1);
+        assert_eq!(harness.generated.lock().unwrap().len(), 2);
+        assert_eq!(harness.plc_calls.lock().unwrap().len(), 1);
+        assert_eq!(harness.pds_calls.lock().unwrap().len(), 1);
         assert_eq!(result.signing_key_id, stored.signing_key_id);
     }
 
@@ -650,27 +663,27 @@ mod tests {
         let links = SharedLinks::default();
         links.insert(failed_record("npub_taken", "alice.divine.video"));
 
-        let (provisioner, generated, plc_calls, pds_calls) =
-            make_provisioner(links, false, false);
+        let harness = make_provisioner(links, false, false);
 
-        let err = provisioner
+        let err = harness
+            .provisioner
             .provision_account("npub_other", "alice.divine.video")
             .await
             .expect_err("duplicate handle should fail");
 
         assert!(err.to_string().contains("handle already taken"));
-        assert!(generated.lock().unwrap().is_empty());
-        assert!(plc_calls.lock().unwrap().is_empty());
-        assert!(pds_calls.lock().unwrap().is_empty());
+        assert!(harness.generated.lock().unwrap().is_empty());
+        assert!(harness.plc_calls.lock().unwrap().is_empty());
+        assert!(harness.pds_calls.lock().unwrap().is_empty());
     }
 
     #[tokio::test]
     async fn pds_failure_marks_link_failed() {
         let links = SharedLinks::default();
-        let (provisioner, _generated, plc_calls, pds_calls) =
-            make_provisioner(links.clone(), false, true);
+        let harness = make_provisioner(links.clone(), false, true);
 
-        let err = provisioner
+        let err = harness
+            .provisioner
             .provision_account("npub_fail", "carol.divine.video")
             .await
             .expect_err("PDS failure should bubble up");
@@ -683,8 +696,8 @@ mod tests {
             .as_deref()
             .unwrap_or_default()
             .contains("PDS"));
-        assert_eq!(plc_calls.lock().unwrap().len(), 1);
-        assert_eq!(pds_calls.lock().unwrap().len(), 1);
+        assert_eq!(harness.plc_calls.lock().unwrap().len(), 1);
+        assert_eq!(harness.pds_calls.lock().unwrap().len(), 1);
         assert!(err.to_string().contains("creating account on PDS"));
     }
 
@@ -693,10 +706,10 @@ mod tests {
         let links = SharedLinks::default();
         links.insert(failed_record("npub_retry", "dana.divine.video"));
 
-        let (provisioner, generated, plc_calls, pds_calls) =
-            make_provisioner(links.clone(), false, false);
+        let harness = make_provisioner(links.clone(), false, false);
 
-        let result = provisioner
+        let result = harness
+            .provisioner
             .provision_account("npub_retry", "dana.divine.video")
             .await
             .expect("retry should recover");
@@ -704,9 +717,9 @@ mod tests {
         let stored = links.get("npub_retry");
         assert_eq!(stored.provisioning_state, ProvisioningState::Ready);
         assert_eq!(stored.did.as_deref(), Some("did:plc:retryme"));
-        assert!(generated.lock().unwrap().is_empty());
-        assert!(plc_calls.lock().unwrap().is_empty());
-        assert_eq!(pds_calls.lock().unwrap().len(), 1);
+        assert!(harness.generated.lock().unwrap().is_empty());
+        assert!(harness.plc_calls.lock().unwrap().is_empty());
+        assert_eq!(harness.pds_calls.lock().unwrap().len(), 1);
         assert_eq!(result.did, "did:plc:retryme");
     }
 

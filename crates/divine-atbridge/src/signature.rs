@@ -25,8 +25,8 @@ pub fn verify_nostr_event(event: &NostrEvent) -> Result<bool> {
         &event.tags,
         &event.content
     ]);
-    let canonical_str = serde_json::to_string(&canonical)
-        .context("failed to serialize canonical event")?;
+    let canonical_str =
+        serde_json::to_string(&canonical).context("failed to serialize canonical event")?;
 
     let mut hasher = Sha256::new();
     hasher.update(canonical_str.as_bytes());
@@ -39,15 +39,11 @@ pub fn verify_nostr_event(event: &NostrEvent) -> Result<bool> {
     }
 
     // 3. Parse the pubkey and signature from hex
-    let pubkey_bytes = hex::decode(&event.pubkey)
-        .context("invalid pubkey hex")?;
-    let xonly = XOnlyPublicKey::from_slice(&pubkey_bytes)
-        .context("invalid pubkey")?;
+    let pubkey_bytes = hex::decode(&event.pubkey).context("invalid pubkey hex")?;
+    let xonly = XOnlyPublicKey::from_slice(&pubkey_bytes).context("invalid pubkey")?;
 
-    let sig_bytes = hex::decode(&event.sig)
-        .context("invalid signature hex")?;
-    let sig = Signature::from_slice(&sig_bytes)
-        .context("invalid signature")?;
+    let sig_bytes = hex::decode(&event.sig).context("invalid signature hex")?;
+    let sig = Signature::from_slice(&sig_bytes).context("invalid signature")?;
 
     // 4. Verify the BIP-340 Schnorr signature
     let msg = Message::from_digest(computed_id);
@@ -119,9 +115,8 @@ mod tests {
 
         let result = verify_nostr_event(&event);
         // Should either return Ok(false) or an error
-        match result {
-            Ok(valid) => assert!(!valid, "corrupted sig should not verify"),
-            Err(_) => {} // also acceptable
+        if let Ok(valid) = result {
+            assert!(!valid, "corrupted sig should not verify");
         }
     }
 
@@ -135,9 +130,8 @@ mod tests {
         event.pubkey = hex::encode(other_xonly.serialize());
 
         let result = verify_nostr_event(&event);
-        match result {
-            Ok(valid) => assert!(!valid, "wrong pubkey should not verify"),
-            Err(_) => {}
+        if let Ok(valid) = result {
+            assert!(!valid, "wrong pubkey should not verify");
         }
     }
 
@@ -147,9 +141,8 @@ mod tests {
         event.content = "tampered content".to_string();
 
         let result = verify_nostr_event(&event);
-        match result {
-            Ok(valid) => assert!(!valid, "tampered content should not verify"),
-            Err(_) => {}
+        if let Ok(valid) = result {
+            assert!(!valid, "tampered content should not verify");
         }
     }
 

@@ -1,14 +1,12 @@
-#[path = "../src/main.rs"]
-mod feedgen;
-
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
+use divine_feedgen::app;
 use serde_json::Value;
 use tower::util::ServiceExt;
 
 #[tokio::test]
 async fn feed_skeleton_describes_latest_and_trending_feeds() {
-    let app = feedgen::app();
+    let app = app();
 
     let response = app
         .oneshot(
@@ -25,7 +23,7 @@ async fn feed_skeleton_describes_latest_and_trending_feeds() {
 
 #[tokio::test]
 async fn feed_skeleton_latest_returns_divine_owned_posts() {
-    let app = feedgen::app();
+    let app = app();
 
     let response = app
         .oneshot(
@@ -49,7 +47,7 @@ async fn feed_skeleton_latest_returns_divine_owned_posts() {
 
 #[tokio::test]
 async fn feed_skeleton_trending_returns_distinct_ranked_posts() {
-    let app = feedgen::app();
+    let app = app();
 
     let response = app
         .oneshot(

@@ -5,7 +5,11 @@
 
 use anyhow::{anyhow, Context, Result};
 use divine_bridge_types::NostrEvent;
+use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
+use tokio::net::TcpStream;
+use tokio_tungstenite::tungstenite::Message;
+use tokio_tungstenite::{connect_async, MaybeTlsStream, WebSocketStream};
 
 // ---------------------------------------------------------------------------
 // Nostr protocol types
@@ -48,10 +52,11 @@ pub enum RelayMessage {
 
 /// Parse a raw JSON relay message into a `RelayMessage`.
 pub fn parse_relay_message(raw: &str) -> Result<RelayMessage> {
-    let value: serde_json::Value =
-        serde_json::from_str(raw).context("invalid JSON from relay")?;
+    let value: serde_json::Value = serde_json::from_str(raw).context("invalid JSON from relay")?;
 
-    let arr = value.as_array().ok_or_else(|| anyhow!("expected JSON array"))?;
+    let arr = value
+        .as_array()
+        .ok_or_else(|| anyhow!("expected JSON array"))?;
 
     let msg_type = arr
         .first()
@@ -117,6 +122,62 @@ pub trait RelayConnection: Send {
     async fn close(&mut self) -> Result<()>;
 }
 
+pub struct WebSocketRelayConnection {
+    stream: WebSocketStream<MaybeTlsStream<TcpStream>>,
+}
+
+impl WebSocketRelayConnection {
+    pub async fn connect(relay_url: &str) -> Result<Self> {
+        let (stream, _) = connect_async(relay_url)
+            .await
+            .with_context(|| format!("failed to connect to relay {relay_url}"))?;
+        Ok(Self { stream })
+    }
+}
+
+#[async_trait::async_trait]
+impl RelayConnection for WebSocketRelayConnection {
+    async fn send(&mut self, msg: String) -> Result<()> {
+        self.stream
+            .send(Message::Text(msg))
+            .await
+            .context("failed to send websocket message")?;
+        Ok(())
+    }
+
+    async fn recv(&mut self) -> Result<Option<String>> {
+        while let Some(message) = self.stream.next().await {
+            match message.context("failed to receive websocket frame")? {
+                Message::Text(text) => return Ok(Some(text)),
+                Message::Binary(bytes) => {
+                    let text = String::from_utf8(bytes.to_vec())
+                        .context("binary relay frame was not utf-8")?;
+                    return Ok(Some(text));
+                }
+                Message::Ping(payload) => {
+                    self.stream
+                        .send(Message::Pong(payload))
+                        .await
+                        .context("failed to reply to relay ping")?;
+                }
+                Message::Pong(_) => {}
+                Message::Close(_) => return Ok(None),
+                Message::Frame(_) => {}
+            }
+        }
+
+        Ok(None)
+    }
+
+    async fn close(&mut self) -> Result<()> {
+        self.stream
+            .close(None)
+            .await
+            .context("failed to close relay websocket")?;
+        Ok(())
+    }
+}
+
 // ---------------------------------------------------------------------------
 // NostrConsumer
 // ---------------------------------------------------------------------------
@@ -146,12 +207,8 @@ impl NostrConsumer {
         if let Some(ts) = self.last_seen_timestamp {
             f.since = Some(ts);
         }
-        serde_json::to_string(&serde_json::json!([
-            "REQ",
-            self.subscription_id,
-            f
-        ]))
-        .expect("REQ serialization cannot fail")
+        serde_json::to_string(&serde_json::json!(["REQ", self.subscription_id, f]))
+            .expect("REQ serialization cannot fail")
     }
 
     /// Run the consumer loop on the provided connection.

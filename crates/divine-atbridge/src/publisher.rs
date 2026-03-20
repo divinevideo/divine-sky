@@ -6,6 +6,9 @@
 use anyhow::{Context, Result};
 use divine_bridge_types::BlobRef;
 use serde::{Deserialize, Serialize};
+use std::time::Duration;
+
+use crate::pipeline::{BlobUploader, PdsPublisher, PublishedRecord};
 
 // ---------------------------------------------------------------------------
 // Response types
@@ -73,7 +76,11 @@ impl PdsClient {
         Self {
             base_url: base_url.into(),
             auth_token: auth_token.into(),
-            client: reqwest::Client::new(),
+            client: reqwest::Client::builder()
+                .connect_timeout(Duration::from_secs(5))
+                .timeout(Duration::from_secs(60))
+                .build()
+                .expect("reqwest client builder should succeed"),
         }
     }
 
@@ -105,11 +112,7 @@ impl PdsClient {
             .await
             .context("failed to parse uploadBlob response")?;
 
-        let cid = upload
-            .blob
-            .ref_link
-            .map(|r| r.link)
-            .unwrap_or_default();
+        let cid = upload.blob.ref_link.map(|r| r.link).unwrap_or_default();
 
         Ok(BlobRef::new(cid, upload.blob.mime_type, upload.blob.size))
     }
@@ -199,12 +202,7 @@ impl PdsClient {
     /// Delete a record from a PDS repository.
     ///
     /// Calls `POST /xrpc/com.atproto.repo.deleteRecord`.
-    pub async fn delete_record(
-        &self,
-        did: &str,
-        collection: &str,
-        rkey: &str,
-    ) -> Result<()> {
+    pub async fn delete_record(&self, did: &str, collection: &str, rkey: &str) -> Result<()> {
         let url = format!("{}/xrpc/com.atproto.repo.deleteRecord", self.base_url);
 
         let body = serde_json::json!({
@@ -231,6 +229,46 @@ impl PdsClient {
         }
 
         Ok(())
+    }
+}
+
+#[async_trait::async_trait]
+impl BlobUploader for PdsClient {
+    async fn upload_blob(&self, data: &[u8], mime_type: &str) -> Result<BlobRef> {
+        PdsClient::upload_blob(self, data, mime_type).await
+    }
+}
+
+#[async_trait::async_trait]
+impl PdsPublisher for PdsClient {
+    async fn put_record(
+        &self,
+        did: &str,
+        collection: &str,
+        rkey: &str,
+        record: &serde_json::Value,
+    ) -> Result<String> {
+        Ok(PdsClient::put_record(self, did, collection, rkey, record)
+            .await?
+            .uri)
+    }
+
+    async fn put_record_with_meta(
+        &self,
+        did: &str,
+        collection: &str,
+        rkey: &str,
+        record: &serde_json::Value,
+    ) -> Result<PublishedRecord> {
+        let response = PdsClient::put_record(self, did, collection, rkey, record).await?;
+        Ok(PublishedRecord {
+            at_uri: response.uri,
+            cid: Some(response.cid),
+        })
+    }
+
+    async fn delete_record(&self, did: &str, collection: &str, rkey: &str) -> Result<()> {
+        PdsClient::delete_record(self, did, collection, rkey).await
     }
 }
 

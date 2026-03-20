@@ -5,8 +5,8 @@
 use anyhow::Result;
 use diesel::prelude::*;
 use diesel::sql_query;
-use diesel::PgConnection;
 use diesel::sql_types::{Nullable, Text};
+use diesel::PgConnection;
 
 use divine_bridge_types::PublishState;
 
@@ -18,10 +18,7 @@ use crate::schema::*;
 // ---------------------------------------------------------------------------
 
 /// Look up an account link by Nostr pubkey.
-pub fn get_account_by_pubkey(
-    conn: &mut PgConnection,
-    pubkey: &str,
-) -> Result<Option<AccountLink>> {
+pub fn get_account_by_pubkey(conn: &mut PgConnection, pubkey: &str) -> Result<Option<AccountLink>> {
     let result = account_links::table
         .find(pubkey)
         .first::<AccountLink>(conn)
@@ -39,10 +36,7 @@ pub fn get_account_by_did(conn: &mut PgConnection, did: &str) -> Result<Option<A
 }
 
 /// Look up an account link by handle.
-pub fn get_account_by_handle(
-    conn: &mut PgConnection,
-    handle: &str,
-) -> Result<Option<AccountLink>> {
+pub fn get_account_by_handle(conn: &mut PgConnection, handle: &str) -> Result<Option<AccountLink>> {
     let result = account_links::table
         .filter(account_links::handle.eq(handle))
         .first::<AccountLink>(conn)
@@ -182,10 +176,7 @@ pub fn disable_account_link(
 // ---------------------------------------------------------------------------
 
 /// Get the current offset for a named source (relay).
-pub fn get_ingest_offset(
-    conn: &mut PgConnection,
-    source: &str,
-) -> Result<Option<IngestOffset>> {
+pub fn get_ingest_offset(conn: &mut PgConnection, source: &str) -> Result<Option<IngestOffset>> {
     let result = ingest_offsets::table
         .find(source)
         .first::<IngestOffset>(conn)
@@ -230,6 +221,15 @@ pub fn insert_asset(
 ) -> Result<AssetManifestEntry> {
     let result = diesel::insert_into(asset_manifest::table)
         .values(entry)
+        .on_conflict(asset_manifest::source_sha256)
+        .do_update()
+        .set((
+            asset_manifest::blossom_url.eq(entry.blossom_url),
+            asset_manifest::at_blob_cid.eq(entry.at_blob_cid),
+            asset_manifest::mime.eq(entry.mime),
+            asset_manifest::bytes.eq(entry.bytes),
+            asset_manifest::is_derivative.eq(entry.is_derivative),
+        ))
         .get_result::<AssetManifestEntry>(conn)?;
     Ok(result)
 }
@@ -269,6 +269,32 @@ pub fn insert_record_mapping(
 ) -> Result<RecordMapping> {
     let result = diesel::insert_into(record_mappings::table)
         .values(mapping)
+        .on_conflict(record_mappings::nostr_event_id)
+        .do_update()
+        .set((
+            record_mappings::did.eq(mapping.did),
+            record_mappings::collection.eq(mapping.collection),
+            record_mappings::rkey.eq(mapping.rkey),
+            record_mappings::at_uri.eq(mapping.at_uri),
+            record_mappings::cid.eq(mapping.cid),
+            record_mappings::status.eq(mapping.status),
+        ))
+        .get_result::<RecordMapping>(conn)?;
+    Ok(result)
+}
+
+/// Update record mapping status and optional CID.
+pub fn update_record_mapping_status(
+    conn: &mut PgConnection,
+    nostr_event_id: &str,
+    cid: Option<&str>,
+    status: &str,
+) -> Result<RecordMapping> {
+    let result = diesel::update(record_mappings::table.find(nostr_event_id))
+        .set((
+            record_mappings::cid.eq(cid),
+            record_mappings::status.eq(status),
+        ))
         .get_result::<RecordMapping>(conn)?;
     Ok(result)
 }
@@ -327,10 +353,7 @@ pub fn get_pending_jobs(conn: &mut PgConnection, limit: i64) -> Result<Vec<Publi
 }
 
 /// Insert a new publish job.
-pub fn insert_publish_job(
-    conn: &mut PgConnection,
-    job: &NewPublishJob,
-) -> Result<PublishJob> {
+pub fn insert_publish_job(conn: &mut PgConnection, job: &NewPublishJob) -> Result<PublishJob> {
     let result = diesel::insert_into(publish_jobs::table)
         .values(job)
         .get_result::<PublishJob>(conn)?;

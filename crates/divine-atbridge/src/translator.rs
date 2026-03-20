@@ -79,7 +79,7 @@ fn get_tags<'a>(event: &'a NostrEvent, name: &str) -> Vec<&'a str> {
         .iter()
         .filter(|t| t.len() >= 2 && t[0] == name)
         .map(|t| t[1].as_str())
-    .collect()
+        .collect()
 }
 
 /// Parse an `imeta` tag to extract a named field.
@@ -88,7 +88,9 @@ fn get_imeta_field<'a>(event: &'a NostrEvent, field: &str) -> Option<&'a str> {
     for tag in &event.tags {
         if tag.first().map(|s| s.as_str()) == Some("imeta") {
             for entry in &tag[1..] {
-                if let Some(val) = entry.strip_prefix(field).and_then(|rest| rest.strip_prefix(' '))
+                if let Some(val) = entry
+                    .strip_prefix(field)
+                    .and_then(|rest| rest.strip_prefix(' '))
                 {
                     return Some(val);
                 }
@@ -137,8 +139,22 @@ fn is_valid_rkey_char(c: char) -> bool {
     c.is_ascii_alphanumeric()
         || matches!(
             c,
-            '.' | '_' | '~' | ':' | '@' | '!' | '$' | '&' | '\'' | '(' | ')' | '*' | '+' | ','
-                | ';' | '=' | '-'
+            '.' | '_'
+                | '~'
+                | ':'
+                | '@'
+                | '!'
+                | '$'
+                | '&'
+                | '\''
+                | '('
+                | ')'
+                | '*'
+                | '+'
+                | ','
+                | ';'
+                | '='
+                | '-'
         )
 }
 
@@ -206,9 +222,7 @@ pub fn translate_nip71_to_post(event: &NostrEvent, blob_ref: &BlobRef) -> Result
                 type_: "com.atproto.label.defs#selfLabels".to_string(),
                 values: cw_values
                     .into_iter()
-                    .map(|v| SelfLabelValue {
-                        val: v.to_string(),
-                    })
+                    .map(|v| SelfLabelValue { val: v.to_string() })
                     .collect(),
             })
         }
@@ -252,7 +266,11 @@ mod tests {
     }
 
     fn make_blob_ref() -> BlobRef {
-        BlobRef::new("bafkreiexample".to_string(), "video/mp4".to_string(), 1024000)
+        BlobRef::new(
+            "bafkreiexample".to_string(),
+            "video/mp4".to_string(),
+            1024000,
+        )
     }
 
     #[test]
@@ -384,11 +402,7 @@ mod tests {
             "",
             vec![
                 vec!["title", "Test"],
-                vec![
-                    "imeta",
-                    "url https://example.com/v.mp4",
-                    "dim 1920x1080",
-                ],
+                vec!["imeta", "url https://example.com/v.mp4", "dim 1920x1080"],
                 vec!["alt", "Test alt"],
                 vec!["t", "test"],
                 vec!["content-warning", "graphic"],
@@ -417,15 +431,15 @@ mod tests {
         assert_eq!(json["embed"]["video"]["size"], 1024000);
 
         // Labels structure
-        assert_eq!(
-            json["labels"]["$type"],
-            "com.atproto.label.defs#selfLabels"
-        );
+        assert_eq!(json["labels"]["$type"], "com.atproto.label.defs#selfLabels");
         assert_eq!(json["labels"]["values"][0]["val"], "graphic");
 
         // Facets
         assert!(json["facets"].is_array());
-        assert_eq!(json["facets"][0]["features"][0]["$type"], "app.bsky.richtext.facet#tag");
+        assert_eq!(
+            json["facets"][0]["features"][0]["$type"],
+            "app.bsky.richtext.facet#tag"
+        );
     }
 
     #[test]

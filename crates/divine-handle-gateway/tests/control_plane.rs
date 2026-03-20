@@ -1,14 +1,12 @@
-#[path = "../src/main.rs"]
-mod gateway;
-
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
+use divine_handle_gateway::app;
 use serde_json::json;
 use tower::util::ServiceExt;
 
 #[tokio::test]
 async fn control_plane_opt_in_creates_pending_status() {
-    let app = gateway::app();
+    let app = app();
 
     let response = app
         .oneshot(
@@ -33,7 +31,7 @@ async fn control_plane_opt_in_creates_pending_status() {
 
 #[tokio::test]
 async fn control_plane_status_and_export_reflect_provisioned_link() {
-    let app = gateway::app();
+    let app = app();
 
     let provision_response = app
         .clone()
@@ -85,7 +83,7 @@ async fn control_plane_status_and_export_reflect_provisioned_link() {
 
 #[tokio::test]
 async fn control_plane_disable_blocks_host_resolution() {
-    let app = gateway::app();
+    let app = app();
 
     let _ = app
         .clone()

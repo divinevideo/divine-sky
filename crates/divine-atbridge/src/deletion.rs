@@ -177,10 +177,7 @@ mod tests {
     fn make_mapping(event_id: &str) -> RecordMapping {
         RecordMapping {
             nostr_event_id: event_id.to_string(),
-            at_uri: format!(
-                "at://did:plc:abc123/app.bsky.feed.post/{}",
-                event_id
-            ),
+            at_uri: format!("at://did:plc:abc123/app.bsky.feed.post/{}", event_id),
             did: "did:plc:abc123".to_string(),
             collection: "app.bsky.feed.post".to_string(),
             rkey: event_id.to_string(),

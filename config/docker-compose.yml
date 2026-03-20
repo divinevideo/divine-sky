@@ -1,4 +1,4 @@
-# Shared local services for workspace bootstrap and manual development.
+# Shared local stack for the bridge runtime path.
 services:
   postgres:
     image: postgres:16
@@ -16,6 +16,7 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
+
   minio:
     image: minio/minio
     restart: unless-stopped
@@ -31,5 +32,125 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
+
+  minio-init:
+    image: minio/mc:latest
+    restart: "no"
+    depends_on:
+      minio:
+        condition: service_healthy
+    environment:
+      MINIO_ALIAS: local
+      MINIO_ENDPOINT: http://minio:9000
+      MINIO_ROOT_USER: divine
+      MINIO_ROOT_PASSWORD: divine_dev
+      MINIO_BUCKETS: pds-blobs,bridge-blobs
+    volumes:
+      - ./minio-init.sh:/bootstrap/minio-init.sh:ro
+    entrypoint: ["/bin/sh", "/bootstrap/minio-init.sh"]
+
+  mock-blossom:
+    image: python:3.12-alpine
+    restart: unless-stopped
+    working_dir: /app
+    environment:
+      BLOSSOM_HOST: 0.0.0.0
+      BLOSSOM_PORT: 8080
+      BLOSSOM_SEED_DIR: /app/seed
+    volumes:
+      - ./mock-blossom:/app:ro
+    command: ["python", "/app/server.py"]
+    ports:
+      - "8080:8080"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://localhost:8080/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  mock-relay:
+    image: python:3.12-alpine
+    restart: unless-stopped
+    working_dir: /app
+    environment:
+      RELAY_HOST: 0.0.0.0
+      RELAY_PORT: 8765
+    volumes:
+      - ./mock-relay:/app:ro
+    command: ["sh", "-lc", "pip install --quiet websockets==12.0 && python /app/server.py"]
+    ports:
+      - "8765:8765"
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import socket; socket.create_connection(('localhost', 8765), 2).close()\""]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  pds:
+    image: ghcr.io/blacksky-algorithms/rsky-pds:latest
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
+    environment:
+      PDS_HOSTNAME: pds.divine.test
+      PDS_SERVICE_DID: did:web:pds.divine.test
+      PDS_SERVICE_HANDLE_DOMAINS: divine.video
+      DATABASE_URL: postgres://divine:divine_dev@postgres:5432/divine_bridge
+      AWS_ENDPOINT: http://minio:9000
+      AWS_ACCESS_KEY_ID: divine
+      AWS_SECRET_ACCESS_KEY: divine_dev
+      AWS_REGION: us-east-1
+      AWS_DEFAULT_REGION: us-east-1
+      PDS_DID_PLC_URL: https://plc.directory
+      PDS_BSKY_APP_VIEW_URL: https://api.bsky.app
+      PDS_BSKY_APP_VIEW_DID: did:web:api.bsky.app
+      PDS_ADMIN_PASSWORD: divine_dev_password
+      RUST_LOG: info
+    ports:
+      - "2583:2583"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://localhost:2583/xrpc/_health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  bridge:
+    image: rust:1.82-bookworm
+    restart: unless-stopped
+    working_dir: /workspace
+    depends_on:
+      postgres:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+      mock-blossom:
+        condition: service_healthy
+      mock-relay:
+        condition: service_healthy
+      pds:
+        condition: service_healthy
+    environment:
+      RELAY_URL: ws://mock-relay:8765
+      RELAY_SOURCE_NAME: local-stack-relay
+      PDS_URL: http://pds:2583
+      PDS_AUTH_TOKEN: local-dev-token
+      BLOSSOM_URL: http://mock-blossom:8080
+      DATABASE_URL: postgres://divine:divine_dev@postgres:5432/divine_bridge
+      S3_ENDPOINT: http://minio:9000
+      S3_BUCKET: bridge-blobs
+    volumes:
+      - ..:/workspace
+    command: ["bash", "-lc", "cargo run -p divine-atbridge"]
+    healthcheck:
+      test: ["CMD-SHELL", "bash -lc 'exec 3<>/dev/tcp/pds/2583 && exec 4<>/dev/tcp/mock-relay/8765'"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
 volumes:
   pgdata:

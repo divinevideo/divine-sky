@@ -46,3 +46,13 @@ At minimum, each record needs `nostr_pubkey`, `handle`, `did`, `provisioning_sta
 - It must stop DID resolution immediately when a link is `disabled`.
 
 The bridge and PDS remain responsible for publishing records, storing blobs, and serving ATProto APIs. `login.divine.video` should hand those concerns off rather than embedding them directly.
+
+## Runtime Handoff
+
+When a link reaches `ready`, the bridge runtime consumes that state through the shared `account_links` lifecycle contract. Disabling a link must prevent future handle resolution and must cause the bridge to skip further publish attempts for that pubkey.
+
+For launch, treat `login.divine.video` and the bridge as one operational chain:
+
+- control plane writes consent and provisioning state
+- bridge reads ready state and relay offsets
+- PDS executes blob and record writes with the configured auth token

@@ -246,7 +246,7 @@ Expected: PASS
 - Create: `crates/divine-atbridge/tests/media_lineage.rs`
 - Create: `docs/runbooks/media-path.md`
 
-- [ ] **Step 1: Choose one media-path architecture and delete the split**
+- [x] **Step 1: Choose one media-path architecture and delete the split**
 
 Decision:
 - either `divine-video-worker` becomes the real fetch/verify/upload service
@@ -254,7 +254,7 @@ Decision:
 
 Do not keep two partial paths.
 
-- [ ] **Step 2: Write failing tests for hash-based fetch and manifest persistence**
+- [x] **Step 2: Write failing tests for hash-based fetch and manifest persistence**
 
 Cover:
 - fetch by expected Blossom hash
@@ -266,15 +266,15 @@ Cover:
 Run: `cargo test -p divine-atbridge media_lineage -- --nocapture`
 Expected: FAIL because the current flow is URL-based and does not persist full lineage
 
-- [ ] **Step 3: Implement the real media contract**
+- [x] **Step 3: Implement the real media contract**
 
 The pipeline must carry expected source hash, destination CID, MIME type, size, and publish status.
 
-- [ ] **Step 4: Add safe network behavior for video-sized fetches**
+- [x] **Step 4: Add safe network behavior for video-sized fetches**
 
 Set explicit timeouts and avoid unbounded buffering assumptions where possible.
 
-- [ ] **Step 5: Re-run media lineage tests**
+- [x] **Step 5: Re-run media lineage tests**
 
 Run: `cargo test -p divine-atbridge media_lineage -- --nocapture`
 Expected: PASS
@@ -288,16 +288,16 @@ Expected: PASS
 - Modify: `crates/divine-atbridge/src/publisher.rs`
 - Create: `crates/divine-atbridge/tests/publish_path_integration.rs`
 
-- [ ] **Step 1: Replace the stub executable with a real service loop**
+- [x] **Step 1: Replace the stub executable with a real service loop**
 
 The binary must wire real DB-backed stores, relay consumer, and PDS/blob collaborators.
 
-- [ ] **Step 2: Write a failing integration test for the real publish path**
+- [x] **Step 2: Write a failing integration test for the real publish path**
 
 Run: `cargo test -p divine-atbridge publish_path_integration -- --nocapture`
 Expected: FAIL because the service loop is not fully wired yet
 
-- [ ] **Step 3: Implement the concrete adapters**
+- [x] **Step 3: Implement the concrete adapters**
 
 Required collaborators:
 - DB-backed account store
@@ -305,7 +305,7 @@ Required collaborators:
 - hash-verifying Blossom fetcher
 - real PDS publisher/blob uploader
 
-- [ ] **Step 4: Re-run the publish integration test**
+- [x] **Step 4: Re-run the publish integration test**
 
 Run: `cargo test -p divine-atbridge publish_path_integration -- --nocapture`
 Expected: PASS
@@ -323,7 +323,7 @@ Expected: PASS
 - Create: `crates/divine-atbridge/tests/e2e_local_stack.rs`
 - Create: `docs/runbooks/pds-operations.md`
 
-- [ ] **Step 1: Expand the local stack to cover the real publish path**
+- [x] **Step 1: Expand the local stack to cover the real publish path**
 
 Bring up:
 - PostgreSQL
@@ -334,7 +334,7 @@ Bring up:
 
 Add healthchecks.
 
-- [ ] **Step 2: Write failing end-to-end tests**
+- [x] **Step 2: Write failing end-to-end tests**
 
 Cover:
 - NIP-71 publish to renderable AT post
@@ -345,11 +345,11 @@ Cover:
 Run: `cargo test -p divine-atbridge e2e_local_stack -- --nocapture`
 Expected: FAIL before wiring is complete
 
-- [ ] **Step 3: Implement one-way profile sync from Nostr kind `0`**
+- [x] **Step 3: Implement one-way profile sync from Nostr kind `0`**
 
 Map display name, bio, avatar, banner, and website.
 
-- [ ] **Step 4: Re-run end-to-end tests**
+- [x] **Step 4: Re-run end-to-end tests**
 
 Run: `cargo test -p divine-atbridge e2e_local_stack -- --nocapture`
 Expected: PASS
@@ -365,16 +365,16 @@ Expected: PASS
 - Create: `crates/divine-feedgen/tests/feed_skeleton.rs`
 - Modify: `Cargo.toml`
 
-- [ ] **Step 1: Write failing feed skeleton tests**
+- [x] **Step 1: Write failing feed skeleton tests**
 
 Run: `cargo test -p divine-feedgen feed_skeleton -- --nocapture`
 Expected: FAIL because the crate does not exist yet
 
-- [ ] **Step 2: Implement latest and trending feed skeleton endpoints**
+- [x] **Step 2: Implement latest and trending feed skeleton endpoints**
 
 Back them with DiVine-owned data only; do not require full firehose ingestion.
 
-- [ ] **Step 3: Re-run feed tests**
+- [x] **Step 3: Re-run feed tests**
 
 Run: `cargo test -p divine-feedgen feed_skeleton -- --nocapture`
 Expected: PASS
@@ -388,16 +388,16 @@ Expected: PASS
 - Create: `crates/divine-moderation-adapter/tests/label_mapping.rs`
 - Modify: `Cargo.toml`
 
-- [ ] **Step 1: Write failing label mapping tests**
+- [x] **Step 1: Write failing label mapping tests**
 
 Run: `cargo test -p divine-moderation-adapter label_mapping -- --nocapture`
 Expected: FAIL because the crate does not exist yet
 
-- [ ] **Step 2: Implement DiVine label translation and moderation queue hooks**
+- [x] **Step 2: Implement DiVine label translation and moderation queue hooks**
 
 Keep inbound moderation human-reviewed.
 
-- [ ] **Step 3: Re-run label tests**
+- [x] **Step 3: Re-run label tests**
 
 Run: `cargo test -p divine-moderation-adapter label_mapping -- --nocapture`
 Expected: PASS
@@ -410,7 +410,7 @@ Expected: PASS
 - Modify: `docs/runbooks/login-divine-video.md`
 - Modify: `docs/runbooks/pds-operations.md`
 
-- [ ] **Step 1: Add the launch checklist**
+- [x] **Step 1: Add the launch checklist**
 
 Cover:
 - BGS crawl enablement
@@ -420,16 +420,18 @@ Cover:
 - DMCA/takedown handling
 - staged cohort rollout
 
-- [ ] **Step 2: Add a final operator bootstrap section**
+- [x] **Step 2: Add a final operator bootstrap section**
 
 A new developer should be able to stand up the full stack from one runbook.
 
-- [ ] **Step 3: Run the final verification suite**
+- [x] **Step 3: Run the final verification suite**
 
 Run: `cargo fmt --check && cargo clippy --workspace --all-targets -- -D warnings && cargo test --workspace`
 Expected: all commands exit `0`
 
-- [ ] **Step 4: Commit rollout readiness**
+For portable local verification on machines where `libpq` is not already exported into the linker environment, use `bash scripts/test-workspace.sh`; it configures `libpq` paths first and then runs `cargo test --workspace`.
+
+- [x] **Step 4: Commit rollout readiness**
 
 ```bash
 git add .

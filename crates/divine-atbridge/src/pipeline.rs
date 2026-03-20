@@ -7,9 +7,14 @@
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
-use divine_bridge_types::{BlobRef, NostrEvent};
+use divine_bridge_types::{BlobRef, NostrEvent, RecordStatus};
+use sha2::{Digest, Sha256};
+use std::time::Duration;
 
 use crate::deletion::validate_delete_request;
+use crate::profile_sync::{
+    build_profile_record, parse_kind0_profile, profile_assets, PROFILE_COLLECTION, PROFILE_RKEY,
+};
 use crate::signature::verify_nostr_event;
 use crate::translator::{derive_rkey, translate_nip71_to_post};
 
@@ -36,10 +41,37 @@ pub struct RecordMapping {
     pub deleted: bool,
 }
 
+/// Persisted lineage for a bridged media asset.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AssetManifestRecord {
+    pub source_sha256: String,
+    pub blossom_url: Option<String>,
+    pub at_blob_cid: String,
+    pub mime: String,
+    pub bytes: u64,
+    pub is_derivative: bool,
+}
+
+/// Metadata returned from a verified blob fetch.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FetchedBlob {
+    pub data: Vec<u8>,
+    pub mime_type: String,
+    pub source_sha256: String,
+}
+
+/// Metadata returned from a PDS write.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PublishedRecord {
+    pub at_uri: String,
+    pub cid: Option<String>,
+}
+
 /// Result of processing a single Nostr event through the pipeline.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProcessResult {
     Published { at_uri: String, rkey: String },
+    ProfileSynced { at_uri: String, rkey: String },
     Deleted { at_uri: String },
     Skipped { reason: String },
     Error { message: String },
@@ -62,6 +94,17 @@ pub trait RecordStore: Send + Sync {
     async fn save_record_mapping(&self, mapping: RecordMapping) -> Result<()>;
     async fn get_mapping_by_nostr_id(&self, event_id: &str) -> Result<Option<RecordMapping>>;
     async fn mark_deleted(&self, event_id: &str) -> Result<()>;
+    async fn save_asset_manifest(&self, _entry: AssetManifestRecord) -> Result<()> {
+        Ok(())
+    }
+    async fn update_record_mapping_status(
+        &self,
+        _event_id: &str,
+        _cid: Option<&str>,
+        _status: RecordStatus,
+    ) -> Result<()> {
+        Ok(())
+    }
 }
 
 /// Fetch a blob from a Blossom server (or other source).
@@ -69,6 +112,28 @@ pub trait RecordStore: Send + Sync {
 pub trait BlobFetcher: Send + Sync {
     /// Returns (bytes, mime_type).
     async fn fetch_blob(&self, url: &str) -> Result<(Vec<u8>, String)>;
+    async fn fetch_blob_verified(
+        &self,
+        url: &str,
+        expected_sha256: Option<&str>,
+    ) -> Result<FetchedBlob> {
+        let (data, mime_type) = self.fetch_blob(url).await?;
+        let actual_sha256 = hex::encode(Sha256::digest(&data));
+        if let Some(expected_sha256) = expected_sha256 {
+            anyhow::ensure!(
+                actual_sha256 == expected_sha256,
+                "SHA-256 mismatch: expected {}, got {}",
+                expected_sha256,
+                actual_sha256
+            );
+        }
+
+        Ok(FetchedBlob {
+            data,
+            mime_type,
+            source_sha256: actual_sha256,
+        })
+    }
 }
 
 /// Upload a blob to a PDS.
@@ -87,13 +152,71 @@ pub trait PdsPublisher: Send + Sync {
         rkey: &str,
         record: &serde_json::Value,
     ) -> Result<String>; // returns at_uri
-
-    async fn delete_record(
+    async fn put_record_with_meta(
         &self,
         did: &str,
         collection: &str,
         rkey: &str,
-    ) -> Result<()>;
+        record: &serde_json::Value,
+    ) -> Result<PublishedRecord> {
+        Ok(PublishedRecord {
+            at_uri: self.put_record(did, collection, rkey, record).await?,
+            cid: None,
+        })
+    }
+
+    async fn delete_record(&self, did: &str, collection: &str, rkey: &str) -> Result<()>;
+}
+
+/// Reqwest-backed blob fetcher with bounded network timeouts.
+#[derive(Debug, Clone)]
+pub struct HttpBlobFetcher {
+    client: reqwest::Client,
+}
+
+impl HttpBlobFetcher {
+    pub fn new(timeout: Duration) -> Result<Self> {
+        let client = reqwest::Client::builder()
+            .connect_timeout(Duration::from_secs(5))
+            .timeout(timeout)
+            .build()
+            .context("failed to build blob fetch client")?;
+        Ok(Self { client })
+    }
+}
+
+#[async_trait]
+impl BlobFetcher for HttpBlobFetcher {
+    async fn fetch_blob(&self, url: &str) -> Result<(Vec<u8>, String)> {
+        let response = self
+            .client
+            .get(url)
+            .send()
+            .await
+            .context("failed to fetch blob")?;
+
+        let status = response.status();
+        anyhow::ensure!(
+            status.is_success(),
+            "blob fetch failed with HTTP {}",
+            status
+        );
+
+        let mime_type = response
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or("application/octet-stream")
+            .to_string();
+
+        let data = response
+            .bytes()
+            .await
+            .context("failed to read blob response body")?
+            .to_vec();
+
+        Ok((data, mime_type))
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -113,6 +236,25 @@ fn get_video_url(event: &NostrEvent) -> Option<String> {
         if tag.first().map(|s| s.as_str()) == Some("imeta") {
             for entry in &tag[1..] {
                 if let Some(val) = entry.strip_prefix("url ") {
+                    return Some(val.to_string());
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Extract a source SHA-256 from `x` or `imeta x` tags.
+fn get_source_sha256(event: &NostrEvent) -> Option<String> {
+    for tag in &event.tags {
+        if tag.len() >= 2 && tag[0] == "x" {
+            return Some(tag[1].clone());
+        }
+    }
+    for tag in &event.tags {
+        if tag.first().map(|s| s.as_str()) == Some("imeta") {
+            for entry in &tag[1..] {
+                if let Some(val) = entry.strip_prefix("x ") {
                     return Some(val.to_string());
                 }
             }
@@ -231,6 +373,10 @@ where
             });
         }
 
+        if event.kind == 0 {
+            return self.handle_profile_event(event, &account).await;
+        }
+
         // 5. For video events (kinds 34235, 34236)
         if event.kind == 34235 || event.kind == 34236 {
             return self.handle_video_event(event, &account).await;
@@ -248,17 +394,18 @@ where
     ) -> Result<ProcessResult> {
         // Fetch blob from Blossom
         let video_url = get_video_url(event).context("no video URL found in event")?;
+        let expected_sha256 = get_source_sha256(event).context("no source hash found in event")?;
 
-        let (blob_data, mime_type) = self
+        let fetched = self
             .blob_fetcher
-            .fetch_blob(&video_url)
+            .fetch_blob_verified(&video_url, Some(&expected_sha256))
             .await
             .context("failed to fetch blob")?;
 
         // Upload blob to PDS
         let blob_ref = self
             .blob_uploader
-            .upload_blob(&blob_data, &mime_type)
+            .upload_blob(&fetched.data, &fetched.mime_type)
             .await
             .context("failed to upload blob to PDS")?;
 
@@ -273,9 +420,9 @@ where
         let rkey = derive_rkey(event);
         let collection = "app.bsky.feed.post";
 
-        let at_uri = self
+        let published = self
             .pds_publisher
-            .put_record(&account.did, collection, &rkey, &record_value)
+            .put_record_with_meta(&account.did, collection, &rkey, &record_value)
             .await
             .context("failed to write record to PDS")?;
 
@@ -283,7 +430,7 @@ where
         self.record_store
             .save_record_mapping(RecordMapping {
                 nostr_event_id: event.id.clone(),
-                at_uri: at_uri.clone(),
+                at_uri: published.at_uri.clone(),
                 did: account.did.clone(),
                 collection: collection.to_string(),
                 rkey: rkey.clone(),
@@ -292,7 +439,107 @@ where
             .await
             .context("failed to save record mapping")?;
 
-        Ok(ProcessResult::Published { at_uri, rkey })
+        self.record_store
+            .save_asset_manifest(AssetManifestRecord {
+                source_sha256: fetched.source_sha256,
+                blossom_url: Some(video_url),
+                at_blob_cid: blob_ref.cid().to_string(),
+                mime: fetched.mime_type,
+                bytes: blob_ref.size,
+                is_derivative: false,
+            })
+            .await
+            .context("failed to save asset manifest")?;
+
+        self.record_store
+            .update_record_mapping_status(
+                &event.id,
+                published.cid.as_deref(),
+                RecordStatus::Published,
+            )
+            .await
+            .context("failed to update record status")?;
+
+        Ok(ProcessResult::Published {
+            at_uri: published.at_uri,
+            rkey,
+        })
+    }
+
+    async fn handle_profile_event(
+        &self,
+        event: &NostrEvent,
+        account: &AccountLink,
+    ) -> Result<ProcessResult> {
+        let parsed = parse_kind0_profile(event).context("failed to parse kind 0 profile")?;
+        let assets = profile_assets(&parsed);
+
+        let avatar = match assets.avatar_url {
+            Some(url) => {
+                let fetched = self
+                    .blob_fetcher
+                    .fetch_blob_verified(&url, None)
+                    .await
+                    .context("failed to fetch avatar")?;
+                Some(
+                    self.blob_uploader
+                        .upload_blob(&fetched.data, &fetched.mime_type)
+                        .await
+                        .context("failed to upload avatar")?,
+                )
+            }
+            None => None,
+        };
+
+        let banner = match assets.banner_url {
+            Some(url) => {
+                let fetched = self
+                    .blob_fetcher
+                    .fetch_blob_verified(&url, None)
+                    .await
+                    .context("failed to fetch banner")?;
+                Some(
+                    self.blob_uploader
+                        .upload_blob(&fetched.data, &fetched.mime_type)
+                        .await
+                        .context("failed to upload banner")?,
+                )
+            }
+            None => None,
+        };
+
+        let record = build_profile_record(&parsed, avatar, banner);
+        let published = self
+            .pds_publisher
+            .put_record_with_meta(&account.did, PROFILE_COLLECTION, PROFILE_RKEY, &record)
+            .await
+            .context("failed to write profile to PDS")?;
+
+        self.record_store
+            .save_record_mapping(RecordMapping {
+                nostr_event_id: event.id.clone(),
+                at_uri: published.at_uri.clone(),
+                did: account.did.clone(),
+                collection: PROFILE_COLLECTION.to_string(),
+                rkey: PROFILE_RKEY.to_string(),
+                deleted: false,
+            })
+            .await
+            .context("failed to save profile mapping")?;
+
+        self.record_store
+            .update_record_mapping_status(
+                &event.id,
+                published.cid.as_deref(),
+                RecordStatus::Published,
+            )
+            .await
+            .context("failed to update profile status")?;
+
+        Ok(ProcessResult::ProfileSynced {
+            at_uri: published.at_uri,
+            rkey: PROFILE_RKEY.to_string(),
+        })
     }
 
     async fn handle_deletion(
@@ -373,11 +620,7 @@ mod tests {
     // Test helpers: create signed Nostr events
     // -----------------------------------------------------------------------
 
-    fn make_signed_event(
-        kind: u64,
-        content: &str,
-        tags: Vec<Vec<String>>,
-    ) -> NostrEvent {
+    fn make_signed_event(kind: u64, content: &str, tags: Vec<Vec<String>>) -> NostrEvent {
         let secp = Secp256k1::new();
         let keypair = Keypair::new(&secp, &mut OsRng);
         let (xonly, _) = keypair.x_only_public_key();
@@ -407,7 +650,9 @@ mod tests {
     }
 
     /// Build a signed video event with a URL tag.
-    fn make_video_event(pubkey: &str) -> NostrEvent {
+    fn make_video_event(_pubkey: &str) -> NostrEvent {
+        let payload = [0xDE, 0xAD, 0xBE, 0xEF];
+        let source_sha256 = hex::encode(Sha256::digest(payload));
         // We need a properly signed event, so we create one then override pubkey
         // But that would break the signature. Instead, we create a full signed event
         // and return it along with its pubkey.
@@ -418,17 +663,14 @@ mod tests {
             vec![
                 vec!["title".into(), "Test Video".into()],
                 vec!["url".into(), "https://blossom.example/video.mp4".into()],
+                vec!["x".into(), source_sha256],
                 vec!["d".into(), "test-video".into()],
             ],
         )
     }
 
     fn make_deletion_event_for(target_id: &str) -> NostrEvent {
-        make_signed_event(
-            5,
-            "",
-            vec![vec!["e".into(), target_id.into()]],
-        )
+        make_signed_event(5, "", vec![vec!["e".into(), target_id.into()]])
     }
 
     // -----------------------------------------------------------------------
@@ -442,7 +684,11 @@ mod tests {
     #[async_trait]
     impl AccountStore for MockAccountStore {
         async fn get_account_link(&self, nostr_pubkey: &str) -> Result<Option<AccountLink>> {
-            Ok(self.links.iter().find(|l| l.nostr_pubkey == nostr_pubkey).cloned())
+            Ok(self
+                .links
+                .iter()
+                .find(|l| l.nostr_pubkey == nostr_pubkey)
+                .cloned())
         }
     }
 
@@ -513,7 +759,11 @@ mod tests {
     #[async_trait]
     impl BlobUploader for MockBlobUploader {
         async fn upload_blob(&self, _data: &[u8], _mime_type: &str) -> Result<BlobRef> {
-            Ok(BlobRef::new("bafkreiuploadedblob".to_string(), "video/mp4".to_string(), 4))
+            Ok(BlobRef::new(
+                "bafkreiuploadedblob".to_string(),
+                "video/mp4".to_string(),
+                4,
+            ))
         }
     }
 
@@ -540,23 +790,33 @@ mod tests {
             rkey: &str,
             _record: &serde_json::Value,
         ) -> Result<String> {
-            self.published
-                .lock()
-                .unwrap()
-                .push((did.to_string(), collection.to_string(), rkey.to_string()));
+            self.published.lock().unwrap().push((
+                did.to_string(),
+                collection.to_string(),
+                rkey.to_string(),
+            ));
             Ok(format!("at://{}/{}/{}", did, collection, rkey))
         }
 
-        async fn delete_record(
+        async fn put_record_with_meta(
             &self,
             did: &str,
             collection: &str,
             rkey: &str,
-        ) -> Result<()> {
-            self.deleted
-                .lock()
-                .unwrap()
-                .push((did.to_string(), collection.to_string(), rkey.to_string()));
+            record: &serde_json::Value,
+        ) -> Result<PublishedRecord> {
+            Ok(PublishedRecord {
+                at_uri: self.put_record(did, collection, rkey, record).await?,
+                cid: Some("bafytestrecord".to_string()),
+            })
+        }
+
+        async fn delete_record(&self, did: &str, collection: &str, rkey: &str) -> Result<()> {
+            self.deleted.lock().unwrap().push((
+                did.to_string(),
+                collection.to_string(),
+                rkey.to_string(),
+            ));
             Ok(())
         }
     }
@@ -568,8 +828,13 @@ mod tests {
     fn make_pipeline(
         account_store: MockAccountStore,
         record_store: MockRecordStore,
-    ) -> BridgePipeline<MockAccountStore, MockRecordStore, MockBlobFetcher, MockBlobUploader, MockPdsPublisher>
-    {
+    ) -> BridgePipeline<
+        MockAccountStore,
+        MockRecordStore,
+        MockBlobFetcher,
+        MockBlobUploader,
+        MockPdsPublisher,
+    > {
         BridgePipeline::new(
             account_store,
             record_store,
@@ -673,7 +938,8 @@ mod tests {
         match &result {
             ProcessResult::Skipped { reason } => {
                 assert!(
-                    reason.contains("invalid signature") || reason.contains("signature verification error"),
+                    reason.contains("invalid signature")
+                        || reason.contains("signature verification error"),
                     "got: {}",
                     reason
                 );
@@ -695,10 +961,7 @@ mod tests {
         };
         let records = MockRecordStore::new().with_mappings(vec![RecordMapping {
             nostr_event_id: video_id.clone(),
-            at_uri: format!(
-                "at://did:plc:testuser/app.bsky.feed.post/{}",
-                video_id
-            ),
+            at_uri: format!("at://did:plc:testuser/app.bsky.feed.post/{}", video_id),
             did: "did:plc:testuser".to_string(),
             collection: "app.bsky.feed.post".to_string(),
             rkey: video_id.clone(),

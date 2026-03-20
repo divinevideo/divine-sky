@@ -188,10 +188,7 @@ mod tests {
     use divine_bridge_types::NostrEvent;
 
     /// Helper to create a minimal NostrEvent for testing.
-    fn make_event(
-        content: &str,
-        tags: Vec<Vec<&str>>,
-    ) -> NostrEvent {
+    fn make_event(content: &str, tags: Vec<Vec<&str>>) -> NostrEvent {
         NostrEvent {
             id: String::new(),
             pubkey: String::new(),
@@ -266,10 +263,7 @@ mod tests {
     fn long_content_truncated_to_300_graphemes() {
         // Create content that exceeds 300 graphemes
         let long_description = "a".repeat(350);
-        let event = make_event(
-            &long_description,
-            vec![vec!["title", "Title"]],
-        );
+        let event = make_event(&long_description, vec![vec!["title", "Title"]]);
 
         let (text, _facets) = build_post_text(&event);
 
@@ -294,7 +288,7 @@ mod tests {
         let event = make_event(
             "",
             vec![
-                vec!["title", "\u{1F44B} Hello"],  // 👋 Hello
+                vec!["title", "\u{1F44B} Hello"], // 👋 Hello
                 vec!["t", "wave"],
             ],
         );
@@ -324,14 +318,7 @@ mod tests {
 
     #[test]
     fn multiple_hashtags_correct_byte_positions() {
-        let event = make_event(
-            "",
-            vec![
-                vec!["t", "a"],
-                vec!["t", "bb"],
-                vec!["t", "ccc"],
-            ],
-        );
+        let event = make_event("", vec![vec!["t", "a"], vec!["t", "bb"], vec!["t", "ccc"]]);
 
         let (text, facets) = build_post_text(&event);
 
@@ -353,10 +340,7 @@ mod tests {
 
     #[test]
     fn content_used_when_no_summary() {
-        let event = make_event(
-            "Fallback content",
-            vec![vec!["title", "Title"]],
-        );
+        let event = make_event("Fallback content", vec![vec!["title", "Title"]]);
 
         let (text, _) = build_post_text(&event);
 
@@ -367,10 +351,7 @@ mod tests {
     fn summary_preferred_over_content() {
         let event = make_event(
             "Content ignored",
-            vec![
-                vec!["title", "Title"],
-                vec!["summary", "Summary wins"],
-            ],
+            vec![vec!["title", "Title"], vec!["summary", "Summary wins"]],
         );
 
         let (text, _) = build_post_text(&event);
@@ -393,10 +374,7 @@ mod tests {
         let json = serde_json::to_value(&facet).unwrap();
         assert_eq!(json["index"]["byteStart"], 0);
         assert_eq!(json["index"]["byteEnd"], 5);
-        assert_eq!(
-            json["features"][0]["$type"],
-            "app.bsky.richtext.facet#tag"
-        );
+        assert_eq!(json["features"][0]["$type"], "app.bsky.richtext.facet#tag");
         assert_eq!(json["features"][0]["tag"], "test");
     }
 }

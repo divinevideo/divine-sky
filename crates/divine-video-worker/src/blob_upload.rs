@@ -7,13 +7,7 @@ use async_trait::async_trait;
 #[async_trait]
 pub trait BlobStore: Send + Sync {
     /// Upload blob data to storage at key `{did}/{cid}`.
-    async fn upload_blob(
-        &self,
-        did: &str,
-        cid: &str,
-        data: &[u8],
-        mime_type: &str,
-    ) -> Result<()>;
+    async fn upload_blob(&self, did: &str, cid: &str, data: &[u8], mime_type: &str) -> Result<()>;
 
     /// Check if a blob already exists at key `{did}/{cid}`.
     async fn check_exists(&self, did: &str, cid: &str) -> Result<bool>;

@@ -1,26 +1,14 @@
-#[path = "../src/nostr_consumer.rs"]
-mod nostr_consumer;
-#[path = "../src/signature.rs"]
-mod signature;
-#[path = "../src/text_builder.rs"]
-mod text_builder;
-#[path = "../src/translator.rs"]
-mod translator;
-#[path = "../src/publisher.rs"]
-mod publisher;
-#[path = "../src/deletion.rs"]
-mod deletion;
-#[path = "../src/pipeline.rs"]
-mod pipeline;
-
 use std::collections::VecDeque;
 use std::sync::Mutex;
 
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
+use divine_atbridge::nostr_consumer::{NostrConsumer, NostrFilter, RelayConnection};
+use divine_atbridge::pipeline::{
+    AccountLink, AccountStore, BlobFetcher, BlobUploader, BridgePipeline, PdsPublisher,
+    ProcessResult, RecordMapping, RecordStore,
+};
 use divine_bridge_types::{BlobRef, NostrEvent};
-use nostr_consumer::{NostrConsumer, NostrFilter, RelayConnection};
-use pipeline::{AccountLink, AccountStore, BlobFetcher, BlobUploader, BridgePipeline, ProcessResult, PdsPublisher, RecordMapping, RecordStore};
 use secp256k1::rand::rngs::OsRng;
 use secp256k1::{Keypair, Secp256k1};
 use sha2::{Digest, Sha256};
@@ -191,16 +179,12 @@ impl PdsPublisher for TrackingPublisher {
         Ok("at://did:plc:test/app.bsky.feed.post/replay".to_string())
     }
 
-    async fn delete_record(
-        &self,
-        did: &str,
-        collection: &str,
-        rkey: &str,
-    ) -> Result<()> {
-        self.deleted
-            .lock()
-            .unwrap()
-            .push((did.to_string(), collection.to_string(), rkey.to_string()));
+    async fn delete_record(&self, did: &str, collection: &str, rkey: &str) -> Result<()> {
+        self.deleted.lock().unwrap().push((
+            did.to_string(),
+            collection.to_string(),
+            rkey.to_string(),
+        ));
         Ok(())
     }
 }
