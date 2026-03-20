@@ -3,6 +3,10 @@ name = "divine-moderation-adapter"
 version = "0.1.0"
 edition = "2021"
 
+[lib]
+name = "divine_moderation_adapter"
+path = "src/main.rs"
+
 [[bin]]
 name = "divine-moderation-adapter"
 path = "src/main.rs"
