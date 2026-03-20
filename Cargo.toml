@@ -3,7 +3,9 @@ members = [
     "crates/divine-atbridge",
     "crates/divine-bridge-db",
     "crates/divine-bridge-types",
+    "crates/divine-feedgen",
     "crates/divine-handle-gateway",
+    "crates/divine-moderation-adapter",
     "crates/divine-video-worker",
 ]
 resolver = "2"
