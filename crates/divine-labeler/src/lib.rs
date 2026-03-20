@@ -37,6 +37,10 @@ impl AppState {
 pub fn app_with_state(state: AppState) -> Router {
     Router::new()
         .route("/health", get(routes::health::handler))
+        .route(
+            "/xrpc/com.atproto.label.queryLabels",
+            get(routes::query_labels::handler),
+        )
         .with_state(state)
 }
 
