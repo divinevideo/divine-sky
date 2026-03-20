@@ -9,6 +9,7 @@ use anyhow::{Context, Result};
 use async_trait::async_trait;
 use divine_bridge_types::{BlobRef, NostrEvent};
 
+use crate::deletion::validate_delete_request;
 use crate::signature::verify_nostr_event;
 use crate::translator::{derive_rkey, translate_nip71_to_post};
 
@@ -328,8 +329,20 @@ where
             });
         }
 
+        if mapping.deleted {
+            return Ok(ProcessResult::Skipped {
+                reason: "record already deleted".to_string(),
+            });
+        }
+
+        if let Err(err) = validate_delete_request(event, &account.did, &mapping.did) {
+            return Ok(ProcessResult::Skipped {
+                reason: err.to_string(),
+            });
+        }
+
         self.pds_publisher
-            .delete_record(&account.did, &mapping.collection, &mapping.rkey)
+            .delete_record(&mapping.did, &mapping.collection, &mapping.rkey)
             .await
             .context("failed to delete record from PDS")?;
 
@@ -674,8 +687,6 @@ mod tests {
         // First create a video event to get its ID
         let video_event = make_video_event("test");
         let video_id = video_event.id.clone();
-        let video_pubkey = video_event.pubkey.clone();
-
         // Now make a deletion event referencing that video
         let del_event = make_deletion_event_for(&video_id);
 
@@ -708,6 +719,40 @@ mod tests {
         let deleted = pipeline.record_store.deleted.lock().unwrap();
         assert_eq!(deleted.len(), 1);
         assert_eq!(deleted[0], video_id);
+    }
+
+    #[tokio::test]
+    async fn deletion_owner_mismatch_skipped() {
+        let del_event = make_deletion_event_for("event-owned-by-someone-else");
+
+        let accounts = MockAccountStore {
+            links: vec![AccountLink {
+                nostr_pubkey: del_event.pubkey.clone(),
+                did: "did:plc:deleter".to_string(),
+                opted_in: true,
+            }],
+        };
+        let records = MockRecordStore::new().with_mappings(vec![RecordMapping {
+            nostr_event_id: "event-owned-by-someone-else".to_string(),
+            at_uri: "at://did:plc:owner/app.bsky.feed.post/rkey".to_string(),
+            did: "did:plc:owner".to_string(),
+            collection: "app.bsky.feed.post".to_string(),
+            rkey: "rkey".to_string(),
+            deleted: false,
+        }]);
+        let pipeline = make_pipeline(accounts, records);
+
+        let result = pipeline.process_event(&del_event).await;
+
+        match result {
+            ProcessResult::Skipped { reason } => {
+                assert!(reason.contains("does not own"), "got: {reason}");
+            }
+            other => panic!("expected Skipped, got {other:?}"),
+        }
+
+        assert!(pipeline.pds_publisher.deleted.lock().unwrap().is_empty());
+        assert!(pipeline.record_store.deleted.lock().unwrap().is_empty());
     }
 
     #[tokio::test]

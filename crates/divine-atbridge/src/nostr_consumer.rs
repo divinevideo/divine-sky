@@ -154,8 +154,10 @@ impl NostrConsumer {
         .expect("REQ serialization cannot fail")
     }
 
-    /// Run the consumer loop on the provided connection, invoking `on_event`
-    /// for every received event.  Returns when the connection closes.
+    /// Run the consumer loop on the provided connection.
+    ///
+    /// The callback must acknowledge successful processing by returning `Ok(())`.
+    /// The in-memory replay cursor only advances after that acknowledgement.
     pub async fn subscribe<C, F>(
         &mut self,
         conn: &mut C,
@@ -164,7 +166,7 @@ impl NostrConsumer {
     ) -> Result<()>
     where
         C: RelayConnection,
-        F: FnMut(NostrEvent) + Send,
+        F: FnMut(NostrEvent) -> Result<()> + Send,
     {
         // Send the subscription request.
         let req = self.build_req(filter);
@@ -177,9 +179,9 @@ impl NostrConsumer {
                     event,
                     subscription_id: _,
                 }) => {
-                    // Track cursor.
-                    self.last_seen_timestamp = Some(event.created_at);
-                    on_event(event);
+                    let created_at = event.created_at;
+                    on_event(event).context("event processing callback failed")?;
+                    self.last_seen_timestamp = Some(created_at);
                 }
                 Ok(RelayMessage::Eose { .. }) => {
                     // End of stored events — live tail starts now.
@@ -368,6 +370,7 @@ mod tests {
         consumer
             .subscribe(&mut conn, &filter, |ev| {
                 received.push(ev);
+                Ok(())
             })
             .await
             .unwrap();
@@ -402,6 +405,7 @@ mod tests {
         consumer
             .subscribe(&mut conn, &filter, |ev| {
                 received.push(ev);
+                Ok(())
             })
             .await
             .unwrap();

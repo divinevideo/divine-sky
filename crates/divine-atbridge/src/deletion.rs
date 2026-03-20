@@ -50,6 +50,22 @@ fn get_deleted_event_id(event: &NostrEvent) -> Option<&str> {
         .map(|t| t[1].as_str())
 }
 
+/// Shared validation for delete requests across the pipeline and standalone handler.
+pub fn validate_delete_request(
+    event: &NostrEvent,
+    requester_did: &str,
+    mapping_did: &str,
+) -> Result<String> {
+    let target_event_id = get_deleted_event_id(event)
+        .context("deletion event has no 'e' tag referencing an event")?;
+
+    if requester_did != mapping_did {
+        anyhow::bail!("delete requester does not own mapped record");
+    }
+
+    Ok(target_event_id.to_string())
+}
+
 /// Handle a Nostr kind-5 deletion event.
 ///
 /// 1. Extracts the referenced event ID from the `e` tag.
@@ -58,37 +74,40 @@ fn get_deleted_event_id(event: &NostrEvent) -> Option<&str> {
 /// 4. Updates the mapping status to "deleted".
 pub async fn handle_deletion(
     event: &NostrEvent,
+    requester_did: &str,
     pds_client: &PdsClient,
     db: &dyn RecordMappingStore,
 ) -> Result<()> {
-    let target_event_id = get_deleted_event_id(event)
-        .context("deletion event has no 'e' tag referencing an event")?;
-
     let mapping = db
-        .find_by_nostr_event_id(target_event_id)
+        .find_by_nostr_event_id(
+            get_deleted_event_id(event)
+                .context("deletion event has no 'e' tag referencing an event")?,
+        )
         .await
         .context("failed to look up record mapping")?
         .context("no record mapping found for deleted event")?;
 
     if mapping.status == "deleted" {
         tracing::info!(
-            nostr_event_id = target_event_id,
+            nostr_event_id = %mapping.nostr_event_id,
             "record already deleted, skipping"
         );
         return Ok(());
     }
+
+    let target_event_id = validate_delete_request(event, requester_did, &mapping.did)?;
 
     pds_client
         .delete_record(&mapping.did, &mapping.collection, &mapping.rkey)
         .await
         .context("failed to delete record from PDS")?;
 
-    db.update_status(target_event_id, "deleted")
+    db.update_status(&target_event_id, "deleted")
         .await
         .context("failed to update mapping status to deleted")?;
 
     tracing::info!(
-        nostr_event_id = target_event_id,
+        nostr_event_id = %target_event_id,
         at_uri = mapping.at_uri,
         "successfully deleted record"
     );
@@ -192,7 +211,9 @@ mod tests {
         let store = MockStore::new(vec![make_mapping("original-event-123")]);
         let event = make_deletion_event("original-event-123");
 
-        handle_deletion(&event, &pds_client, &store).await.unwrap();
+        handle_deletion(&event, "did:plc:abc123", &pds_client, &store)
+            .await
+            .unwrap();
 
         mock.assert_async().await;
         let updated = store.updated_statuses();
@@ -218,7 +239,7 @@ mod tests {
             sig: "sig".to_string(),
         };
 
-        let err = handle_deletion(&event, &pds_client, &store)
+        let err = handle_deletion(&event, "did:plc:abc123", &pds_client, &store)
             .await
             .unwrap_err();
         assert!(err.to_string().contains("no 'e' tag"));
@@ -232,7 +253,7 @@ mod tests {
 
         let event = make_deletion_event("nonexistent-event");
 
-        let err = handle_deletion(&event, &pds_client, &store)
+        let err = handle_deletion(&event, "did:plc:abc123", &pds_client, &store)
             .await
             .unwrap_err();
         assert!(err.to_string().contains("no record mapping found"));
@@ -250,11 +271,26 @@ mod tests {
         let event = make_deletion_event("already-deleted-event");
 
         // Should succeed without calling PDS
-        handle_deletion(&event, &pds_client, &store)
+        handle_deletion(&event, "did:plc:abc123", &pds_client, &store)
             .await
             .unwrap();
 
         // No status updates should have happened
+        assert!(store.updated_statuses().is_empty());
+    }
+
+    #[tokio::test]
+    async fn deletion_handler_rejects_owner_mismatch() {
+        let server = mockito::Server::new_async().await;
+        let pds_client = PdsClient::new(server.url(), "tok");
+        let store = MockStore::new(vec![make_mapping("owned-by-someone-else")]);
+        let event = make_deletion_event("owned-by-someone-else");
+
+        let err = handle_deletion(&event, "did:plc:not-the-owner", &pds_client, &store)
+            .await
+            .unwrap_err();
+
+        assert!(err.to_string().contains("does not own"));
         assert!(store.updated_statuses().is_empty());
     }
 }

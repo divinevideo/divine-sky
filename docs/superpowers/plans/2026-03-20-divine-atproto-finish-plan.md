@@ -210,7 +210,7 @@ Expected: PASS
 - Modify: `crates/divine-bridge-db/src/queries.rs`
 - Create: `crates/divine-atbridge/tests/replay_and_delete.rs`
 
-- [ ] **Step 1: Write failing tests for replay persistence and delete ownership**
+- [x] **Step 1: Write failing tests for replay persistence and delete ownership**
 
 Cover:
 - no offset advance on failed publish
@@ -221,15 +221,15 @@ Cover:
 Run: `cargo test -p divine-atbridge replay_and_delete -- --nocapture`
 Expected: FAIL because replay/delete behavior is currently unsafe
 
-- [ ] **Step 2: Move replay progression behind successful processing**
+- [x] **Step 2: Move replay progression behind successful processing**
 
 The bridge must only persist durable offsets after publish/delete success.
 
-- [ ] **Step 3: Collapse delete handling into one path**
+- [x] **Step 3: Collapse delete handling into one path**
 
 Use `mapping.did`, validate ownership, and keep behavior identical across direct and pipeline paths.
 
-- [ ] **Step 4: Re-run replay/delete tests**
+- [x] **Step 4: Re-run replay/delete tests**
 
 Run: `cargo test -p divine-atbridge replay_and_delete -- --nocapture`
 Expected: PASS
