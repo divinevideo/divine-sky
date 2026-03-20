@@ -29,6 +29,8 @@ docker compose -f config/docker-compose.yml up -d
 
 This stack brings up PostgreSQL, MinIO, a mock Blossom server, a mock Nostr relay, a local PDS, and the bridge container.
 
+For the fuller ATProto provisioning lab, use `deploy/localnet/` instead. That profile is a second dev path with dedicated PLC, PDS, Jetstream, DNS, and handle-admin slices. Keep `config/docker-compose.yml` as the default when you only need the fast bridge-centric stack.
+
 ## Required Runtime Env
 
 The bridge runtime now expects:
@@ -41,6 +43,8 @@ export RELAY_SOURCE_NAME=local-stack-relay
 ```
 
 `config/docker-compose.yml` sets these values for bridge startup in the local stack. It does not provide a dedicated PLC mock, so end-to-end provisioning still requires overriding `PLC_DIRECTORY_URL` to a real or test PLC endpoint when you exercise the opt-in flow.
+
+The localnet lab in `deploy/localnet/` exists for that fuller provisioning path. It uses `divine.test` for local handles and expects bridge plus handle-gateway to consume localnet env overrides rather than branching runtime code.
 
 ## ATProto Opt-In Flow
 

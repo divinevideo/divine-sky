@@ -76,6 +76,15 @@ If you want operational setup details instead of the high-level framing in this 
 - `docs/runbooks/launch-checklist.md`
 - `docs/runbooks/atproto-opt-in-smoke-test.md`
 
+## Local Development Paths
+
+There are now two local development paths in this repository:
+
+- `config/docker-compose.yml` is the fast default for day-to-day bridge and runtime work.
+- `deploy/localnet/` is the fuller ATProto localnet lab for provisioning and protocol testing across PLC, PDS, Jetstream, DNS, and local handle administration.
+
+The localnet profile is additive. It does not replace the fast stack, and it keeps local handle testing on `*.divine.test` instead of pretending the production public domain exists on a laptop.
+
 ## Why The Name Matters
 
 The name `divine-sky` is a useful clue.
