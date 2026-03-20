@@ -235,6 +235,23 @@ fn disabled_record(pubkey: &str, handle: &str) -> AccountLinkRecord {
     }
 }
 
+fn pending_without_did_record(pubkey: &str, handle: &str) -> AccountLinkRecord {
+    let now = Utc::now();
+    AccountLinkRecord {
+        nostr_pubkey: pubkey.to_string(),
+        did: None,
+        handle: handle.to_string(),
+        crosspost_enabled: true,
+        signing_key_id: "pending-signing:legacy".to_string(),
+        plc_rotation_key_ref: "pending-rotation:legacy".to_string(),
+        provisioning_state: ProvisioningState::Pending,
+        provisioning_error: None,
+        disabled_at: None,
+        created_at: now,
+        updated_at: now,
+    }
+}
+
 #[tokio::test]
 async fn provisioning_lifecycle_transitions_pending_to_ready_with_distinct_keys() {
     let links = SharedLinks::default();
@@ -295,4 +312,32 @@ async fn provisioning_lifecycle_rejects_disabled_link() {
     assert!(harness.generated.lock().unwrap().is_empty());
     assert!(harness.plc_calls.lock().unwrap().is_empty());
     assert!(harness.pds_calls.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn provisioning_lifecycle_pending_without_did_creates_fresh_identity() {
+    let links = SharedLinks::default();
+    links.insert(pending_without_did_record(
+        "npub_pending",
+        "zoe.divine.video",
+    ));
+
+    let harness = make_provisioner(links.clone(), false);
+
+    let result = harness
+        .provisioner
+        .provision_account("npub_pending", "zoe.divine.video")
+        .await
+        .expect("pending rows without did should provision from scratch");
+
+    let stored = links.get("npub_pending");
+    assert_eq!(stored.provisioning_state, ProvisioningState::Ready);
+    assert_eq!(stored.did.as_deref(), Some("did:plc:testaccount"));
+    assert!(stored.crosspost_enabled, "opt-in flag should be preserved");
+    assert_ne!(stored.signing_key_id, "pending-signing:legacy");
+    assert_ne!(stored.plc_rotation_key_ref, "pending-rotation:legacy");
+    assert_eq!(harness.generated.lock().unwrap().len(), 2);
+    assert_eq!(harness.plc_calls.lock().unwrap().len(), 1);
+    assert_eq!(harness.pds_calls.lock().unwrap().len(), 1);
+    assert_eq!(result.did, "did:plc:testaccount");
 }

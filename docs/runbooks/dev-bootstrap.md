@@ -35,10 +35,67 @@ The bridge runtime now expects:
 
 ```bash
 export PDS_AUTH_TOKEN=local-dev-token
+export PLC_DIRECTORY_URL=http://127.0.0.1:2583
+export HANDLE_DOMAIN=divine.video
 export RELAY_SOURCE_NAME=local-stack-relay
 ```
 
-`config/docker-compose.yml` sets these values for the local stack. In non-compose environments, set them explicitly before running `cargo run -p divine-atbridge`.
+`config/docker-compose.yml` sets these values for bridge startup in the local stack. It does not provide a dedicated PLC mock, so end-to-end provisioning still requires overriding `PLC_DIRECTORY_URL` to a real or test PLC endpoint when you exercise the opt-in flow.
+
+## ATProto Opt-In Flow
+
+The ATProto path is opt-in. A username claim alone only enables NIP-05.
+
+To exercise the full provisioning flow locally, run the sibling repos that own:
+
+- `../keycast` for consent and `/api/user/atproto/*`
+- `../divine-name-server` for the public username read model
+- `../divine-router` for read-only `/.well-known/atproto-did`
+
+`divine-handle-gateway` does not expose a public `/.well-known/atproto-did` route.
+
+When running `divine-handle-gateway` locally, set:
+
+```bash
+export DATABASE_URL=postgres://...
+export KEYCAST_ATPROTO_TOKEN=local-keycast-token
+export ATPROTO_PROVISIONING_URL=http://127.0.0.1:3200/provision
+export ATPROTO_PROVISIONING_TOKEN=local-provisioning-token
+export ATPROTO_KEYCAST_SYNC_URL=http://127.0.0.1:3000/api/internal/atproto/state
+export ATPROTO_NAME_SERVER_SYNC_URL=http://127.0.0.1:8787/api/internal/username/set-atproto
+export ATPROTO_NAME_SERVER_SYNC_TOKEN=local-sync-token
+```
+
+Use environment-specific local URLs for the provisioning worker, keycast internal sync route, and name-server.
+
+When running `divine-atbridge` locally for provisioning, also set:
+
+```bash
+export HEALTH_BIND_ADDR=127.0.0.1:3200
+export ATPROTO_PROVISIONING_TOKEN=local-provisioning-token
+```
+
+The `HEALTH_BIND_ADDR` listener now serves both `/health` and the internal `POST /provision` endpoint that `divine-handle-gateway` calls.
+
+## Staging And Production Deploy Contract
+
+Staging and production deploys for `divine-sky` are owned by `../divine-iac-coreconfig`, not this repository. The runtime contract in this repo is:
+
+- `divine-atbridge`: internal worker in the shared `sky` namespace
+- `divine-handle-gateway`: internal HTTP service in the shared `sky` namespace
+- `divine-feedgen`: public HTTP/XRPC service
+- `divine-labeler`: public ATProto label-query service
+
+Only `divine-feedgen` and `divine-labeler` should have public Gateway API exposure. `divine-atbridge` and `divine-handle-gateway` remain cluster-internal.
+
+Public hostnames are:
+
+- staging feed: `feed.staging.dvines.org`
+- production feed: `feed.divine.video`
+- staging labeler: `labeler.staging.dvines.org`
+- production labeler: `labeler.divine.video`
+
+The deploy manifests, secrets, routes, and ArgoCD applications live in `divine-iac-coreconfig`. This repo only needs to keep the runtime bind addresses, health endpoints, and env contracts consistent with those manifests.
 
 ## Workspace Verification
 
@@ -63,6 +120,13 @@ export PKG_CONFIG_PATH="/opt/homebrew/opt/libpq/lib/pkgconfig:${PKG_CONFIG_PATH:
 ## Expected Result
 
 `cargo check --workspace`, the focused crate tests, and `cargo test --workspace` should all pass from the repository root.
+
+For the ATProto path specifically:
+
+- username claim should succeed before ATProto is enabled
+- `divine-handle-gateway` should persist pending/ready/failed/disabled lifecycle state in PostgreSQL
+- `divine-handle-gateway` should sync final lifecycle state back into keycast via `/api/internal/atproto/state`
+- `divine-atbridge` should only publish when `crosspost_enabled && provisioning_state == "ready"`
 
 ## Operator Bootstrap
 

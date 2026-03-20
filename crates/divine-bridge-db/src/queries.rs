@@ -70,6 +70,23 @@ pub fn get_account_link_lifecycle(
     Ok(result)
 }
 
+/// Look up lifecycle-aware account-link state by handle.
+pub fn get_account_link_lifecycle_by_handle(
+    conn: &mut PgConnection,
+    handle: &str,
+) -> Result<Option<AccountLinkLifecycleRow>> {
+    let result = sql_query(
+        "SELECT nostr_pubkey, did, handle, crosspost_enabled, signing_key_id, \
+         plc_rotation_key_ref, provisioning_state, provisioning_error, disabled_at, \
+         created_at, updated_at \
+         FROM account_links WHERE handle = $1",
+    )
+    .bind::<Text, _>(handle)
+    .get_result::<AccountLinkLifecycleRow>(conn)
+    .optional()?;
+    Ok(result)
+}
+
 /// Insert or update the pending lifecycle state before PLC/PDS side effects.
 pub fn upsert_pending_account_link(
     conn: &mut PgConnection,
@@ -77,14 +94,16 @@ pub fn upsert_pending_account_link(
     handle: &str,
     signing_key_id: &str,
     plc_rotation_key_ref: &str,
+    crosspost_enabled: bool,
 ) -> Result<AccountLinkLifecycleRow> {
     let result = sql_query(
         "INSERT INTO account_links (
             nostr_pubkey, did, handle, crosspost_enabled, signing_key_id,
             plc_rotation_key_ref, provisioning_state, provisioning_error, disabled_at
-         ) VALUES ($1, NULL, $2, FALSE, $3, $4, 'pending', NULL, NULL)
+         ) VALUES ($1, NULL, $2, $5, $3, $4, 'pending', NULL, NULL)
          ON CONFLICT (nostr_pubkey) DO UPDATE
          SET handle = EXCLUDED.handle,
+             crosspost_enabled = EXCLUDED.crosspost_enabled,
              signing_key_id = EXCLUDED.signing_key_id,
              plc_rotation_key_ref = EXCLUDED.plc_rotation_key_ref,
              provisioning_state = 'pending',
@@ -99,6 +118,7 @@ pub fn upsert_pending_account_link(
     .bind::<Text, _>(handle)
     .bind::<Text, _>(signing_key_id)
     .bind::<Text, _>(plc_rotation_key_ref)
+    .bind::<diesel::sql_types::Bool, _>(crosspost_enabled)
     .get_result::<AccountLinkLifecycleRow>(conn)?;
     Ok(result)
 }
@@ -158,7 +178,8 @@ pub fn disable_account_link(
 ) -> Result<AccountLinkLifecycleRow> {
     let result = sql_query(
         "UPDATE account_links
-         SET provisioning_state = 'disabled',
+         SET crosspost_enabled = FALSE,
+             provisioning_state = 'disabled',
              disabled_at = NOW(),
              updated_at = NOW()
          WHERE nostr_pubkey = $1

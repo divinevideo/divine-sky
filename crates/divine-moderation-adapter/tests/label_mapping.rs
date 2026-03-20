@@ -1,8 +1,8 @@
-use divine_moderation_adapter::labels::{
-    map_action_to_label, queue_inbound_moderation, ModerationAction, SubjectKind,
-};
 use divine_moderation_adapter::labels::vocabulary::{
     atproto_to_divine, divine_to_atproto, divine_to_nip32, VOCABULARY,
+};
+use divine_moderation_adapter::labels::{
+    map_action_to_label, queue_inbound_moderation, ModerationAction, SubjectKind,
 };
 
 #[test]
@@ -51,7 +51,14 @@ fn label_mapping_queues_inbound_actions_for_human_review() {
 
 #[test]
 fn vocabulary_covers_all_atproto_content_labels() {
-    let atproto_labels = ["porn", "sexual", "nudity", "gore", "graphic-media", "self-harm"];
+    let atproto_labels = [
+        "porn",
+        "sexual",
+        "nudity",
+        "gore",
+        "graphic-media",
+        "self-harm",
+    ];
     for label in atproto_labels {
         assert!(
             atproto_to_divine(label).is_some(),
@@ -70,10 +77,21 @@ fn vocabulary_covers_all_atproto_system_labels() {
 
 #[test]
 fn divine_to_atproto_roundtrips_for_content_labels() {
-    let divine_labels = ["nudity", "sexual", "porn", "graphic-media", "violence", "self-harm"];
+    let divine_labels = [
+        "nudity",
+        "sexual",
+        "porn",
+        "graphic-media",
+        "violence",
+        "self-harm",
+    ];
     for label in divine_labels {
         let at_label = divine_to_atproto(label);
-        assert!(at_label.is_some(), "Divine label '{}' should map to ATProto", label);
+        assert!(
+            at_label.is_some(),
+            "Divine label '{}' should map to ATProto",
+            label
+        );
         let back = atproto_to_divine(at_label.unwrap());
         assert!(back.is_some(), "ATProto label should map back");
     }

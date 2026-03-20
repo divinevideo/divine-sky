@@ -1,7 +1,9 @@
 //! End-to-end bidirectional moderation flow test (no DB, no network).
 
+use divine_moderation_adapter::labels::inbound::{
+    map_to_nostr_actions, process_inbound_label, InboundAction, NostrAction,
+};
 use divine_moderation_adapter::labels::outbound::OutboundLabel;
-use divine_moderation_adapter::labels::inbound::{InboundAction, NostrAction, process_inbound_label, map_to_nostr_actions};
 use divine_moderation_adapter::labels::vocabulary::atproto_to_divine;
 
 #[test]
@@ -23,7 +25,7 @@ fn outbound_divine_label_roundtrips_through_atproto_and_back() {
 
     // Step 3: Inbound processing decides what to do
     let action = process_inbound_label(
-        "did:plc:divine-labeler",  // It's our own label coming back
+        "did:plc:divine-labeler", // It's our own label coming back
         emitted_val,
         false,
         &["did:plc:divine-labeler"],
@@ -35,21 +37,12 @@ fn outbound_divine_label_roundtrips_through_atproto_and_back() {
 #[test]
 fn external_takedown_flows_to_nostr_deletion() {
     // External labeler issues takedown
-    let action = process_inbound_label(
-        "did:plc:ozone",
-        "!takedown",
-        false,
-        &["did:plc:ozone"],
-    );
+    let action = process_inbound_label("did:plc:ozone", "!takedown", false, &["did:plc:ozone"]);
     assert_eq!(action, InboundAction::RequiresReview);
 
     // After human approval, map to Nostr action
-    let nostr_actions = map_to_nostr_actions(
-        "!takedown",
-        false,
-        "nostr-event-abc",
-        "nostr-pubkey-xyz",
-    );
+    let nostr_actions =
+        map_to_nostr_actions("!takedown", false, "nostr-event-abc", "nostr-pubkey-xyz");
     assert_eq!(nostr_actions.len(), 1);
     match &nostr_actions[0] {
         NostrAction::PublishDeletion { nostr_event_id, .. } => {
@@ -62,22 +55,17 @@ fn external_takedown_flows_to_nostr_deletion() {
 #[test]
 fn external_content_label_flows_to_nip32() {
     // External labeler flags as sexual
-    let action = process_inbound_label(
-        "did:plc:ozone",
-        "sexual",
-        false,
-        &["did:plc:ozone"],
-    );
+    let action = process_inbound_label("did:plc:ozone", "sexual", false, &["did:plc:ozone"]);
     assert_eq!(action, InboundAction::AutoApprove);
 
-    let nostr_actions = map_to_nostr_actions(
-        "sexual",
-        false,
-        "nostr-event-def",
-        "nostr-pubkey-xyz",
-    );
+    let nostr_actions =
+        map_to_nostr_actions("sexual", false, "nostr-event-def", "nostr-pubkey-xyz");
     match &nostr_actions[0] {
-        NostrAction::PublishLabel { namespace, value, nostr_event_id } => {
+        NostrAction::PublishLabel {
+            namespace,
+            value,
+            nostr_event_id,
+        } => {
             assert_eq!(namespace, "content-warning");
             assert_eq!(value, "sexual");
             assert_eq!(nostr_event_id, "nostr-event-def");

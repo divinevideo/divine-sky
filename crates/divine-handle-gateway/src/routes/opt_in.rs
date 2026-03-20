@@ -14,7 +14,13 @@ pub struct OptInRequest {
 pub async fn handler(
     State(state): State<AppState>,
     Json(payload): Json<OptInRequest>,
-) -> (StatusCode, Json<AccountLinkRecord>) {
-    let record = state.upsert_pending(payload.nostr_pubkey, payload.handle);
-    (StatusCode::ACCEPTED, Json(record))
+) -> Result<(StatusCode, Json<AccountLinkRecord>), StatusCode> {
+    let record = state
+        .upsert_pending_result(payload.nostr_pubkey, payload.handle)
+        .map_err(|error| {
+            tracing::error!(error = %error, "failed to persist pending opt-in");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+    state.enqueue_provisioning(&record.nostr_pubkey, &record.handle);
+    Ok((StatusCode::ACCEPTED, Json(record)))
 }

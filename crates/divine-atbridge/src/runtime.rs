@@ -5,7 +5,9 @@ use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use diesel::Connection;
 use diesel::PgConnection;
-use divine_bridge_db::models::{NewAssetManifestEntry, NewRecordMapping, UpsertIngestOffset};
+use divine_bridge_db::models::{
+    AccountLinkLifecycleRow, NewAssetManifestEntry, NewRecordMapping, UpsertIngestOffset,
+};
 use divine_bridge_db::{
     get_account_link_lifecycle, get_ingest_offset, get_record_mapping, insert_asset,
     insert_record_mapping, update_record_mapping_status as update_record_mapping_status_query,
@@ -14,6 +16,7 @@ use divine_bridge_db::{
 use divine_bridge_types::RecordStatus;
 
 use crate::config::BridgeConfig;
+use crate::health::RuntimeHealthState;
 use crate::nostr_consumer::{parse_relay_message, NostrConsumer, RelayConnection, RelayMessage};
 use crate::pipeline::{
     AccountLink, AccountStore, AssetManifestRecord, BridgePipeline, HttpBlobFetcher, RecordMapping,
@@ -35,23 +38,26 @@ impl DbAccountStore {
     }
 }
 
+pub fn account_link_from_lifecycle_row(row: &AccountLinkLifecycleRow) -> Option<AccountLink> {
+    let did = row.did.clone()?;
+    let is_ready = row.provisioning_state == "ready";
+    if !is_ready || row.disabled_at.is_some() || !row.crosspost_enabled {
+        return None;
+    }
+
+    Some(AccountLink {
+        nostr_pubkey: row.nostr_pubkey.clone(),
+        did,
+        opted_in: row.crosspost_enabled && is_ready,
+    })
+}
+
 #[async_trait::async_trait]
 impl AccountStore for DbAccountStore {
     async fn get_account_link(&self, nostr_pubkey: &str) -> Result<Option<AccountLink>> {
         let mut connection = self.connection.lock().unwrap();
         let row = get_account_link_lifecycle(&mut connection, nostr_pubkey)?;
-        Ok(row.and_then(|row| {
-            let did = row.did?;
-            if row.provisioning_state != "ready" || row.disabled_at.is_some() {
-                return None;
-            }
-
-            Some(AccountLink {
-                nostr_pubkey: row.nostr_pubkey,
-                did,
-                opted_in: row.crosspost_enabled || row.provisioning_state == "ready",
-            })
-        }))
+        Ok(row.and_then(|row| account_link_from_lifecycle_row(&row)))
     }
 }
 
@@ -175,7 +181,80 @@ fn persist_relay_cursor(
     Ok(())
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RelayReadOutcome {
+    Message,
+    Closed,
+    Reconnect,
+}
+
+async fn establish_relay_session<C>(
+    relay_result: Result<C>,
+    req: String,
+    relay_url: &str,
+    health: &RuntimeHealthState,
+) -> Option<C>
+where
+    C: RelayConnection,
+{
+    let mut relay = match relay_result {
+        Ok(relay) => relay,
+        Err(error) => {
+            tracing::warn!(
+                error = %error,
+                relay_url = %relay_url,
+                "failed to connect to relay; retrying"
+            );
+            health.record_relay_failure(error.to_string());
+            return None;
+        }
+    };
+
+    if let Err(error) = relay.send(req).await {
+        tracing::warn!(
+            error = %error,
+            relay_url = %relay_url,
+            "failed to send relay subscription; reconnecting"
+        );
+        health.record_relay_failure(error.to_string());
+        return None;
+    }
+
+    health.record_success();
+    Some(relay)
+}
+
+async fn read_relay_frame<C>(
+    relay: &mut C,
+    relay_url: &str,
+    health: &RuntimeHealthState,
+) -> (RelayReadOutcome, Option<String>)
+where
+    C: RelayConnection,
+{
+    match relay.recv().await {
+        Ok(Some(raw)) => (RelayReadOutcome::Message, Some(raw)),
+        Ok(None) => (RelayReadOutcome::Closed, None),
+        Err(error) => {
+            tracing::warn!(
+                error = %error,
+                relay_url = %relay_url,
+                "failed to read relay frame; reconnecting"
+            );
+            health.record_relay_failure(error.to_string());
+            (RelayReadOutcome::Reconnect, None)
+        }
+    }
+}
+
 pub async fn run_service(config: &BridgeConfig) -> Result<()> {
+    run_service_with_state(config, RuntimeHealthState::new()).await
+}
+
+pub async fn run_service_with_state(
+    config: &BridgeConfig,
+    health: RuntimeHealthState,
+) -> Result<()> {
     let connection = establish_connection(&config.database_url)?;
     let account_store = DbAccountStore::new(connection.clone());
     let record_store = DbRecordStore::new(connection.clone());
@@ -192,54 +271,199 @@ pub async fn run_service(config: &BridgeConfig) -> Result<()> {
 
     loop {
         let mut consumer = NostrConsumer::new(config.relay_url.clone());
-        consumer.last_seen_timestamp = load_relay_cursor(&connection, &config.relay_source_name)?;
+        consumer.last_seen_timestamp =
+            match load_relay_cursor(&connection, &config.relay_source_name) {
+                Ok(cursor) => cursor,
+                Err(error) => {
+                    tracing::error!(
+                        error = %error,
+                        source = %config.relay_source_name,
+                        "failed to load relay replay cursor"
+                    );
+                    health.record_runtime_failure(error.to_string());
+                    tokio::time::sleep(health.next_retry_delay()).await;
+                    continue;
+                }
+            };
 
         tracing::info!(
             relay_url = %config.relay_url,
             source = %config.relay_source_name,
             "connecting bridge runtime"
         );
-        let mut relay = crate::nostr_consumer::WebSocketRelayConnection::connect(&config.relay_url)
-            .await
-            .context("failed to connect to relay")?;
-
         let req = consumer.build_req(&runtime_filter());
-        relay
-            .send(req)
-            .await
-            .context("failed to send relay subscription")?;
+        let mut relay = match establish_relay_session(
+            crate::nostr_consumer::WebSocketRelayConnection::connect(&config.relay_url).await,
+            req,
+            &config.relay_url,
+            &health,
+        )
+        .await
+        {
+            Some(relay) => relay,
+            None => {
+                tokio::time::sleep(health.next_retry_delay()).await;
+                continue;
+            }
+        };
 
-        while let Some(raw) = relay.recv().await.context("failed to read relay frame")? {
-            match parse_relay_message(&raw).context("failed to parse relay frame")? {
-                RelayMessage::Event { event, .. } => {
+        let mut reconnect = false;
+        loop {
+            let (outcome, raw) = read_relay_frame(&mut relay, &config.relay_url, &health).await;
+            match outcome {
+                RelayReadOutcome::Message => {}
+                RelayReadOutcome::Closed => break,
+                RelayReadOutcome::Reconnect => {
+                    reconnect = true;
+                    break;
+                }
+            }
+            let raw = match raw {
+                Some(raw) => raw,
+                None => continue,
+            };
+
+            match parse_relay_message(&raw) {
+                Ok(RelayMessage::Event { event, .. }) => {
                     let event_id = event.id.clone();
                     let created_at = event.created_at;
                     let result = pipeline.process_event(&event).await;
                     match result {
                         crate::pipeline::ProcessResult::Error { message } => {
-                            anyhow::bail!("event processing failed: {message}");
+                            tracing::error!(
+                                error = %message,
+                                event_id = %event_id,
+                                "bridge pipeline rejected relay event"
+                            );
+                            health.record_processing_failure(message);
                         }
                         _ => {
-                            persist_relay_cursor(
+                            if let Err(error) = persist_relay_cursor(
                                 &connection,
                                 &config.relay_source_name,
                                 &event_id,
                                 created_at,
-                            )?;
+                            ) {
+                                tracing::error!(
+                                    error = %error,
+                                    event_id = %event_id,
+                                    "failed to persist relay cursor"
+                                );
+                                health.record_runtime_failure(error.to_string());
+                                continue;
+                            }
                             consumer.last_seen_timestamp = Some(created_at);
+                            health.record_success();
                         }
                     }
                 }
-                RelayMessage::Eose { .. } => {}
-                RelayMessage::Notice(message) => {
+                Ok(RelayMessage::Eose { .. }) => {}
+                Ok(RelayMessage::Notice(message)) => {
                     tracing::warn!("relay NOTICE: {message}");
                 }
-                RelayMessage::Unknown(_) => {}
+                Ok(RelayMessage::Unknown(_)) => {}
+                Err(error) => {
+                    tracing::warn!(
+                        error = %error,
+                        relay_url = %config.relay_url,
+                        "failed to parse relay frame; continuing"
+                    );
+                    health.record_processing_failure(error.to_string());
+                    continue;
+                }
             }
         }
 
         relay.close().await.ok();
-        tracing::warn!("relay connection closed; reconnecting");
-        tokio::time::sleep(Duration::from_secs(2)).await;
+        if !reconnect {
+            tracing::warn!("relay connection closed; reconnecting");
+            health.record_relay_failure("relay connection closed");
+        }
+
+        let delay = health.next_retry_delay();
+        tracing::warn!(
+            delay_secs = delay.as_secs(),
+            "sleeping before relay reconnect"
+        );
+        tokio::time::sleep(delay).await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use anyhow::{anyhow, Result};
+    use async_trait::async_trait;
+
+    use super::*;
+
+    struct MockRelayConnection {
+        send_error: Option<anyhow::Error>,
+        recv_results: Vec<std::result::Result<Option<String>, anyhow::Error>>,
+    }
+
+    #[async_trait]
+    impl RelayConnection for MockRelayConnection {
+        async fn send(&mut self, _msg: String) -> Result<()> {
+            match self.send_error.take() {
+                Some(error) => Err(error),
+                None => Ok(()),
+            }
+        }
+
+        async fn recv(&mut self) -> Result<Option<String>> {
+            if self.recv_results.is_empty() {
+                Ok(None)
+            } else {
+                self.recv_results.remove(0)
+            }
+        }
+
+        async fn close(&mut self) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn establish_relay_session_retries_connect_failures_without_crashing() {
+        let health = RuntimeHealthState::new();
+
+        for _ in 0..2 {
+            let relay = establish_relay_session::<MockRelayConnection>(
+                Err(anyhow!("connect failed")),
+                "REQ".to_string(),
+                "wss://relay.example",
+                &health,
+            )
+            .await;
+
+            assert!(relay.is_none());
+            assert!(health.is_ready());
+        }
+
+        let relay = establish_relay_session::<MockRelayConnection>(
+            Err(anyhow!("connect failed")),
+            "REQ".to_string(),
+            "wss://relay.example",
+            &health,
+        )
+        .await;
+
+        assert!(relay.is_none());
+        assert!(!health.is_ready());
+    }
+
+    #[tokio::test]
+    async fn read_relay_frame_requests_reconnect_on_read_error() {
+        let health = RuntimeHealthState::new();
+        let mut relay = MockRelayConnection {
+            send_error: None,
+            recv_results: vec![Err(anyhow!("socket dropped"))],
+        };
+
+        let (outcome, raw) = read_relay_frame(&mut relay, "wss://relay.example", &health).await;
+
+        assert_eq!(outcome, RelayReadOutcome::Reconnect);
+        assert!(raw.is_none());
+        assert!(health.is_ready(), "single read failure should stay ready");
     }
 }

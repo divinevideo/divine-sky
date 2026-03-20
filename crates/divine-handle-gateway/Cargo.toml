@@ -8,9 +8,12 @@ name = "divine-handle-gateway"
 path = "src/main.rs"
 
 [dependencies]
+divine-bridge-db = { path = "../divine-bridge-db" }
 anyhow = { workspace = true }
 axum = { version = "0.7", features = ["macros", "json"] }
 chrono = { workspace = true }
+diesel = { workspace = true }
+reqwest = { version = "0.12", features = ["rustls-tls", "json"], default-features = false }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true }
@@ -18,4 +21,7 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 
 [dev-dependencies]
+diesel = { workspace = true }
+mockito = "1"
+serial_test = "3"
 tower = { version = "0.5", features = ["util"] }

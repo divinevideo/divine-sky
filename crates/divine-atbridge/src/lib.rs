@@ -2,9 +2,13 @@
 
 pub mod config;
 pub mod deletion;
+pub mod health;
 pub mod nostr_consumer;
+pub mod pds_accounts;
 pub mod pipeline;
+pub mod plc_directory;
 pub mod profile_sync;
+pub mod provision_runtime;
 pub mod provisioner;
 pub mod publisher;
 pub mod runtime;
@@ -48,23 +52,26 @@ where
         .context("failed to send subscription")?;
 
     while let Some(raw) = conn.recv().await.context("failed to read relay frame")? {
-        match parse_relay_message(&raw).context("failed to parse relay frame")? {
-            RelayMessage::Event { event, .. } => {
+        match parse_relay_message(&raw) {
+            Ok(RelayMessage::Event { event, .. }) => {
                 let created_at = event.created_at;
                 match pipeline.process_event(&event).await {
                     ProcessResult::Error { message } => {
-                        anyhow::bail!("event processing failed: {message}");
+                        tracing::error!(error = %message, event_id = %event.id, "bridge pipeline rejected relay event");
                     }
                     _ => {
                         consumer.last_seen_timestamp = Some(created_at);
                     }
                 }
             }
-            RelayMessage::Eose { .. } => {}
-            RelayMessage::Notice(message) => {
+            Ok(RelayMessage::Eose { .. }) => {}
+            Ok(RelayMessage::Notice(message)) => {
                 tracing::warn!("relay NOTICE: {message}");
             }
-            RelayMessage::Unknown(_) => {}
+            Ok(RelayMessage::Unknown(_)) => {}
+            Err(error) => {
+                tracing::warn!(error = %error, "failed to parse relay frame");
+            }
         }
     }
 

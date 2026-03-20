@@ -11,7 +11,10 @@ fn quarantine_nudity_produces_atproto_label() {
     );
     assert_eq!(result.len(), 1);
     assert_eq!(result[0].val, "nudity");
-    assert_eq!(result[0].subject_uri, "at://did:plc:user1/app.bsky.feed.post/rkey1");
+    assert_eq!(
+        result[0].subject_uri,
+        "at://did:plc:user1/app.bsky.feed.post/rkey1"
+    );
     assert!(!result[0].neg);
 }
 

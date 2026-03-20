@@ -22,6 +22,21 @@ async fn feed_skeleton_describes_latest_and_trending_feeds() {
 }
 
 #[tokio::test]
+async fn feedgen_health_endpoints_return_ok() {
+    let app = app();
+
+    for path in ["/health", "/health/ready"] {
+        let response = app
+            .clone()
+            .oneshot(Request::builder().uri(path).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK, "path {path}");
+    }
+}
+
+#[tokio::test]
 async fn feed_skeleton_latest_returns_divine_owned_posts() {
     let app = app();
 

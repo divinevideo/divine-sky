@@ -2,57 +2,81 @@
 
 ## Purpose
 
-`login.divine.video` is the control-plane surface for DiVine account linking. It owns consent, provisioning triggers, status inspection, disable actions, export, and host-based `/.well-known/atproto-did` responses for `username.divine.video`.
+`login.divine.video` is the authenticated control plane for DiVine account linking. It owns username claim state, ATProto consent, ATProto lifecycle state, and the user-facing enable/status/disable API.
+
+It does not serve `/.well-known/atproto-did`. That read-only host resolution now belongs to `divine-router`, which reads the public state published by `divine-name-server`.
 
 ## Route Responsibilities
 
-- `POST /api/account-links/opt-in`
-  Records a pending link after the user consents to ATProto mirroring.
-- `POST /api/account-links/provision`
-  Triggers or records provisioning completion for a linked account.
-- `GET /api/account-links/:nostr_pubkey/status`
-  Returns the current lifecycle state for the linked account.
-- `POST /api/account-links/:nostr_pubkey/disable`
-  Disables the link and makes handle resolution stop returning a DID.
-- `GET /api/account-links/:nostr_pubkey/export`
-  Returns the stored control-plane view of the linked account.
-- `GET /.well-known/atproto-did`
-  Resolves the current host, such as `alice.divine.video`, to a ready ATProto DID.
+- `POST /api/user/profile`
+  Claims or updates `username.divine.video` for NIP-05 only. This must not auto-enable ATProto.
+- `POST /api/user/atproto/enable`
+  Requires a claimed username, sets `enabled = true`, moves lifecycle to `pending`, and triggers provisioning in `divine-sky`.
+- `GET /api/user/atproto/status`
+  Returns `enabled`, `state`, `did`, `error`, and `username` for the authenticated user.
+- `POST /api/user/atproto/disable`
+  Sets `enabled = false`, lifecycle `disabled`, and triggers downstream disable cleanup.
 
 ## State Contract
 
-The control plane should track the same lifecycle states as provisioning:
+Username claim and ATProto lifecycle are separate:
 
-- `pending`
-- `ready`
-- `failed`
-- `disabled`
+- after username claim:
+  - `atproto_enabled = false`
+  - `atproto_state = null`
+- after user opt-in:
+  - `atproto_enabled = true`
+  - `atproto_state = "pending"`
+- after provisioning succeeds:
+  - `atproto_did = "did:plc:..."`
+  - `atproto_state = "ready"`
+- after provisioning fails:
+  - `atproto_state = "failed"`
+  - `atproto_error = "..."`
+- after user disables:
+  - `atproto_enabled = false`
+  - `atproto_state = "disabled"`
 
-At minimum, each record needs `nostr_pubkey`, `handle`, `did`, `provisioning_state`, `provisioning_error`, `disabled_at`, `created_at`, and `updated_at`.
+`did:plc` is the user identity once provisioning is ready.
 
 ## Auth Assumptions
 
-- Opt-in, provision, disable, and export routes must sit behind DiVine-authenticated sessions.
-- `/.well-known/atproto-did` is public and host-based.
-- Provisioning should be initiated only for a user who has already opted in.
+- Username claim and `/api/user/atproto/*` routes sit behind DiVine-authenticated user sessions.
+- `divine-sky` service-to-service calls from keycast use bearer-token auth, not user auth.
+- `/.well-known/atproto-did` is public, host-based, and served by `divine-router`, not by keycast.
 
 ## Operational Boundary
 
-`login.divine.video` is a control plane, not a PDS:
+`login.divine.video` is a consent and lifecycle owner, not a PDS and not the public read model:
 
-- It decides whether a link exists and whether it is active.
-- It coordinates with the bridge/provisioner to create or recover ATProto accounts.
-- It serves host-based DID resolution once a link is `ready`.
-- It must stop DID resolution immediately when a link is `disabled`.
+- It owns whether the user has opted in.
+- It decides when provisioning should start or stop.
+- It never mints DIDs itself.
+- It never serves public DID resolution itself.
 
-The bridge and PDS remain responsible for publishing records, storing blobs, and serving ATProto APIs. `login.divine.video` should hand those concerns off rather than embedding them directly.
+The downstream split is:
+
+- `divine-sky`: provisions `did:plc`, creates PDS accounts, stores durable bridge state
+- `divine-name-server`: publishes the public username read model
+- `divine-router`: serves read-only `/.well-known/atproto-did`
 
 ## Runtime Handoff
 
-When a link reaches `ready`, the bridge runtime consumes that state through the shared `account_links` lifecycle contract. Disabling a link must prevent future handle resolution and must cause the bridge to skip further publish attempts for that pubkey.
+When a link reaches `ready`, the bridge runtime consumes the shared lifecycle state through `account_links`. Publishing is allowed only when:
 
-For launch, treat `login.divine.video` and the bridge as one operational chain:
+- `crosspost_enabled == true`
+- `provisioning_state == "ready"`
+- `disabled_at IS NULL`
 
-- control plane writes consent and provisioning state
-- bridge reads ready state and relay offsets
-- PDS executes blob and record writes with the configured auth token
+Disabling must:
+
+- stop future mirroring
+- remove public DID resolution via the name-server/router read model
+
+For launch, treat the flow as:
+
+- keycast writes consent and lifecycle state
+- divine-sky provisions and persists durable bridge state
+- divine-name-server publishes public handle state
+- divine-router resolves `/.well-known/atproto-did` only for active + ready users
+- divine-atbridge publishes only for opted-in + ready users

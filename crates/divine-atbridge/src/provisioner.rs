@@ -234,7 +234,8 @@ where
                 .await;
         }
 
-        self.create_new_link(nostr_pubkey, &normalised_handle).await
+        self.create_new_link(nostr_pubkey, &normalised_handle, false)
+            .await
     }
 
     fn normalise_handle(&self, handle: &str) -> String {
@@ -277,23 +278,29 @@ where
                 })
             }
             ProvisioningState::Pending | ProvisioningState::Failed => {
-                let did = existing
-                    .did
-                    .clone()
-                    .context("cannot retry a lifecycle record without a DID")?;
-                let record = self
-                    .create_pds_account_and_mark_ready(nostr_pubkey, &did, handle)
-                    .await?;
-                Ok(ProvisionResult {
-                    did,
-                    handle: record.handle,
-                    signing_key_id: record.signing_key_id,
-                })
+                if let Some(did) = existing.did.clone() {
+                    let record = self
+                        .create_pds_account_and_mark_ready(nostr_pubkey, &did, handle)
+                        .await?;
+                    Ok(ProvisionResult {
+                        did,
+                        handle: record.handle,
+                        signing_key_id: record.signing_key_id,
+                    })
+                } else {
+                    self.create_new_link(nostr_pubkey, handle, existing.crosspost_enabled)
+                        .await
+                }
             }
         }
     }
 
-    async fn create_new_link(&self, nostr_pubkey: &str, handle: &str) -> Result<ProvisionResult> {
+    async fn create_new_link(
+        &self,
+        nostr_pubkey: &str,
+        handle: &str,
+        crosspost_enabled: bool,
+    ) -> Result<ProvisionResult> {
         let (signing_key_id, signing_keypair) = self
             .key_store
             .generate_keypair("signing-key")
@@ -310,7 +317,7 @@ where
                 nostr_pubkey,
                 did: None,
                 handle,
-                crosspost_enabled: false,
+                crosspost_enabled,
                 signing_key_id: &signing_key_id,
                 plc_rotation_key_ref: &rotation_key_id,
             })

@@ -23,6 +23,14 @@ pub struct BridgeConfig {
     pub s3_bucket: String,
     /// Logical relay source name for replay offsets (RELAY_SOURCE_NAME).
     pub relay_source_name: String,
+    /// Internal API server bind address (HEALTH_BIND_ADDR).
+    pub health_bind_addr: String,
+    /// PLC directory base URL (PLC_DIRECTORY_URL).
+    pub plc_directory_url: String,
+    /// Handle domain accepted for provisioning (HANDLE_DOMAIN).
+    pub handle_domain: String,
+    /// Shared bearer token for the internal provisioning API (ATPROTO_PROVISIONING_TOKEN).
+    pub provisioning_bearer_token: String,
 }
 
 impl BridgeConfig {
@@ -38,6 +46,13 @@ impl BridgeConfig {
             s3_bucket: env::var("S3_BUCKET").context("S3_BUCKET must be set")?,
             relay_source_name: env::var("RELAY_SOURCE_NAME")
                 .unwrap_or_else(|_| "nostr-relay".to_string()),
+            health_bind_addr: env::var("HEALTH_BIND_ADDR")
+                .unwrap_or_else(|_| "0.0.0.0:8080".to_string()),
+            plc_directory_url: env::var("PLC_DIRECTORY_URL")
+                .context("PLC_DIRECTORY_URL must be set")?,
+            handle_domain: env::var("HANDLE_DOMAIN").context("HANDLE_DOMAIN must be set")?,
+            provisioning_bearer_token: env::var("ATPROTO_PROVISIONING_TOKEN")
+                .context("ATPROTO_PROVISIONING_TOKEN must be set")?,
         })
     }
 }
@@ -60,6 +75,10 @@ mod tests {
             s3_endpoint: "https://s3.example.com".into(),
             s3_bucket: "test-bucket".into(),
             relay_source_name: "nostr-relay".into(),
+            health_bind_addr: "0.0.0.0:8080".into(),
+            plc_directory_url: "https://plc.directory".into(),
+            handle_domain: "divine.video".into(),
+            provisioning_bearer_token: "test-token".into(),
         };
         assert_eq!(config.relay_url, "wss://relay.example.com");
         assert_eq!(config.s3_bucket, "test-bucket");

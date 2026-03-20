@@ -1,13 +1,9 @@
-use divine_moderation_adapter::labels::inbound::{InboundAction, process_inbound_label};
+use divine_moderation_adapter::labels::inbound::{process_inbound_label, InboundAction};
 
 #[test]
 fn content_label_auto_approved_for_trusted_labeler() {
-    let action = process_inbound_label(
-        "did:plc:ozone-mod",
-        "sexual",
-        false,
-        &["did:plc:ozone-mod"],
-    );
+    let action =
+        process_inbound_label("did:plc:ozone-mod", "sexual", false, &["did:plc:ozone-mod"]);
     assert_eq!(action, InboundAction::AutoApprove);
 }
 
@@ -35,11 +31,6 @@ fn untrusted_labeler_requires_review() {
 
 #[test]
 fn negation_from_trusted_labeler_auto_approved() {
-    let action = process_inbound_label(
-        "did:plc:ozone-mod",
-        "nudity",
-        true,
-        &["did:plc:ozone-mod"],
-    );
+    let action = process_inbound_label("did:plc:ozone-mod", "nudity", true, &["did:plc:ozone-mod"]);
     assert_eq!(action, InboundAction::AutoApprove);
 }

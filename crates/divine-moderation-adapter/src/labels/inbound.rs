@@ -71,18 +71,14 @@ pub fn map_to_nostr_actions(
     };
 
     match atproto_val {
-        "!takedown" if !neg => vec![
-            NostrAction::PublishDeletion {
-                nostr_event_id: nostr_event_id.to_string(),
-                reason: "ATProto takedown label from labeler".to_string(),
-            },
-        ],
-        "!suspend" if !neg => vec![
-            NostrAction::RelayBan {
-                nostr_pubkey: nostr_pubkey.to_string(),
-                reason: "ATProto account suspension".to_string(),
-            },
-        ],
+        "!takedown" if !neg => vec![NostrAction::PublishDeletion {
+            nostr_event_id: nostr_event_id.to_string(),
+            reason: "ATProto takedown label from labeler".to_string(),
+        }],
+        "!suspend" if !neg => vec![NostrAction::RelayBan {
+            nostr_pubkey: nostr_pubkey.to_string(),
+            reason: "ATProto account suspension".to_string(),
+        }],
         _ => {
             if let Some((namespace, value)) = divine_to_nip32(divine_label) {
                 vec![NostrAction::PublishLabel {

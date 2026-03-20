@@ -246,3 +246,32 @@ async fn publish_path_integration_processes_video_event_through_http_collaborato
         | ProcessResult::ProfileSynced { .. } => {}
     }
 }
+
+#[tokio::test]
+async fn publish_path_integration_skips_when_account_is_not_opted_in() {
+    let source_bytes = b"publish-path-video";
+    let source_sha256 = hex::encode(Sha256::digest(source_bytes));
+    let event = make_video_event("https://blossom.invalid/video.mp4", &source_sha256);
+
+    let pipeline = BridgePipeline::new(
+        StaticAccountStore {
+            link: AccountLink {
+                nostr_pubkey: event.pubkey.clone(),
+                did: "did:plc:integration".to_string(),
+                opted_in: false,
+            },
+        },
+        TrackingRecordStore::default(),
+        HttpBlobFetcher::new(Duration::from_secs(5)).unwrap(),
+        PdsClient::new("http://127.0.0.1:9", "integration-token"),
+        PdsClient::new("http://127.0.0.1:9", "integration-token"),
+    );
+
+    let result = pipeline.process_event(&event).await;
+    match result {
+        ProcessResult::Skipped { reason } => {
+            assert!(reason.contains("not opted in"), "got: {reason}");
+        }
+        other => panic!("expected skipped for opted-out account, got {other:?}"),
+    }
+}

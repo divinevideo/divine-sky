@@ -143,6 +143,9 @@ services:
       DATABASE_URL: postgres://divine:divine_dev@postgres:5432/divine_bridge
       S3_ENDPOINT: http://minio:9000
       S3_BUCKET: bridge-blobs
+      PLC_DIRECTORY_URL: http://pds:2583
+      HANDLE_DOMAIN: divine.video
+      ATPROTO_PROVISIONING_TOKEN: local-provisioning-token
     volumes:
       - ..:/workspace
     command: ["bash", "-lc", "cargo run -p divine-atbridge"]

@@ -6,7 +6,9 @@ use divine_feedgen::app;
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt().with_target(false).init();
 
-    let addr: SocketAddr = "127.0.0.1:3002".parse()?;
+    let addr: SocketAddr = std::env::var("BIND_ADDR")
+        .unwrap_or_else(|_| "0.0.0.0:3002".to_string())
+        .parse()?;
     let listener = tokio::net::TcpListener::bind(addr).await?;
     axum::serve(listener, app()).await?;
     Ok(())
