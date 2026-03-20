@@ -5,6 +5,7 @@ members = [
     "crates/divine-bridge-types",
     "crates/divine-feedgen",
     "crates/divine-handle-gateway",
+    "crates/divine-labeler",
     "crates/divine-moderation-adapter",
     "crates/divine-video-worker",
 ]

@@ -1,0 +1,34 @@
+[package]
+name = "divine-labeler"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "divine_labeler"
+path = "src/lib.rs"
+
+[[bin]]
+name = "divine-labeler"
+path = "src/main.rs"
+
+[dependencies]
+divine-bridge-db = { path = "../divine-bridge-db" }
+divine-bridge-types = { path = "../divine-bridge-types" }
+divine-moderation-adapter = { path = "../divine-moderation-adapter" }
+anyhow = { workspace = true }
+axum = { version = "0.7", features = ["macros", "json"] }
+base64 = "0.22"
+chrono = { workspace = true }
+diesel = { workspace = true }
+hex = "0.4"
+k256 = { version = "0.13", features = ["ecdsa-core", "sha256"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde_ipld_dagcbor = "0.6"
+sha2 = "0.10"
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+[dev-dependencies]
+tower = { version = "0.5", features = ["util"] }
