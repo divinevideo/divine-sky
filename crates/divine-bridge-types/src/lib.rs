@@ -182,3 +182,10 @@ pub struct IngestCheckpoint {
     pub last_event_id: String,
     pub last_created_at: DateTime<Utc>,
 }
+
+// ---------------------------------------------------------------------------
+// ATProto label types
+// ---------------------------------------------------------------------------
+
+pub mod atproto_labels;
+pub use atproto_labels::*;
