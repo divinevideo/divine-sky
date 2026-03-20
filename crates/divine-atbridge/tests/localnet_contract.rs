@@ -54,3 +54,10 @@ fn localnet_override_examples_target_local_services() {
     assert!(bridge_env.contains("HANDLE_DOMAIN=divine.test"));
     assert!(gateway_env.contains("ATPROTO_PROVISIONING_URL"));
 }
+
+#[test]
+fn localnet_scripts_and_runbooks_exist() {
+    let repo_root = repo_root();
+    assert!(repo_root.join("scripts/localnet-up.sh").exists());
+    assert!(repo_root.join("docs/runbooks/localnet-lab.md").exists());
+}
