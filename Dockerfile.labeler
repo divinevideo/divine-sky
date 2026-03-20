@@ -1,0 +1,28 @@
+# Build stage
+FROM rust:1.82-bookworm AS builder
+
+RUN apt-get update && apt-get install -y libpq-dev pkg-config && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+# Copy workspace files
+COPY Cargo.toml Cargo.lock ./
+COPY crates/ crates/
+COPY migrations/ migrations/
+
+# Build only the labeler binary
+RUN cargo build --release --bin divine-labeler
+
+# Runtime stage
+FROM debian:bookworm-slim
+
+RUN apt-get update && apt-get install -y libpq5 ca-certificates && rm -rf /var/lib/apt/lists/*
+
+RUN useradd -r -u 1000 -m appuser
+USER appuser
+
+COPY --from=builder /app/target/release/divine-labeler /usr/local/bin/divine-labeler
+
+EXPOSE 3001
+
+CMD ["divine-labeler"]
