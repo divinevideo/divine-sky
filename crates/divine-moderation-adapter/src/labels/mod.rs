@@ -1,6 +1,7 @@
 pub mod vocabulary;
 pub mod outbound;
 pub mod labeler_service;
+pub mod inbound;
 
 use serde::{Deserialize, Serialize};
 
