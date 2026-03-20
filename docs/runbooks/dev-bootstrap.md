@@ -31,6 +31,11 @@ This stack brings up PostgreSQL, MinIO, a mock Blossom server, a mock Nostr rela
 
 For the fuller ATProto provisioning lab, use `deploy/localnet/` instead. That profile is a second dev path with dedicated PLC, PDS, Jetstream, DNS, and handle-admin slices. Keep `config/docker-compose.yml` as the default when you only need the fast bridge-centric stack.
 
+Choose the path based on what you are validating:
+
+- Use `config/docker-compose.yml` for bridge runtime work, replay, publish-path, and media-path checks.
+- Use `deploy/localnet/` when you need PLC, handle resolution, DNS, or a more realistic end-to-end ATProto provisioning lab.
+
 ## Required Runtime Env
 
 The bridge runtime now expects:
@@ -56,6 +61,8 @@ To exercise the full provisioning flow locally, run the sibling repos that own:
 - `../divine-name-server` for the public username read model
 - `../divine-router` for read-only `/.well-known/atproto-did`
 
+Those sibling repos still matter even when `divine-sky` is pointed at the localnet lab, because the user-facing opt-in flow and public read-model publication still live outside this workspace.
+
 `divine-handle-gateway` does not expose a public `/.well-known/atproto-did` route.
 
 When running `divine-handle-gateway` locally, set:
@@ -72,6 +79,8 @@ export ATPROTO_NAME_SERVER_SYNC_TOKEN=local-sync-token
 
 Use environment-specific local URLs for the provisioning worker, keycast internal sync route, and name-server.
 
+For the localnet lab, start from `deploy/localnet/handle-gateway.env.example` instead of hand-writing those overrides.
+
 When running `divine-atbridge` locally for provisioning, also set:
 
 ```bash
@@ -80,6 +89,10 @@ export ATPROTO_PROVISIONING_TOKEN=local-provisioning-token
 ```
 
 The `HEALTH_BIND_ADDR` listener now serves both `/health` and the internal `POST /provision` endpoint that `divine-handle-gateway` calls.
+
+For the localnet lab, start from `deploy/localnet/bridge.env.example`. That example points bridge traffic at `https://plc.<tailnet>.ts.net`, `https://pds.<tailnet>.ts.net`, and the local `divine.test` handle domain.
+
+`divine.test` is only the local lab handle suffix. Staging and production user handles remain under `divine.video`.
 
 ## Staging And Production Deploy Contract
 

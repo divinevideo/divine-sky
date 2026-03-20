@@ -40,3 +40,17 @@ fn localnet_jetstream_and_dns_slices_are_defined() {
     assert!(dns.contains("coredns:"));
     assert!(dns.contains("app:"));
 }
+
+#[test]
+fn localnet_override_examples_target_local_services() {
+    let repo_root = repo_root();
+    let bridge_env =
+        std::fs::read_to_string(repo_root.join("deploy/localnet/bridge.env.example")).unwrap();
+    let gateway_env = std::fs::read_to_string(
+        repo_root.join("deploy/localnet/handle-gateway.env.example"),
+    )
+    .unwrap();
+    assert!(bridge_env.contains("PLC_DIRECTORY_URL=https://plc."));
+    assert!(bridge_env.contains("HANDLE_DOMAIN=divine.test"));
+    assert!(gateway_env.contains("ATPROTO_PROVISIONING_URL"));
+}
