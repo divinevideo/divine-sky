@@ -1,0 +1,31 @@
+[package]
+name = "divine-atbridge"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "divine-atbridge"
+path = "src/main.rs"
+
+[dependencies]
+divine-bridge-types = { path = "../divine-bridge-types" }
+anyhow = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+secp256k1 = { version = "0.29", features = ["global-context", "hashes"] }
+sha2 = "0.10"
+hex = "0.4"
+unicode-segmentation = "1.11"
+chrono = { workspace = true }
+data-encoding = "2.6"
+bs58 = "0.5"
+serde_ipld_dagcbor = "0.6"
+async-trait = "0.1"
+tracing = { workspace = true }
+tokio = { workspace = true }
+reqwest = { version = "0.12", features = ["rustls-tls", "json"], default-features = false }
+
+[dev-dependencies]
+secp256k1 = { version = "0.29", features = ["global-context", "hashes", "rand-std"] }
+tokio = { version = "1", features = ["full", "test-util"] }
+mockito = "1"

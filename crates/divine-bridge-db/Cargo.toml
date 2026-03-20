@@ -1,0 +1,11 @@
+[package]
+name = "divine-bridge-db"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+diesel = { workspace = true }
+chrono = { workspace = true }
+serde = { workspace = true }
+anyhow = { workspace = true }
+divine-bridge-types = { path = "../divine-bridge-types" }
