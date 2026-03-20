@@ -1,10 +1,15 @@
 CREATE TABLE account_links (
     nostr_pubkey    TEXT PRIMARY KEY,
-    did             TEXT UNIQUE NOT NULL,
+    did             TEXT UNIQUE,
     handle          TEXT UNIQUE NOT NULL,
     crosspost_enabled BOOLEAN NOT NULL DEFAULT FALSE,
     signing_key_id  TEXT NOT NULL,
-    created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    plc_rotation_key_ref TEXT NOT NULL,
+    provisioning_state TEXT NOT NULL DEFAULT 'pending',
+    provisioning_error TEXT,
+    disabled_at     TIMESTAMPTZ,
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
 CREATE TABLE ingest_offsets (

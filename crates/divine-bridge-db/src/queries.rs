@@ -4,7 +4,9 @@
 
 use anyhow::Result;
 use diesel::prelude::*;
+use diesel::sql_query;
 use diesel::PgConnection;
+use diesel::sql_types::{Nullable, Text};
 
 use divine_bridge_types::PublishState;
 
@@ -30,7 +32,19 @@ pub fn get_account_by_pubkey(
 /// Look up an account link by DID.
 pub fn get_account_by_did(conn: &mut PgConnection, did: &str) -> Result<Option<AccountLink>> {
     let result = account_links::table
-        .filter(account_links::did.eq(did))
+        .filter(account_links::did.eq(Some(did)))
+        .first::<AccountLink>(conn)
+        .optional()?;
+    Ok(result)
+}
+
+/// Look up an account link by handle.
+pub fn get_account_by_handle(
+    conn: &mut PgConnection,
+    handle: &str,
+) -> Result<Option<AccountLink>> {
+    let result = account_links::table
+        .filter(account_links::handle.eq(handle))
         .first::<AccountLink>(conn)
         .optional()?;
     Ok(result)
@@ -41,6 +55,125 @@ pub fn insert_account_link(conn: &mut PgConnection, link: &NewAccountLink) -> Re
     let result = diesel::insert_into(account_links::table)
         .values(link)
         .get_result::<AccountLink>(conn)?;
+    Ok(result)
+}
+
+/// Look up lifecycle-aware account-link state by pubkey using raw SQL so it can
+/// evolve ahead of the generated Diesel schema file.
+pub fn get_account_link_lifecycle(
+    conn: &mut PgConnection,
+    pubkey: &str,
+) -> Result<Option<AccountLinkLifecycleRow>> {
+    let result = sql_query(
+        "SELECT nostr_pubkey, did, handle, crosspost_enabled, signing_key_id, \
+         plc_rotation_key_ref, provisioning_state, provisioning_error, disabled_at, \
+         created_at, updated_at \
+         FROM account_links WHERE nostr_pubkey = $1",
+    )
+    .bind::<Text, _>(pubkey)
+    .get_result::<AccountLinkLifecycleRow>(conn)
+    .optional()?;
+    Ok(result)
+}
+
+/// Insert or update the pending lifecycle state before PLC/PDS side effects.
+pub fn upsert_pending_account_link(
+    conn: &mut PgConnection,
+    nostr_pubkey: &str,
+    handle: &str,
+    signing_key_id: &str,
+    plc_rotation_key_ref: &str,
+) -> Result<AccountLinkLifecycleRow> {
+    let result = sql_query(
+        "INSERT INTO account_links (
+            nostr_pubkey, did, handle, crosspost_enabled, signing_key_id,
+            plc_rotation_key_ref, provisioning_state, provisioning_error, disabled_at
+         ) VALUES ($1, NULL, $2, FALSE, $3, $4, 'pending', NULL, NULL)
+         ON CONFLICT (nostr_pubkey) DO UPDATE
+         SET handle = EXCLUDED.handle,
+             signing_key_id = EXCLUDED.signing_key_id,
+             plc_rotation_key_ref = EXCLUDED.plc_rotation_key_ref,
+             provisioning_state = 'pending',
+             provisioning_error = NULL,
+             disabled_at = NULL,
+             updated_at = NOW()
+         RETURNING nostr_pubkey, did, handle, crosspost_enabled, signing_key_id,
+                   plc_rotation_key_ref, provisioning_state, provisioning_error, disabled_at,
+                   created_at, updated_at",
+    )
+    .bind::<Text, _>(nostr_pubkey)
+    .bind::<Text, _>(handle)
+    .bind::<Text, _>(signing_key_id)
+    .bind::<Text, _>(plc_rotation_key_ref)
+    .get_result::<AccountLinkLifecycleRow>(conn)?;
+    Ok(result)
+}
+
+/// Mark a lifecycle record ready after the PDS account exists.
+pub fn mark_account_link_ready(
+    conn: &mut PgConnection,
+    nostr_pubkey: &str,
+    did: &str,
+) -> Result<AccountLinkLifecycleRow> {
+    let result = sql_query(
+        "UPDATE account_links
+         SET did = $2,
+             provisioning_state = 'ready',
+             provisioning_error = NULL,
+             updated_at = NOW()
+         WHERE nostr_pubkey = $1
+         RETURNING nostr_pubkey, did, handle, crosspost_enabled, signing_key_id,
+                   plc_rotation_key_ref, provisioning_state, provisioning_error, disabled_at,
+                   created_at, updated_at",
+    )
+    .bind::<Text, _>(nostr_pubkey)
+    .bind::<Text, _>(did)
+    .get_result::<AccountLinkLifecycleRow>(conn)?;
+    Ok(result)
+}
+
+/// Mark a lifecycle record failed while preserving any created DID.
+pub fn mark_account_link_failed(
+    conn: &mut PgConnection,
+    nostr_pubkey: &str,
+    did: Option<&str>,
+    error: &str,
+) -> Result<AccountLinkLifecycleRow> {
+    let result = sql_query(
+        "UPDATE account_links
+         SET did = COALESCE($2, did),
+             provisioning_state = 'failed',
+             provisioning_error = $3,
+             updated_at = NOW()
+         WHERE nostr_pubkey = $1
+         RETURNING nostr_pubkey, did, handle, crosspost_enabled, signing_key_id,
+                   plc_rotation_key_ref, provisioning_state, provisioning_error, disabled_at,
+                   created_at, updated_at",
+    )
+    .bind::<Text, _>(nostr_pubkey)
+    .bind::<Nullable<Text>, _>(did)
+    .bind::<Text, _>(error)
+    .get_result::<AccountLinkLifecycleRow>(conn)?;
+    Ok(result)
+}
+
+/// Disable an existing account-link record.
+pub fn disable_account_link(
+    conn: &mut PgConnection,
+    nostr_pubkey: &str,
+) -> Result<AccountLinkLifecycleRow> {
+    let result = sql_query(
+        "UPDATE account_links
+         SET provisioning_state = 'disabled',
+             disabled_at = NOW(),
+             updated_at = NOW()
+         WHERE nostr_pubkey = $1
+         RETURNING nostr_pubkey, did, handle, crosspost_enabled, signing_key_id,
+                   plc_rotation_key_ref, provisioning_state, provisioning_error, disabled_at,
+                   created_at, updated_at",
+    )
+    .bind::<Text, _>(nostr_pubkey)
+    .get_result::<AccountLinkLifecycleRow>(conn)?;
     Ok(result)
 }
 

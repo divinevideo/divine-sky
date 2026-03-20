@@ -2,6 +2,7 @@
 
 use chrono::{DateTime, Utc};
 use diesel::prelude::*;
+use diesel::sql_types::{Bool, Nullable, Text, Timestamptz};
 
 use crate::schema::*;
 
@@ -14,21 +15,75 @@ use crate::schema::*;
 #[diesel(primary_key(nostr_pubkey))]
 pub struct AccountLink {
     pub nostr_pubkey: String,
-    pub did: String,
+    pub did: Option<String>,
     pub handle: String,
     pub crosspost_enabled: bool,
     pub signing_key_id: String,
+    pub plc_rotation_key_ref: String,
+    pub provisioning_state: String,
+    pub provisioning_error: Option<String>,
+    pub disabled_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
 }
 
 #[derive(Debug, Insertable)]
 #[diesel(table_name = account_links)]
 pub struct NewAccountLink<'a> {
     pub nostr_pubkey: &'a str,
-    pub did: &'a str,
+    pub did: Option<&'a str>,
     pub handle: &'a str,
     pub crosspost_enabled: bool,
     pub signing_key_id: &'a str,
+    pub plc_rotation_key_ref: &'a str,
+    pub provisioning_state: &'a str,
+    pub provisioning_error: Option<&'a str>,
+    pub disabled_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProvisioningState {
+    Pending,
+    Ready,
+    Failed,
+    Disabled,
+}
+
+impl ProvisioningState {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Pending => "pending",
+            Self::Ready => "ready",
+            Self::Failed => "failed",
+            Self::Disabled => "disabled",
+        }
+    }
+}
+
+#[derive(Debug, Clone, QueryableByName)]
+pub struct AccountLinkLifecycleRow {
+    #[diesel(sql_type = Text)]
+    pub nostr_pubkey: String,
+    #[diesel(sql_type = Nullable<Text>)]
+    pub did: Option<String>,
+    #[diesel(sql_type = Text)]
+    pub handle: String,
+    #[diesel(sql_type = Bool)]
+    pub crosspost_enabled: bool,
+    #[diesel(sql_type = Nullable<Text>)]
+    pub signing_key_id: Option<String>,
+    #[diesel(sql_type = Nullable<Text>)]
+    pub plc_rotation_key_ref: Option<String>,
+    #[diesel(sql_type = Text)]
+    pub provisioning_state: String,
+    #[diesel(sql_type = Nullable<Text>)]
+    pub provisioning_error: Option<String>,
+    #[diesel(sql_type = Nullable<Timestamptz>)]
+    pub disabled_at: Option<DateTime<Utc>>,
+    #[diesel(sql_type = Timestamptz)]
+    pub created_at: DateTime<Utc>,
+    #[diesel(sql_type = Timestamptz)]
+    pub updated_at: DateTime<Utc>,
 }
 
 // ---------------------------------------------------------------------------

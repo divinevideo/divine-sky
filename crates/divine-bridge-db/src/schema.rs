@@ -3,11 +3,16 @@
 diesel::table! {
     account_links (nostr_pubkey) {
         nostr_pubkey -> Text,
-        did -> Text,
+        did -> Nullable<Text>,
         handle -> Text,
         crosspost_enabled -> Bool,
         signing_key_id -> Text,
+        plc_rotation_key_ref -> Text,
+        provisioning_state -> Text,
+        provisioning_error -> Nullable<Text>,
+        disabled_at -> Nullable<Timestamptz>,
         created_at -> Timestamptz,
+        updated_at -> Timestamptz,
     }
 }
 

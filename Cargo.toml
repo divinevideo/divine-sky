@@ -16,3 +16,8 @@ anyhow = "1"
 tracing = "0.1"
 tracing-subscriber = "0.3"
 chrono = { version = "0.4", features = ["serde"] }
+
+[workspace.metadata]
+bootstrap = "bash scripts/test-workspace.sh"
+libpq_macos = "brew install libpq"
+libpq_linux = "sudo apt-get install -y libpq-dev pkg-config"
