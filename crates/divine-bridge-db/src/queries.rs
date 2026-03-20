@@ -378,3 +378,81 @@ pub fn update_publish_job_state(
         .get_result::<PublishJob>(conn)?;
     Ok(result)
 }
+
+// ---------------------------------------------------------------------------
+// labeler_events queries
+// ---------------------------------------------------------------------------
+
+pub fn insert_labeler_event(
+    conn: &mut PgConnection,
+    event: &NewLabelerEvent,
+) -> Result<LabelerEvent> {
+    let result = diesel::insert_into(labeler_events::table)
+        .values(event)
+        .get_result::<LabelerEvent>(conn)?;
+    Ok(result)
+}
+
+pub fn get_labeler_events_after(
+    conn: &mut PgConnection,
+    after_seq: i64,
+    limit: i64,
+) -> Result<Vec<LabelerEvent>> {
+    let results = labeler_events::table
+        .filter(labeler_events::seq.gt(after_seq))
+        .order(labeler_events::seq.asc())
+        .limit(limit)
+        .load::<LabelerEvent>(conn)?;
+    Ok(results)
+}
+
+pub fn get_latest_labeler_seq(conn: &mut PgConnection) -> Result<Option<i64>> {
+    use diesel::dsl::max;
+    let result = labeler_events::table
+        .select(max(labeler_events::seq))
+        .first::<Option<i64>>(conn)?;
+    Ok(result)
+}
+
+// ---------------------------------------------------------------------------
+// inbound_labels queries
+// ---------------------------------------------------------------------------
+
+pub fn insert_inbound_label(
+    conn: &mut PgConnection,
+    label: &NewInboundLabel,
+) -> Result<InboundLabel> {
+    let result = diesel::insert_into(inbound_labels::table)
+        .values(label)
+        .get_result::<InboundLabel>(conn)?;
+    Ok(result)
+}
+
+pub fn get_pending_inbound_labels(
+    conn: &mut PgConnection,
+    limit: i64,
+) -> Result<Vec<InboundLabel>> {
+    let results = inbound_labels::table
+        .filter(inbound_labels::review_state.eq("pending"))
+        .order(inbound_labels::created_at.asc())
+        .limit(limit)
+        .load::<InboundLabel>(conn)?;
+    Ok(results)
+}
+
+pub fn update_inbound_label_review(
+    conn: &mut PgConnection,
+    label_id: i64,
+    new_state: &str,
+    reviewer: &str,
+) -> Result<InboundLabel> {
+    let now = chrono::Utc::now();
+    let result = diesel::update(inbound_labels::table.find(label_id))
+        .set((
+            inbound_labels::review_state.eq(new_state),
+            inbound_labels::reviewed_by.eq(Some(reviewer)),
+            inbound_labels::reviewed_at.eq(Some(now)),
+        ))
+        .get_result::<InboundLabel>(conn)?;
+    Ok(result)
+}

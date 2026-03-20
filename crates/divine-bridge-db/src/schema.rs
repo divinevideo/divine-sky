@@ -73,6 +73,39 @@ diesel::table! {
     }
 }
 
+diesel::table! {
+    labeler_events (seq) {
+        seq -> Int8,
+        src_did -> Text,
+        subject_uri -> Text,
+        subject_cid -> Nullable<Text>,
+        val -> Text,
+        neg -> Bool,
+        nostr_event_id -> Nullable<Text>,
+        sha256 -> Nullable<Text>,
+        origin -> Text,
+        created_at -> Timestamptz,
+    }
+}
+
+diesel::table! {
+    inbound_labels (id) {
+        id -> Int8,
+        labeler_did -> Text,
+        subject_uri -> Text,
+        val -> Text,
+        neg -> Bool,
+        nostr_event_id -> Nullable<Text>,
+        sha256 -> Nullable<Text>,
+        divine_label -> Nullable<Text>,
+        review_state -> Text,
+        reviewed_by -> Nullable<Text>,
+        reviewed_at -> Nullable<Timestamptz>,
+        raw_json -> Nullable<Text>,
+        created_at -> Timestamptz,
+    }
+}
+
 diesel::joinable!(record_mappings -> account_links (did));
 
 diesel::allow_tables_to_appear_in_same_query!(
@@ -82,4 +115,6 @@ diesel::allow_tables_to_appear_in_same_query!(
     record_mappings,
     moderation_actions,
     publish_jobs,
+    labeler_events,
+    inbound_labels,
 );

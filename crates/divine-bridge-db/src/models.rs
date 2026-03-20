@@ -216,3 +216,72 @@ pub struct NewPublishJob<'a> {
     pub nostr_event_id: &'a str,
     pub state: &'a str,
 }
+
+// ---------------------------------------------------------------------------
+// labeler_events
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Queryable, Selectable, Identifiable)]
+#[diesel(table_name = labeler_events)]
+#[diesel(primary_key(seq))]
+pub struct LabelerEvent {
+    pub seq: i64,
+    pub src_did: String,
+    pub subject_uri: String,
+    pub subject_cid: Option<String>,
+    pub val: String,
+    pub neg: bool,
+    pub nostr_event_id: Option<String>,
+    pub sha256: Option<String>,
+    pub origin: String,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Insertable)]
+#[diesel(table_name = labeler_events)]
+pub struct NewLabelerEvent<'a> {
+    pub src_did: &'a str,
+    pub subject_uri: &'a str,
+    pub subject_cid: Option<&'a str>,
+    pub val: &'a str,
+    pub neg: bool,
+    pub nostr_event_id: Option<&'a str>,
+    pub sha256: Option<&'a str>,
+    pub origin: &'a str,
+}
+
+// ---------------------------------------------------------------------------
+// inbound_labels
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Queryable, Selectable, Identifiable)]
+#[diesel(table_name = inbound_labels)]
+pub struct InboundLabel {
+    pub id: i64,
+    pub labeler_did: String,
+    pub subject_uri: String,
+    pub val: String,
+    pub neg: bool,
+    pub nostr_event_id: Option<String>,
+    pub sha256: Option<String>,
+    pub divine_label: Option<String>,
+    pub review_state: String,
+    pub reviewed_by: Option<String>,
+    pub reviewed_at: Option<DateTime<Utc>>,
+    pub raw_json: Option<String>,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Insertable)]
+#[diesel(table_name = inbound_labels)]
+pub struct NewInboundLabel<'a> {
+    pub labeler_did: &'a str,
+    pub subject_uri: &'a str,
+    pub val: &'a str,
+    pub neg: bool,
+    pub nostr_event_id: Option<&'a str>,
+    pub sha256: Option<&'a str>,
+    pub divine_label: Option<&'a str>,
+    pub review_state: &'a str,
+    pub raw_json: Option<&'a str>,
+}
