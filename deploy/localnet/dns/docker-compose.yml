@@ -5,6 +5,7 @@ services:
     command: -conf /etc/coredns/Corefile
     volumes:
       - ./Corefile.example:/etc/coredns/Corefile:ro
+      - zone-data:/zones
 
   tailscale:
     image: tailscale/tailscale:stable
@@ -25,12 +26,25 @@ services:
       - /dev/net/tun:/dev/net/tun
 
   app:
-    image: alpine:3.20
+    image: rust:1.86-bookworm
     restart: unless-stopped
-    command: ["sh", "-lc", "echo placeholder localnet admin service && sleep infinity"]
+    working_dir: /workspace
+    command: ["bash", "-lc", "cargo run -p divine-localnet-admin"]
+    environment:
+      LOCALNET_ADMIN_BIND_ADDR: 0.0.0.0:3000
+      LOCALNET_ADMIN_DATA_DIR: /data
+      LOCALNET_ADMIN_ZONE_DIR: /zones
+      LOCALNET_ADMIN_DOMAIN: divine.test
+      LOCALNET_ADMIN_WILDCARD_IP: ${LOCALNET_ADMIN_WILDCARD_IP:-100.64.0.10}
     depends_on:
+      coredns:
+        condition: service_started
       tailscale:
         condition: service_started
+    volumes:
+      - ../../..:/workspace
+      - admin-data:/data
+      - zone-data:/zones
     network_mode: service:tailscale
 
   nginx:
@@ -47,5 +61,7 @@ services:
     network_mode: service:tailscale
 
 volumes:
+  admin-data:
+  zone-data:
   tailscale-state:
   dns-certs:

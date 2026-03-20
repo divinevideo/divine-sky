@@ -15,5 +15,6 @@ Expose the admin endpoint on `handles.<tailnet>.ts.net`.
 
 ## Notes
 
-- `Corefile.example` shows the wildcard `A` responses, `_atproto.<name>.divine.test` TXT pattern, and a local admin hostname on the tailnet.
-- The `app` service is a placeholder here and will be replaced by the Rust handle-admin crate in the next task.
+- `app` now runs the `divine-localnet-admin` crate and writes `db.divine.test` into the shared `/zones` volume that CoreDNS reads.
+- Create mappings through the local admin URL with `POST /api/handles` and a payload like `{"name":"alice","did":"did:plc:alice123"}`.
+- Each mapping produces `alice.divine.test` plus `_atproto.alice.divine.test TXT "did=did:plc:alice123"` in the generated zone file.
