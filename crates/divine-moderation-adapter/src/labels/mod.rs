@@ -1,4 +1,5 @@
 pub mod vocabulary;
+pub mod outbound;
 
 use serde::{Deserialize, Serialize};
 
