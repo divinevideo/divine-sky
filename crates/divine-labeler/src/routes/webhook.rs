@@ -22,6 +22,7 @@ pub struct WebhookPayload {
     pub labels: Vec<LabelScore>,
     pub reviewed_by: Option<String>,
     pub timestamp: Option<String>,
+    pub nostr_event_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -45,6 +46,16 @@ pub async fn handler(
     let now = Utc::now();
     let cts = now.to_rfc3339();
 
+    // Resolve AT URI from record_mappings if nostr_event_id is provided
+    let at_uri = if let Some(ref event_id) = payload.nostr_event_id {
+        match state.store.get_at_uri_by_event_id(event_id) {
+            Ok(Some((uri, _did))) => uri,
+            _ => format!("at://sha256:{}", payload.sha256),
+        }
+    } else {
+        format!("at://sha256:{}", payload.sha256)
+    };
+
     for label_score in &payload.labels {
         let atproto_val = match divine_to_atproto(&label_score.category) {
             Some(v) => v,
@@ -57,7 +68,7 @@ pub async fn handler(
         let unsigned = UnsignedLabel {
             ver: 1,
             src: state.labeler_did.clone(),
-            uri: format!("at://sha256:{}", payload.sha256),
+            uri: at_uri.clone(),
             cid: None,
             val: atproto_val.to_string(),
             neg: false,
@@ -103,7 +114,7 @@ pub async fn handler(
         let unsigned = UnsignedLabel {
             ver: 1,
             src: state.labeler_did.clone(),
-            uri: format!("at://sha256:{}", payload.sha256),
+            uri: at_uri.clone(),
             cid: None,
             val: "!takedown".to_string(),
             neg: false,

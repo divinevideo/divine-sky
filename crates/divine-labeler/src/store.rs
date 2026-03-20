@@ -39,4 +39,17 @@ impl DbStore {
         let mut conn = self.connection.lock().unwrap();
         queries::get_latest_labeler_seq(&mut conn)
     }
+
+    pub fn get_at_uri_by_event_id(&self, nostr_event_id: &str) -> Result<Option<(String, String)>> {
+        use divine_bridge_db::schema::record_mappings;
+        use diesel::prelude::*;
+
+        let mut conn = self.connection.lock().unwrap();
+        let result = record_mappings::table
+            .filter(record_mappings::nostr_event_id.eq(nostr_event_id))
+            .select((record_mappings::at_uri, record_mappings::did))
+            .first::<(String, String)>(&mut *conn)
+            .optional()?;
+        Ok(result)
+    }
 }
