@@ -9,6 +9,23 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_DB: divine_bridge
+          POSTGRES_USER: divine
+          POSTGRES_PASSWORD: divine_dev
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U divine -d divine_bridge"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      TEST_DATABASE_URL: postgres://divine:divine_dev@127.0.0.1:5432/divine_bridge
+      DATABASE_URL: postgres://divine:divine_dev@127.0.0.1:5432/divine_bridge
     steps:
       - name: Checkout
         uses: actions/checkout@v4

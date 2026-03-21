@@ -14,8 +14,12 @@ The runtime slice uses the compose stack in [config/docker-compose.yml](/Users/r
 Bring it up with:
 
 ```bash
-docker compose -f config/docker-compose.yml up --build -d
+docker compose -f config/docker-compose.yml up -d
 ```
+
+Add `--build` when you need to rebuild local images after changing the bridge or the patched PDS checkout.
+
+This remains the fast default for bridge development. Use `deploy/localnet/` when you need the fuller ATProto lab with dedicated PLC, PDS, Jetstream, DNS, and handle-admin slices.
 
 The `pds` service builds the patched sibling checkout at `../rsky` and injects the blob-store env vars required by that fork:
 
@@ -51,3 +55,7 @@ For the local compose stack, these are supplied in [config/docker-compose.yml](/
 ## PDS-Specific Dev Stack
 
 Use [deploy/pds/docker-compose.yml](/Users/rabble/code/divine/divine-sky/deploy/pds/docker-compose.yml) when iterating on the PDS alone. It reuses the same MinIO bootstrap script so bucket creation stays consistent with the full local stack.
+
+## Full Localnet Lab
+
+The additive localnet profile lives under [deploy/localnet/README.md](/Users/rabble/code/divine/divine-sky/deploy/localnet/README.md). It keeps `config/docker-compose.yml` as the default stack while documenting the broader provisioning lab for `*.divine.test` handles and local env overrides for bridge-adjacent services.

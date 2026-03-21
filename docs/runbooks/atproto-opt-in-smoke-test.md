@@ -2,6 +2,16 @@
 
 Use this checklist to validate the end-to-end ATProto opt-in flow across `rsky-pds`, `keycast`, `divine-sky`, `divine-name-server`, Fastly KV, and `divine-router`.
 
+Use the fast local stack in `config/docker-compose.yml` for bridge-only checks. Use the full `deploy/localnet/` lab when you need PLC, `divine.test` handle resolution, or a provisioning path that looks more like the real network surface.
+
+The user-facing opt-in path still depends on sibling repos:
+
+- `../keycast` for the consent UI and `/api/user/atproto/*`
+- `../divine-name-server` for username state publication
+- `../divine-router` for read-only `/.well-known/atproto-did`
+
+`divine.test` is the local lab handle suffix. Public staging and production handles stay on `divine.video`.
+
 ## Preflight
 
 1. Run the PDS canary first:
@@ -14,6 +24,12 @@ Use this checklist to validate the end-to-end ATProto opt-in flow across `rsky-p
    ```
 2. Verify `curl -fsS https://pds.staging.dvines.org/xrpc/_health` returns `200`.
 3. Verify `curl -fsS https://login.staging.dvines.org/api/user/atproto/status` is reachable.
+
+For a localnet run instead of staging:
+
+1. Start the lab slices under `deploy/localnet/`.
+2. Load `deploy/localnet/bridge.env.example` and `deploy/localnet/handle-gateway.env.example` into the local `divine-atbridge` and `divine-handle-gateway` processes.
+3. Claim and test `username.divine.test`, not `username.divine.video`.
 
 ## Happy Path
 

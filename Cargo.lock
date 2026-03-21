@@ -683,6 +683,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "divine-localnet-admin"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tower",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "divine-moderation-adapter"
 version = "0.1.0"
 dependencies = [

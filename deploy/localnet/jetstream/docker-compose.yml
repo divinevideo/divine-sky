@@ -1,0 +1,47 @@
+services:
+  tailscale:
+    image: tailscale/tailscale:stable
+    restart: unless-stopped
+    hostname: ${TS_HOSTNAME}
+    environment:
+      TS_AUTHKEY: ${TS_AUTHKEY}
+      TS_STATE_DIR: /var/lib/tailscale
+      TS_EXTRA_ARGS: ${TS_EXTRA_ARGS}
+      TS_SERVE_CONFIG: /config/serve.json
+    volumes:
+      - tailscale-state:/var/lib/tailscale
+      - ./tailscale:/config
+    cap_add:
+      - NET_ADMIN
+      - SYS_MODULE
+    devices:
+      - /dev/net/tun:/dev/net/tun
+
+  app:
+    image: ghcr.io/bluesky-social/jetstream:latest
+    restart: unless-stopped
+    depends_on:
+      tailscale:
+        condition: service_started
+    environment:
+      JETSTREAM_WS_URL: ${JETSTREAM_WS_URL}
+      JETSTREAM_LISTEN_ADDR: ${JETSTREAM_LISTEN_ADDR}
+      RUST_LOG: ${RUST_LOG}
+    network_mode: service:tailscale
+
+  nginx:
+    image: nginx:1.27-alpine
+    restart: unless-stopped
+    depends_on:
+      app:
+        condition: service_started
+      tailscale:
+        condition: service_started
+    volumes:
+      - ./nginx.conf:/etc/nginx/conf.d/default.conf:ro
+      - jetstream-certs:/etc/nginx/certs
+    network_mode: service:tailscale
+
+volumes:
+  tailscale-state:
+  jetstream-certs:

@@ -1,0 +1,67 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-plc}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-plc_dev_password}
+      POSTGRES_DB: ${POSTGRES_DB:-plc}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-plc} -d ${POSTGRES_DB:-plc}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  tailscale:
+    image: tailscale/tailscale:stable
+    restart: unless-stopped
+    hostname: ${TS_HOSTNAME:-plc-localnet}
+    environment:
+      TS_AUTHKEY: ${TS_AUTHKEY:-tskey-localnet-placeholder}
+      TS_STATE_DIR: /var/lib/tailscale
+      TS_EXTRA_ARGS: ${TS_EXTRA_ARGS:---advertise-tags=tag:dev}
+      TS_SERVE_CONFIG: /config/serve.json
+    volumes:
+      - tailscale-state:/var/lib/tailscale
+      - ./tailscale:/config
+    cap_add:
+      - NET_ADMIN
+      - SYS_MODULE
+    devices:
+      - /dev/net/tun:/dev/net/tun
+
+  app:
+    image: ghcr.io/bluesky-social/did-method-plc:latest
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      tailscale:
+        condition: service_started
+    environment:
+      PORT: 2582
+      LOG_LEVEL: info
+      PLC_BASE_URL: https://plc.${TAILNET_NAME:-example-tailnet}.ts.net
+      DATABASE_URL: postgres://${POSTGRES_USER:-plc}:${POSTGRES_PASSWORD:-plc_dev_password}@postgres:5432/${POSTGRES_DB:-plc}
+    network_mode: service:tailscale
+
+  nginx:
+    image: nginx:1.27-alpine
+    restart: unless-stopped
+    depends_on:
+      app:
+        condition: service_started
+      tailscale:
+        condition: service_started
+    volumes:
+      - ./nginx.conf:/etc/nginx/conf.d/default.conf:ro
+      - plc-certs:/etc/nginx/certs
+    network_mode: service:tailscale
+
+volumes:
+  postgres-data:
+  tailscale-state:
+  plc-certs:
