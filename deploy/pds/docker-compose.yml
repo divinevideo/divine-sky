@@ -5,7 +5,10 @@ version: "3.9"
 
 services:
   pds:
-    image: ghcr.io/blacksky-algorithms/rsky-pds:latest
+    image: rsky-pds:local
+    build:
+      context: ../../../rsky
+      dockerfile: rsky-pds/Dockerfile
     ports:
       - "2583:2583"
     environment:
@@ -13,11 +16,14 @@ services:
       - PDS_SERVICE_DID=${PDS_SERVICE_DID}
       - PDS_SERVICE_HANDLE_DOMAINS=${PDS_SERVICE_HANDLE_DOMAINS}
       - DATABASE_URL=postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+      - PDS_BLOBSTORE_S3_BUCKET=${PDS_BLOBSTORE_S3_BUCKET:-pds-blobs}
       - AWS_ENDPOINT=http://minio:9000
+      - AWS_ENDPOINT_BUCKET=${AWS_ENDPOINT_BUCKET:-pds-blobs}
       - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}
       - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}
       - AWS_REGION=${AWS_REGION}
       - AWS_DEFAULT_REGION=${AWS_DEFAULT_REGION}
+      - AWS_EC2_METADATA_DISABLED=true
       - PDS_DID_PLC_URL=${PDS_DID_PLC_URL}
       - PDS_BSKY_APP_VIEW_URL=${PDS_BSKY_APP_VIEW_URL}
       - PDS_BSKY_APP_VIEW_DID=${PDS_BSKY_APP_VIEW_DID}
@@ -28,6 +34,8 @@ services:
         condition: service_healthy
       minio:
         condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:2583/xrpc/_health"]
       interval: 10s

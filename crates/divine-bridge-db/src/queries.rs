@@ -3,10 +3,12 @@
 //! All query functions live here and are re-exported from the crate root.
 
 use anyhow::Result;
+use chrono::{DateTime, Utc};
 use diesel::prelude::*;
 use diesel::sql_query;
 use diesel::sql_types::{Nullable, Text};
 use diesel::PgConnection;
+use diesel::PgTextExpressionMethods;
 
 use divine_bridge_types::PublishState;
 
@@ -475,5 +477,261 @@ pub fn update_inbound_label_review(
             inbound_labels::reviewed_at.eq(Some(now)),
         ))
         .get_result::<InboundLabel>(conn)?;
+    Ok(result)
+}
+
+// ---------------------------------------------------------------------------
+// appview read-model queries
+// ---------------------------------------------------------------------------
+
+pub fn upsert_appview_repo(conn: &mut PgConnection, repo: &NewAppviewRepo) -> Result<AppviewRepo> {
+    let result = diesel::insert_into(appview_repos::table)
+        .values(repo)
+        .on_conflict(appview_repos::did)
+        .do_update()
+        .set((
+            appview_repos::handle.eq(repo.handle),
+            appview_repos::head.eq(repo.head),
+            appview_repos::rev.eq(repo.rev),
+            appview_repos::active.eq(repo.active),
+            appview_repos::last_backfilled_at.eq(repo.last_backfilled_at),
+            appview_repos::last_seen_seq.eq(repo.last_seen_seq),
+            appview_repos::updated_at.eq(diesel::dsl::now),
+        ))
+        .get_result::<AppviewRepo>(conn)?;
+    Ok(result)
+}
+
+pub fn upsert_appview_profile(
+    conn: &mut PgConnection,
+    profile: &NewAppviewProfile,
+) -> Result<AppviewProfile> {
+    let result = diesel::insert_into(appview_profiles::table)
+        .values(profile)
+        .on_conflict(appview_profiles::did)
+        .do_update()
+        .set((
+            appview_profiles::handle.eq(profile.handle),
+            appview_profiles::display_name.eq(profile.display_name),
+            appview_profiles::description.eq(profile.description),
+            appview_profiles::website.eq(profile.website),
+            appview_profiles::avatar_cid.eq(profile.avatar_cid),
+            appview_profiles::banner_cid.eq(profile.banner_cid),
+            appview_profiles::created_at.eq(profile.created_at),
+            appview_profiles::raw_json.eq(profile.raw_json),
+            appview_profiles::indexed_at.eq(profile.indexed_at),
+            appview_profiles::updated_at.eq(diesel::dsl::now),
+        ))
+        .get_result::<AppviewProfile>(conn)?;
+    Ok(result)
+}
+
+pub fn upsert_appview_post(conn: &mut PgConnection, post: &NewAppviewPost) -> Result<AppviewPost> {
+    let result = diesel::insert_into(appview_posts::table)
+        .values(post)
+        .on_conflict(appview_posts::uri)
+        .do_update()
+        .set((
+            appview_posts::did.eq(post.did),
+            appview_posts::rkey.eq(post.rkey),
+            appview_posts::record_cid.eq(post.record_cid),
+            appview_posts::created_at.eq(post.created_at),
+            appview_posts::text.eq(post.text),
+            appview_posts::langs_json.eq(post.langs_json),
+            appview_posts::embed_blob_cid.eq(post.embed_blob_cid),
+            appview_posts::embed_alt.eq(post.embed_alt),
+            appview_posts::aspect_ratio_width.eq(post.aspect_ratio_width),
+            appview_posts::aspect_ratio_height.eq(post.aspect_ratio_height),
+            appview_posts::raw_json.eq(post.raw_json),
+            appview_posts::search_text.eq(post.search_text),
+            appview_posts::indexed_at.eq(post.indexed_at),
+            appview_posts::deleted_at.eq(post.deleted_at),
+        ))
+        .get_result::<AppviewPost>(conn)?;
+    Ok(result)
+}
+
+pub fn upsert_appview_media_view(
+    conn: &mut PgConnection,
+    view: &NewAppviewMediaView,
+) -> Result<AppviewMediaView> {
+    let result = diesel::insert_into(appview_media_views::table)
+        .values(view)
+        .on_conflict((appview_media_views::did, appview_media_views::blob_cid))
+        .do_update()
+        .set((
+            appview_media_views::playlist_url.eq(view.playlist_url),
+            appview_media_views::thumbnail_url.eq(view.thumbnail_url),
+            appview_media_views::mime_type.eq(view.mime_type),
+            appview_media_views::bytes.eq(view.bytes),
+            appview_media_views::ready.eq(view.ready),
+            appview_media_views::last_derived_at.eq(view.last_derived_at),
+            appview_media_views::updated_at.eq(diesel::dsl::now),
+        ))
+        .get_result::<AppviewMediaView>(conn)?;
+    Ok(result)
+}
+
+pub fn upsert_appview_service_state(
+    conn: &mut PgConnection,
+    state: &NewAppviewServiceState,
+) -> Result<AppviewServiceState> {
+    let result = diesel::insert_into(appview_service_state::table)
+        .values(state)
+        .on_conflict(appview_service_state::state_key)
+        .do_update()
+        .set((
+            appview_service_state::state_value.eq(state.state_value),
+            appview_service_state::updated_at.eq(diesel::dsl::now),
+        ))
+        .get_result::<AppviewServiceState>(conn)?;
+    Ok(result)
+}
+
+pub fn get_appview_service_state(
+    conn: &mut PgConnection,
+    key: &str,
+) -> Result<Option<AppviewServiceState>> {
+    let result = appview_service_state::table
+        .find(key)
+        .first::<AppviewServiceState>(conn)
+        .optional()?;
+    Ok(result)
+}
+
+pub fn get_appview_profile_by_actor(
+    conn: &mut PgConnection,
+    actor: &str,
+) -> Result<Option<AppviewProfile>> {
+    let result = appview_profiles::table
+        .filter(
+            appview_profiles::did
+                .eq(actor)
+                .or(appview_profiles::handle.eq(Some(actor))),
+        )
+        .first::<AppviewProfile>(conn)
+        .optional()?;
+    Ok(result)
+}
+
+pub fn get_appview_media_view(
+    conn: &mut PgConnection,
+    did: &str,
+    blob_cid: &str,
+) -> Result<Option<AppviewMediaView>> {
+    let result = appview_media_views::table
+        .find((did, blob_cid))
+        .first::<AppviewMediaView>(conn)
+        .optional()?;
+    Ok(result)
+}
+
+pub fn list_author_feed(
+    conn: &mut PgConnection,
+    actor: &str,
+    limit: i64,
+    cursor: Option<DateTime<Utc>>,
+) -> Result<Vec<AppviewPost>> {
+    let Some(profile) = get_appview_profile_by_actor(conn, actor)? else {
+        return Ok(vec![]);
+    };
+
+    let mut query = appview_posts::table
+        .filter(appview_posts::did.eq(profile.did))
+        .filter(appview_posts::deleted_at.is_null())
+        .into_boxed();
+
+    if let Some(cursor) = cursor {
+        query = query.filter(appview_posts::created_at.lt(cursor));
+    }
+
+    let results = query
+        .order((appview_posts::created_at.desc(), appview_posts::uri.desc()))
+        .limit(limit)
+        .load::<AppviewPost>(conn)?;
+    Ok(results)
+}
+
+pub fn list_latest_appview_posts(conn: &mut PgConnection, limit: i64) -> Result<Vec<AppviewPost>> {
+    let results = appview_posts::table
+        .filter(appview_posts::deleted_at.is_null())
+        .order((appview_posts::created_at.desc(), appview_posts::uri.desc()))
+        .limit(limit)
+        .load::<AppviewPost>(conn)?;
+    Ok(results)
+}
+
+pub fn list_trending_appview_posts(
+    conn: &mut PgConnection,
+    limit: i64,
+) -> Result<Vec<AppviewPost>> {
+    list_latest_appview_posts(conn, limit)
+}
+
+pub fn search_appview_posts(
+    conn: &mut PgConnection,
+    query_text: &str,
+    limit: i64,
+) -> Result<Vec<AppviewPost>> {
+    let pattern = format!("%{}%", query_text);
+    let results = appview_posts::table
+        .filter(appview_posts::deleted_at.is_null())
+        .filter(appview_posts::search_text.ilike(pattern))
+        .order((appview_posts::created_at.desc(), appview_posts::uri.desc()))
+        .limit(limit)
+        .load::<AppviewPost>(conn)?;
+    Ok(results)
+}
+
+pub fn load_posts_by_uris(conn: &mut PgConnection, uris: &[String]) -> Result<Vec<AppviewPost>> {
+    if uris.is_empty() {
+        return Ok(vec![]);
+    }
+
+    let results = appview_posts::table
+        .filter(appview_posts::uri.eq_any(uris))
+        .filter(appview_posts::deleted_at.is_null())
+        .order(appview_posts::created_at.desc())
+        .load::<AppviewPost>(conn)?;
+    Ok(results)
+}
+
+pub fn load_post_with_media_view(
+    conn: &mut PgConnection,
+    uri: &str,
+) -> Result<Option<AppviewPostWithMediaViewRow>> {
+    let result = sql_query(
+        "SELECT
+            p.uri,
+            p.did,
+            p.rkey,
+            p.record_cid,
+            p.created_at,
+            p.text,
+            p.langs_json,
+            p.embed_blob_cid,
+            p.embed_alt,
+            p.aspect_ratio_width,
+            p.aspect_ratio_height,
+            p.raw_json,
+            p.search_text,
+            p.indexed_at,
+            p.deleted_at,
+            mv.playlist_url,
+            mv.thumbnail_url,
+            mv.mime_type AS media_mime_type,
+            mv.bytes AS media_bytes,
+            mv.ready AS media_ready
+        FROM appview_posts p
+        LEFT JOIN appview_media_views mv
+          ON mv.did = p.did
+         AND mv.blob_cid = p.embed_blob_cid
+        WHERE p.uri = $1
+          AND p.deleted_at IS NULL
+        LIMIT 1",
+    )
+    .bind::<Text, _>(uri)
+    .get_result::<AppviewPostWithMediaViewRow>(conn)
+    .optional()?;
     Ok(result)
 }

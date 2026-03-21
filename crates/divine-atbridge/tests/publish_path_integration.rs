@@ -182,15 +182,24 @@ async fn publish_path_integration_processes_video_event_through_http_collaborato
         .create_async()
         .await;
 
-    let put_mock = pds_server
-        .mock("POST", "/xrpc/com.atproto.repo.putRecord")
-        .match_body(mockito::Matcher::Regex("integration-video".to_string()))
+    let created_rkey = "3integrationtid";
+    let create_mock = pds_server
+        .mock("POST", "/xrpc/com.atproto.repo.createRecord")
+        .match_request(|request| {
+            let body: serde_json::Value =
+                serde_json::from_str(&request.utf8_lossy_body().unwrap()).unwrap();
+            body["repo"] == "did:plc:integration"
+                && body["collection"] == "app.bsky.feed.post"
+                && body["validate"] == true
+                && body.get("rkey").is_none()
+        })
         .with_status(200)
         .with_header("content-type", "application/json")
         .with_body(
             serde_json::json!({
-                "uri": "at://did:plc:integration/app.bsky.feed.post/integration-video",
-                "cid": "bafyrecordintegration"
+                "uri": format!("at://did:plc:integration/app.bsky.feed.post/{created_rkey}"),
+                "cid": "bafyrecordintegration",
+                "validationStatus": "valid"
             })
             .to_string(),
         )
@@ -226,10 +235,14 @@ async fn publish_path_integration_processes_video_event_through_http_collaborato
 
     blossom_mock.assert_async().await;
     upload_mock.assert_async().await;
-    put_mock.assert_async().await;
+    create_mock.assert_async().await;
 
     assert_eq!(consumer.last_seen_timestamp, Some(event.created_at));
     assert_eq!(pipeline.record_store.manifests.lock().unwrap().len(), 1);
+    let mappings = pipeline.record_store.mappings.lock().unwrap();
+    assert_eq!(mappings.len(), 1);
+    assert_eq!(mappings[0].rkey, created_rkey);
+    drop(mappings);
     assert_eq!(
         pipeline.record_store.statuses.lock().unwrap()[0],
         (

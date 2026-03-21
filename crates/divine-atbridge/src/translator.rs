@@ -228,15 +228,12 @@ pub fn translate_nip71_to_post(event: &NostrEvent, blob_ref: &BlobRef) -> Result
         }
     };
 
-    // Default language
-    let langs = Some(vec!["en".to_string()]);
-
     Ok(AtProtoPost {
         type_: "app.bsky.feed.post".to_string(),
         text,
         created_at,
         facets,
-        langs,
+        langs: None,
         embed,
         labels,
     })
@@ -319,6 +316,7 @@ mod tests {
 
         // Labels: none
         assert!(post.labels.is_none());
+        assert!(post.langs.is_none());
     }
 
     #[test]
@@ -416,7 +414,7 @@ mod tests {
         // Top-level fields
         assert_eq!(json["$type"], "app.bsky.feed.post");
         assert!(json["createdAt"].is_string());
-        assert!(json["langs"].is_array());
+        assert!(json.get("langs").is_none());
 
         // Embed structure
         assert_eq!(json["embed"]["$type"], "app.bsky.embed.video");

@@ -1,0 +1,94 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Divine AppView Lab</title>
+<style>
+:root {
+  --bg: #0f141b;
+  --panel: #17202b;
+  --line: #2a3b4f;
+  --text: #ecf2f8;
+  --muted: #9cb0c3;
+  --accent: #ff8f3f;
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  padding: 2rem;
+  font-family: ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  background: radial-gradient(circle at top, #1b2f46 0%, var(--bg) 45%);
+  color: var(--text);
+}
+main {
+  max-width: 880px;
+  margin: 0 auto;
+}
+h1, h2 { margin: 0 0 0.75rem; }
+p { line-height: 1.6; }
+a { color: var(--accent); }
+code {
+  background: #111923;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  padding: 0.1rem 0.35rem;
+}
+.muted { color: var(--muted); }
+.card {
+  margin-top: 1.25rem;
+  padding: 1rem 1.25rem;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: rgba(23, 32, 43, 0.92);
+}
+.endpoint {
+  margin: 0.5rem 0;
+  word-break: break-word;
+}
+</style>
+</head>
+<body>
+<main>
+  <p class="muted">Blacksky AppView Lab</p>
+  <h1>Divine AppView Lab</h1>
+  <p>
+    Read-model-backed ATProto appview for the local Divine Blacksky viewer lab.
+    Use this service to resolve authors, hydrate post views, fetch author feeds,
+    inspect a single thread, and run simple post search queries.
+  </p>
+
+  <section class="card">
+    <h2>Health</h2>
+    <div class="endpoint"><code>GET</code> <a href="/health"><code>/health</code></a></div>
+    <div class="endpoint"><code>GET</code> <a href="/health/ready"><code>/health/ready</code></a></div>
+  </section>
+
+  <section class="card">
+    <h2>XRPC Endpoints</h2>
+    <div class="endpoint"><code>GET</code> <a href="/xrpc/app.bsky.actor.getProfile?actor=lab.divine.video"><code>/xrpc/app.bsky.actor.getProfile?actor=lab.divine.video</code></a></div>
+    <div class="endpoint"><code>GET</code> <a href="/xrpc/app.bsky.feed.getAuthorFeed?actor=lab.divine.video&amp;limit=12"><code>/xrpc/app.bsky.feed.getAuthorFeed?actor=lab.divine.video&amp;limit=12</code></a></div>
+    <div class="endpoint"><code>GET</code> <a href="/xrpc/app.bsky.feed.getPosts?uris=at://did:plc:divineblackskyapplab/app.bsky.feed.post/3labpost1"><code>/xrpc/app.bsky.feed.getPosts?uris=at://did:plc:divineblackskyapplab/app.bsky.feed.post/3labpost1</code></a></div>
+    <div class="endpoint"><code>GET</code> <a href="/xrpc/app.bsky.feed.getPostThread?uri=at://did:plc:divineblackskyapplab/app.bsky.feed.post/3labpost2"><code>/xrpc/app.bsky.feed.getPostThread?uri=at://did:plc:divineblackskyapplab/app.bsky.feed.post/3labpost2</code></a></div>
+    <div class="endpoint"><code>GET</code> <a href="/xrpc/app.bsky.feed.searchPosts?q=fixture"><code>/xrpc/app.bsky.feed.searchPosts?q=fixture</code></a></div>
+  </section>
+
+  <section class="card">
+    <h2>Fixture Identity</h2>
+    <p class="muted">
+      Handle: <code>lab.divine.video</code><br>
+      DID: <code>did:plc:divineblackskyapplab</code><br>
+      Example post: <code>at://did:plc:divineblackskyapplab/app.bsky.feed.post/3labpost2</code>
+    </p>
+  </section>
+
+  <section class="card">
+    <h2>Related Local Services</h2>
+    <div class="endpoint"><a href="http://127.0.0.1:3002/">Feed Generator</a></div>
+    <div class="endpoint"><a href="http://127.0.0.1:3100/">Media View</a></div>
+    <div class="endpoint"><a href="http://127.0.0.1:2583/">Mock PDS</a></div>
+    <div class="endpoint"><a href="http://127.0.0.1:4173/">Viewer</a></div>
+  </section>
+</main>
+</body>
+</html>

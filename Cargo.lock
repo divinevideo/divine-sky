@@ -529,6 +529,43 @@ dependencies = [
 ]
 
 [[package]]
+name = "divine-appview"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "axum",
+ "chrono",
+ "diesel",
+ "divine-bridge-db",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tower",
+ "tower-http",
+ "tracing",
+ "tracing-subscriber",
+ "url",
+]
+
+[[package]]
+name = "divine-appview-indexer"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "chrono",
+ "diesel",
+ "divine-bridge-db",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "divine-atbridge"
 version = "0.1.0"
 dependencies = [
@@ -541,6 +578,7 @@ dependencies = [
  "diesel",
  "divine-bridge-db",
  "divine-bridge-types",
+ "divine-video-worker",
  "futures-util",
  "hex",
  "mockito",
@@ -583,11 +621,15 @@ name = "divine-feedgen"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "axum",
+ "diesel",
+ "divine-bridge-db",
  "serde",
  "serde_json",
  "tokio",
  "tower",
+ "tower-http",
  "tracing",
  "tracing-subscriber",
 ]
@@ -672,7 +714,10 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
+ "chrono",
  "cid",
+ "diesel",
+ "divine-bridge-db",
  "hex",
  "mockito",
  "multihash",
@@ -680,6 +725,8 @@ dependencies = [
  "reqwest",
  "sha2",
  "tokio",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]

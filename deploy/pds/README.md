@@ -6,6 +6,7 @@ Run a self-operated ATProto PDS (Personal Data Server) backed by [rsky](https://
 
 - Docker and Docker Compose v2+
 - `curl` (for health checks)
+- The patched sibling `rsky` checkout at `../rsky` so compose can build the local `rsky-pds` image with the blob-store fixes
 
 ## Quick Start
 
@@ -15,7 +16,7 @@ cp env.example .env
 # Edit .env to set PDS_ADMIN_PASSWORD and any other values.
 
 # 2. Start all services
-docker compose up -d
+docker compose up --build -d
 
 # 3. Verify
 curl http://localhost:2583/xrpc/_health
@@ -29,6 +30,11 @@ Services started:
 | pds         | 2583              | ATProto PDS (XRPC)              |
 | postgres    | 5433 (host)       | PDS state database (PostgreSQL 16) |
 | minio       | 9000 (API), 9001 (console) | S3-compatible blob storage |
+
+The local stack passes these blob-store settings into `rsky-pds`:
+
+- `PDS_BLOBSTORE_S3_BUCKET=pds-blobs` so blobs land in a valid shared bucket instead of trying to use the actor DID as the bucket name
+- `AWS_ENDPOINT_BUCKET=pds-blobs` so `copy_object` requests reference the correct bucket on MinIO- and GCS-style backends
 
 ## Health Check
 
@@ -91,7 +97,10 @@ docker compose down -v       # stop services and delete volumes
 **PDS fails to start:** Check logs with `docker compose logs pds`. Common issues:
 - Database not ready (the health check dependency should handle this)
 - Invalid `PDS_HOSTNAME` or `PDS_SERVICE_DID`
+- Missing sibling `../rsky` checkout or stale local image; rerun `docker compose up --build -d`
 
 **Cannot connect to MinIO:** The PDS connects to MinIO via the Docker network (`http://minio:9000`). From the host, use `http://localhost:9000`. Access the MinIO console at `http://localhost:9001`.
+
+**`uploadBlob` fails with S3/GCS bucket errors:** Verify the stack is using the patched fork build and that `.env` still sets `PDS_BLOBSTORE_S3_BUCKET=pds-blobs` and `AWS_ENDPOINT_BUCKET=pds-blobs`.
 
 **Handle resolution fails locally:** Ensure `/etc/hosts` entries are set and the PDS is reachable at port 2583.

@@ -15,9 +15,16 @@ Bring it up with:
 
 ```bash
 docker compose -f config/docker-compose.yml up -d
+```
+
+Add `--build` when you need to rebuild local images after changing the bridge or the patched PDS checkout.
 
 This remains the fast default for bridge development. Use `deploy/localnet/` when you need the fuller ATProto lab with dedicated PLC, PDS, Jetstream, DNS, and handle-admin slices.
-```
+
+The `pds` service builds the patched sibling checkout at `../rsky` and injects the blob-store env vars required by that fork:
+
+- `PDS_BLOBSTORE_S3_BUCKET=pds-blobs`
+- `AWS_ENDPOINT_BUCKET=pds-blobs`
 
 ## Bucket Bootstrap
 

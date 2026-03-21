@@ -106,7 +106,81 @@ diesel::table! {
     }
 }
 
+diesel::table! {
+    appview_repos (did) {
+        did -> Text,
+        handle -> Nullable<Text>,
+        head -> Nullable<Text>,
+        rev -> Nullable<Text>,
+        active -> Bool,
+        last_backfilled_at -> Nullable<Timestamptz>,
+        last_seen_seq -> Nullable<Int8>,
+        created_at -> Timestamptz,
+        updated_at -> Timestamptz,
+    }
+}
+
+diesel::table! {
+    appview_profiles (did) {
+        did -> Text,
+        handle -> Nullable<Text>,
+        display_name -> Nullable<Text>,
+        description -> Nullable<Text>,
+        website -> Nullable<Text>,
+        avatar_cid -> Nullable<Text>,
+        banner_cid -> Nullable<Text>,
+        created_at -> Nullable<Timestamptz>,
+        raw_json -> Nullable<Text>,
+        indexed_at -> Timestamptz,
+        updated_at -> Timestamptz,
+    }
+}
+
+diesel::table! {
+    appview_posts (uri) {
+        uri -> Text,
+        did -> Text,
+        rkey -> Text,
+        record_cid -> Nullable<Text>,
+        created_at -> Timestamptz,
+        text -> Text,
+        langs_json -> Nullable<Text>,
+        embed_blob_cid -> Nullable<Text>,
+        embed_alt -> Nullable<Text>,
+        aspect_ratio_width -> Nullable<Int4>,
+        aspect_ratio_height -> Nullable<Int4>,
+        raw_json -> Nullable<Text>,
+        search_text -> Text,
+        indexed_at -> Timestamptz,
+        deleted_at -> Nullable<Timestamptz>,
+    }
+}
+
+diesel::table! {
+    appview_media_views (did, blob_cid) {
+        did -> Text,
+        blob_cid -> Text,
+        playlist_url -> Text,
+        thumbnail_url -> Nullable<Text>,
+        mime_type -> Text,
+        bytes -> Int8,
+        ready -> Bool,
+        last_derived_at -> Nullable<Timestamptz>,
+        updated_at -> Timestamptz,
+    }
+}
+
+diesel::table! {
+    appview_service_state (state_key) {
+        state_key -> Text,
+        state_value -> Nullable<Text>,
+        updated_at -> Timestamptz,
+    }
+}
+
 diesel::joinable!(record_mappings -> account_links (did));
+diesel::joinable!(appview_profiles -> appview_repos (did));
+diesel::joinable!(appview_posts -> appview_profiles (did));
 
 diesel::allow_tables_to_appear_in_same_query!(
     account_links,
@@ -117,4 +191,9 @@ diesel::allow_tables_to_appear_in_same_query!(
     publish_jobs,
     labeler_events,
     inbound_labels,
+    appview_repos,
+    appview_profiles,
+    appview_posts,
+    appview_media_views,
+    appview_service_state,
 );

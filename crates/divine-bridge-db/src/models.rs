@@ -2,7 +2,7 @@
 
 use chrono::{DateTime, Utc};
 use diesel::prelude::*;
-use diesel::sql_types::{Bool, Nullable, Text, Timestamptz};
+use diesel::sql_types::{Bool, Int4, Int8, Nullable, Text, Timestamptz};
 
 use crate::schema::*;
 
@@ -284,4 +284,212 @@ pub struct NewInboundLabel<'a> {
     pub divine_label: Option<&'a str>,
     pub review_state: &'a str,
     pub raw_json: Option<&'a str>,
+}
+
+// ---------------------------------------------------------------------------
+// appview_repos
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Queryable, Selectable, Identifiable)]
+#[diesel(table_name = appview_repos)]
+#[diesel(primary_key(did))]
+pub struct AppviewRepo {
+    pub did: String,
+    pub handle: Option<String>,
+    pub head: Option<String>,
+    pub rev: Option<String>,
+    pub active: bool,
+    pub last_backfilled_at: Option<DateTime<Utc>>,
+    pub last_seen_seq: Option<i64>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Insertable)]
+#[diesel(table_name = appview_repos)]
+pub struct NewAppviewRepo<'a> {
+    pub did: &'a str,
+    pub handle: Option<&'a str>,
+    pub head: Option<&'a str>,
+    pub rev: Option<&'a str>,
+    pub active: bool,
+    pub last_backfilled_at: Option<DateTime<Utc>>,
+    pub last_seen_seq: Option<i64>,
+}
+
+// ---------------------------------------------------------------------------
+// appview_profiles
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Queryable, Selectable, Identifiable)]
+#[diesel(table_name = appview_profiles)]
+#[diesel(primary_key(did))]
+pub struct AppviewProfile {
+    pub did: String,
+    pub handle: Option<String>,
+    pub display_name: Option<String>,
+    pub description: Option<String>,
+    pub website: Option<String>,
+    pub avatar_cid: Option<String>,
+    pub banner_cid: Option<String>,
+    pub created_at: Option<DateTime<Utc>>,
+    pub raw_json: Option<String>,
+    pub indexed_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Insertable)]
+#[diesel(table_name = appview_profiles)]
+pub struct NewAppviewProfile<'a> {
+    pub did: &'a str,
+    pub handle: Option<&'a str>,
+    pub display_name: Option<&'a str>,
+    pub description: Option<&'a str>,
+    pub website: Option<&'a str>,
+    pub avatar_cid: Option<&'a str>,
+    pub banner_cid: Option<&'a str>,
+    pub created_at: Option<DateTime<Utc>>,
+    pub raw_json: Option<&'a str>,
+    pub indexed_at: DateTime<Utc>,
+}
+
+// ---------------------------------------------------------------------------
+// appview_posts
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Queryable, Selectable, Identifiable)]
+#[diesel(table_name = appview_posts)]
+#[diesel(primary_key(uri))]
+pub struct AppviewPost {
+    pub uri: String,
+    pub did: String,
+    pub rkey: String,
+    pub record_cid: Option<String>,
+    pub created_at: DateTime<Utc>,
+    pub text: String,
+    pub langs_json: Option<String>,
+    pub embed_blob_cid: Option<String>,
+    pub embed_alt: Option<String>,
+    pub aspect_ratio_width: Option<i32>,
+    pub aspect_ratio_height: Option<i32>,
+    pub raw_json: Option<String>,
+    pub search_text: String,
+    pub indexed_at: DateTime<Utc>,
+    pub deleted_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Insertable)]
+#[diesel(table_name = appview_posts)]
+pub struct NewAppviewPost<'a> {
+    pub uri: &'a str,
+    pub did: &'a str,
+    pub rkey: &'a str,
+    pub record_cid: Option<&'a str>,
+    pub created_at: DateTime<Utc>,
+    pub text: &'a str,
+    pub langs_json: Option<&'a str>,
+    pub embed_blob_cid: Option<&'a str>,
+    pub embed_alt: Option<&'a str>,
+    pub aspect_ratio_width: Option<i32>,
+    pub aspect_ratio_height: Option<i32>,
+    pub raw_json: Option<&'a str>,
+    pub search_text: &'a str,
+    pub indexed_at: DateTime<Utc>,
+    pub deleted_at: Option<DateTime<Utc>>,
+}
+
+// ---------------------------------------------------------------------------
+// appview_media_views
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Queryable, Selectable, Identifiable)]
+#[diesel(table_name = appview_media_views)]
+#[diesel(primary_key(did, blob_cid))]
+pub struct AppviewMediaView {
+    pub did: String,
+    pub blob_cid: String,
+    pub playlist_url: String,
+    pub thumbnail_url: Option<String>,
+    pub mime_type: String,
+    pub bytes: i64,
+    pub ready: bool,
+    pub last_derived_at: Option<DateTime<Utc>>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Insertable)]
+#[diesel(table_name = appview_media_views)]
+pub struct NewAppviewMediaView<'a> {
+    pub did: &'a str,
+    pub blob_cid: &'a str,
+    pub playlist_url: &'a str,
+    pub thumbnail_url: Option<&'a str>,
+    pub mime_type: &'a str,
+    pub bytes: i64,
+    pub ready: bool,
+    pub last_derived_at: Option<DateTime<Utc>>,
+}
+
+// ---------------------------------------------------------------------------
+// appview_service_state
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Queryable, Selectable, Identifiable)]
+#[diesel(table_name = appview_service_state)]
+#[diesel(primary_key(state_key))]
+pub struct AppviewServiceState {
+    pub state_key: String,
+    pub state_value: Option<String>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Insertable)]
+#[diesel(table_name = appview_service_state)]
+pub struct NewAppviewServiceState<'a> {
+    pub state_key: &'a str,
+    pub state_value: Option<&'a str>,
+}
+
+#[derive(Debug, Clone, QueryableByName)]
+pub struct AppviewPostWithMediaViewRow {
+    #[diesel(sql_type = Text)]
+    pub uri: String,
+    #[diesel(sql_type = Text)]
+    pub did: String,
+    #[diesel(sql_type = Text)]
+    pub rkey: String,
+    #[diesel(sql_type = Nullable<Text>)]
+    pub record_cid: Option<String>,
+    #[diesel(sql_type = Timestamptz)]
+    pub created_at: DateTime<Utc>,
+    #[diesel(sql_type = Text)]
+    pub text: String,
+    #[diesel(sql_type = Nullable<Text>)]
+    pub langs_json: Option<String>,
+    #[diesel(sql_type = Nullable<Text>)]
+    pub embed_blob_cid: Option<String>,
+    #[diesel(sql_type = Nullable<Text>)]
+    pub embed_alt: Option<String>,
+    #[diesel(sql_type = Nullable<Int4>)]
+    pub aspect_ratio_width: Option<i32>,
+    #[diesel(sql_type = Nullable<Int4>)]
+    pub aspect_ratio_height: Option<i32>,
+    #[diesel(sql_type = Nullable<Text>)]
+    pub raw_json: Option<String>,
+    #[diesel(sql_type = Text)]
+    pub search_text: String,
+    #[diesel(sql_type = Timestamptz)]
+    pub indexed_at: DateTime<Utc>,
+    #[diesel(sql_type = Nullable<Timestamptz>)]
+    pub deleted_at: Option<DateTime<Utc>>,
+    #[diesel(sql_type = Nullable<Text>)]
+    pub playlist_url: Option<String>,
+    #[diesel(sql_type = Nullable<Text>)]
+    pub thumbnail_url: Option<String>,
+    #[diesel(sql_type = Nullable<Text>)]
+    pub media_mime_type: Option<String>,
+    #[diesel(sql_type = Nullable<Int8>)]
+    pub media_bytes: Option<i64>,
+    #[diesel(sql_type = Nullable<Bool>)]
+    pub media_ready: Option<bool>,
 }

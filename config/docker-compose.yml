@@ -28,7 +28,7 @@ services:
       - "9000:9000"
       - "9001:9001"
     healthcheck:
-      test: ["CMD-SHELL", "wget -q -O /dev/null http://localhost:9000/minio/health/live || exit 1"]
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:9000/minio/health/live >/dev/null || exit 1"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -63,7 +63,7 @@ services:
     ports:
       - "8080:8080"
     healthcheck:
-      test: ["CMD-SHELL", "wget -q -O /dev/null http://localhost:8080/health || exit 1"]
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:8080/health || exit 1"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -87,7 +87,10 @@ services:
       retries: 5
 
   pds:
-    image: ghcr.io/blacksky-algorithms/rsky-pds:latest
+    image: rsky-pds:local
+    build:
+      context: ../../rsky
+      dockerfile: rsky-pds/Dockerfile
     restart: unless-stopped
     depends_on:
       postgres:
@@ -101,11 +104,14 @@ services:
       PDS_SERVICE_DID: did:web:pds.divine.test
       PDS_SERVICE_HANDLE_DOMAINS: divine.video
       DATABASE_URL: postgres://divine:divine_dev@postgres:5432/divine_bridge
+      PDS_BLOBSTORE_S3_BUCKET: pds-blobs
       AWS_ENDPOINT: http://minio:9000
+      AWS_ENDPOINT_BUCKET: pds-blobs
       AWS_ACCESS_KEY_ID: divine
       AWS_SECRET_ACCESS_KEY: divine_dev
       AWS_REGION: us-east-1
       AWS_DEFAULT_REGION: us-east-1
+      AWS_EC2_METADATA_DISABLED: "true"
       PDS_DID_PLC_URL: https://plc.directory
       PDS_BSKY_APP_VIEW_URL: https://api.bsky.app
       PDS_BSKY_APP_VIEW_DID: did:web:api.bsky.app
@@ -114,7 +120,7 @@ services:
     ports:
       - "2583:2583"
     healthcheck:
-      test: ["CMD-SHELL", "wget -q -O /dev/null http://localhost:2583/xrpc/_health || exit 1"]
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:2583/xrpc/_health || exit 1"]
       interval: 10s
       timeout: 5s
       retries: 5

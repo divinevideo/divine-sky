@@ -91,7 +91,11 @@ pub async fn handler(
             neg: false,
             nostr_event_id: None,
             sha256: Some(&payload.sha256),
-            origin: if payload.reviewed_by.is_some() { "human" } else { "divine" },
+            origin: if payload.reviewed_by.is_some() {
+                "human"
+            } else {
+                "divine"
+            },
         };
 
         match state.store.insert_labeler_event(&new_event) {

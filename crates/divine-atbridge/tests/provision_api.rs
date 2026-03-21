@@ -111,8 +111,9 @@ async fn configured_internal_api_provisions_pending_link() {
         .unwrap();
 
     let status = response.status();
-    let payload: Value = serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await.unwrap())
-        .expect("provision route should return json");
+    let payload: Value =
+        serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await.unwrap())
+            .expect("provision route should return json");
 
     assert_eq!(status, StatusCode::OK);
     assert_eq!(payload["did"], "did:plc:alice123");
@@ -146,5 +147,8 @@ fn configured_internal_api_requires_provisioning_token() {
         provisioning_bearer_token: String::new(),
     });
 
-    assert!(result.is_err(), "configured app should fail closed without a provisioning token");
+    assert!(
+        result.is_err(),
+        "configured app should fail closed without a provisioning token"
+    );
 }
