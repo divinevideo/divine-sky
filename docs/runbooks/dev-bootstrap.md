@@ -29,6 +29,13 @@ docker compose -f config/docker-compose.yml up -d
 
 This stack brings up PostgreSQL, MinIO, a mock Blossom server, a mock Nostr relay, a local PDS, and the bridge container.
 
+For the fuller ATProto provisioning lab, use `deploy/localnet/` instead. That profile is a second dev path with dedicated PLC, PDS, Jetstream, DNS, and handle-admin slices. Keep `config/docker-compose.yml` as the default when you only need the fast bridge-centric stack.
+
+Choose the path based on what you are validating:
+
+- Use `config/docker-compose.yml` for bridge runtime work, replay, publish-path, and media-path checks.
+- Use `deploy/localnet/` when you need PLC, handle resolution, DNS, or a more realistic end-to-end ATProto provisioning lab.
+
 ## Required Runtime Env
 
 The bridge runtime now expects:
@@ -42,6 +49,8 @@ export RELAY_SOURCE_NAME=local-stack-relay
 
 `config/docker-compose.yml` sets these values for bridge startup in the local stack. It does not provide a dedicated PLC mock, so end-to-end provisioning still requires overriding `PLC_DIRECTORY_URL` to a real or test PLC endpoint when you exercise the opt-in flow.
 
+The localnet lab in `deploy/localnet/` exists for that fuller provisioning path. It uses `divine.test` for local handles and expects bridge plus handle-gateway to consume localnet env overrides rather than branching runtime code.
+
 ## ATProto Opt-In Flow
 
 The ATProto path is opt-in. A username claim alone only enables NIP-05.
@@ -51,6 +60,8 @@ To exercise the full provisioning flow locally, run the sibling repos that own:
 - `../keycast` for consent and `/api/user/atproto/*`
 - `../divine-name-server` for the public username read model
 - `../divine-router` for read-only `/.well-known/atproto-did`
+
+Those sibling repos still matter even when `divine-sky` is pointed at the localnet lab, because the user-facing opt-in flow and public read-model publication still live outside this workspace.
 
 `divine-handle-gateway` does not expose a public `/.well-known/atproto-did` route.
 
@@ -68,6 +79,8 @@ export ATPROTO_NAME_SERVER_SYNC_TOKEN=local-sync-token
 
 Use environment-specific local URLs for the provisioning worker, keycast internal sync route, and name-server.
 
+For the localnet lab, start from `deploy/localnet/handle-gateway.env.example` instead of hand-writing those overrides.
+
 When running `divine-atbridge` locally for provisioning, also set:
 
 ```bash
@@ -76,6 +89,10 @@ export ATPROTO_PROVISIONING_TOKEN=local-provisioning-token
 ```
 
 The `HEALTH_BIND_ADDR` listener now serves both `/health` and the internal `POST /provision` endpoint that `divine-handle-gateway` calls.
+
+For the localnet lab, start from `deploy/localnet/bridge.env.example`. That example points bridge traffic at `https://plc.<tailnet>.ts.net`, `https://pds.<tailnet>.ts.net`, and the local `divine.test` handle domain.
+
+`divine.test` is only the local lab handle suffix. Staging and production user handles remain under `divine.video`.
 
 ## Staging And Production Deploy Contract
 

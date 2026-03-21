@@ -6,6 +6,7 @@ members = [
     "crates/divine-feedgen",
     "crates/divine-handle-gateway",
     "crates/divine-labeler",
+    "crates/divine-localnet-admin",
     "crates/divine-moderation-adapter",
     "crates/divine-video-worker",
 ]

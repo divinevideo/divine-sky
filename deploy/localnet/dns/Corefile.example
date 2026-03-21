@@ -1,0 +1,17 @@
+divine.test {
+  errors
+  log
+  file /zones/db.divine.test divine.test {
+    reload 5s
+  }
+}
+
+. {
+  errors
+  log
+  hosts {
+    100.64.0.20 handles.example-tailnet.ts.net
+    fallthrough
+  }
+  forward . 1.1.1.1 8.8.8.8
+}
