@@ -2,24 +2,25 @@
 
 > **For agentic workers:** REQUIRED: Use superpowers:subagent-driven-development (if subagents available) or superpowers:executing-plans to implement this plan. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Add a Divine-only local ATProto read stack that indexes every repo hosted on the Divine PDS via a local `divinevideo/rsky-relay`, serves appview-style endpoints, and powers a tiny React video viewer against real PDS data.
+**Goal:** Add a Divine-only local ATProto read stack that indexes every repo hosted on the Divine PDS, serves appview-style endpoints, powers a tiny JS viewer, and hardens prospective Divine publishing so new posts, profiles, and media behavior line up more closely with official ATProto and Bluesky expectations.
 
-**Architecture:** Keep the existing PDS and bridge path as the write/source-of-truth plane. Add an additive `deploy/appview-lab/` stack that runs PostgreSQL, the external `divinevideo/rsky-relay` image, a new `divine-appview-indexer` crate for PDS backfill plus relay-triggered refresh, a new `divine-appview` Axum read service, the existing `divine-feedgen` crate backed by the indexed data, and a small React viewer. The stack is Divine-only: it indexes all repos on the configured Divine PDS and nothing else.
+**Architecture:** Keep the existing PDS and bridge path as the write/source-of-truth plane, but harden that write path first: new posts use validation-enabled `createRecord` with TID-backed keys, video blobs are normalized to spec-friendly MP4 before publish, and profiles use official fields. Then add an additive `deploy/appview-lab/` stack with PostgreSQL, the external `divinevideo/rsky-relay` image, a new `divine-appview-indexer` crate, a read-facing media-derivation worker built from `divine-video-worker`, a new `divine-appview` Axum service, the existing `divine-feedgen` crate backed by indexed data, and a small JS viewer under `apps/divine-blacksky-viewer/`.
 
-**Tech Stack:** Docker Compose, PostgreSQL, Rust, Axum, Diesel, Bash, WebSocket firehose consumption, Vite, React, TypeScript.
+**Tech Stack:** Docker Compose, PostgreSQL, Rust, Axum, Diesel, Bash, WebSocket firehose consumption, Vite, TypeScript, HTML5 video, HLS-friendly media derivation.
 
 ---
 
 ## Scope And Guardrails
 
 - This is a second local dev path, not a replacement for `config/docker-compose.yml`.
-- The Divine PDS remains the source of truth. The new stack is read-only against it.
+- The Divine PDS remains the source of truth. The new stack is read-only from the viewer's point of view.
 - Do not vendor `rsky` source code into this repo.
 - Use the external `divinevideo/rsky-relay` fork via image or checked-out dependency configuration only.
 - Backfill all repos on the configured Divine PDS on first boot.
 - Use real Divine data already on the PDS as the must-pass acceptance anchor.
-- The first milestone is read-only: no login, no repo writes, no network-wide crawl.
-- Discovery should use the existing `divine-feedgen` crate once it is wired to the read model.
+- The first milestone is read-only in the viewer: no login, no repo writes, no network-wide crawl.
+- Historical Divine posts already on the PDS are indexed as-is. The publish hardening in this plan applies to new writes moving forward.
+- The viewer is intentionally small. Do not drift into `divine-web` scope.
 
 ## Planned Repository Layout
 
@@ -30,6 +31,26 @@ deploy/
     docker-compose.yml
     env.example
 crates/
+  divine-atbridge/
+    src/
+      pipeline.rs
+      profile_sync.rs
+      publisher.rs
+      translator.rs
+    tests/
+      post_record_contract.rs
+      profile_record_contract.rs
+      publish_path_integration.rs
+  divine-video-worker/
+    src/
+      blob_upload.rs
+      derivatives.rs
+      main.rs
+      normalize.rs
+      profile_image.rs
+    tests/
+      derivatives.rs
+      normalize.rs
   divine-appview-indexer/
     Cargo.toml
     src/
@@ -61,7 +82,7 @@ crates/
       feed.rs
       search.rs
 apps/
-  divine-video-viewer/
+  divine-blacksky-viewer/
     package.json
     vite.config.ts
     tsconfig.json
@@ -72,7 +93,9 @@ apps/
       main.tsx
       styles.css
       components/
-        FeedGrid.tsx
+        AuthorPage.tsx
+        FeedSwitcher.tsx
+        PostDetail.tsx
         SearchBar.tsx
         VideoCard.tsx
 migrations/
@@ -93,161 +116,142 @@ These real fixtures must show up through the local read path before the work is 
 - Post URI: `at://did:plc:ebt5msdpfavoklkap6gl54bm/app.bsky.feed.post/MA6mjTWZKEB`
 - Post URI: `at://did:plc:ebt5msdpfavoklkap6gl54bm/app.bsky.feed.post/hFxlUuKIIqU`
 
-## Chunk 1: Contracts, Docs, And Local Orchestration
+Prospective write-path verification must also pass before this work is considered complete:
 
-### Task 1: Define The AppView Lab Contract And Document The Second Dev Path
+- new bridged posts use validation-enabled `createRecord`
+- new bridged posts do not derive their post rkeys from Nostr `d` tags or raw event IDs
+- non-MP4 input is normalized or rejected before publish
+- profile records use official fields such as `website`
+
+## Chunk 1: Writer Contract Hardening
+
+### Task 1: Use Validation-Enabled Post Creation And Persist Returned TIDs
 
 **Files:**
-- Create: `crates/divine-atbridge/tests/appview_lab_contract.rs`
-- Create: `deploy/appview-lab/README.md`
-- Modify: `README.md`
-- Modify: `docs/runbooks/dev-bootstrap.md`
-- Modify: `docs/runbooks/pds-operations.md`
+- Create: `crates/divine-atbridge/tests/post_record_contract.rs`
+- Modify: `crates/divine-atbridge/src/publisher.rs`
+- Modify: `crates/divine-atbridge/src/pipeline.rs`
+- Modify: `crates/divine-atbridge/src/translator.rs`
+- Modify: `crates/divine-atbridge/tests/publish_path_integration.rs`
 
 - [ ] **Step 1: Write the failing contract test**
 
 ```rust
-#[test]
-fn appview_lab_docs_and_layout_are_present() {
-    let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .and_then(|path| path.parent())
-        .unwrap();
+#[tokio::test]
+async fn new_video_posts_use_create_record_with_validate_true_and_no_custom_rkey() {
+    let request = capture_post_write_request().await;
 
-    assert!(repo_root.join("deploy/appview-lab/README.md").exists());
-
-    let readme = std::fs::read_to_string(repo_root.join("README.md")).unwrap();
-    let bootstrap = std::fs::read_to_string(repo_root.join("docs/runbooks/dev-bootstrap.md")).unwrap();
-    let ops = std::fs::read_to_string(repo_root.join("docs/runbooks/pds-operations.md")).unwrap();
-
-    assert!(readme.contains("deploy/appview-lab"));
-    assert!(bootstrap.contains("deploy/appview-lab"));
-    assert!(ops.contains("divinevideo/rsky-relay"));
+    assert_eq!(request.path, "/xrpc/com.atproto.repo.createRecord");
+    assert_eq!(request.body["validate"], true);
+    assert!(request.body.get("rkey").is_none());
 }
 ```
 
-- [ ] **Step 2: Run the new contract test and verify it fails**
+- [ ] **Step 2: Run the new test and verify it fails**
 
-Run: `cargo test -p divine-atbridge appview_lab_docs_and_layout_are_present -- --nocapture`
-Expected: FAIL because the appview-lab docs and references do not exist yet.
+Run: `cargo test -p divine-atbridge --test post_record_contract new_video_posts_use_create_record_with_validate_true_and_no_custom_rkey -- --nocapture`
+Expected: FAIL because the bridge currently uses `putRecord` with a derived rkey.
 
-- [ ] **Step 3: Add the lab docs**
+- [ ] **Step 3: Implement the post write contract**
 
-Write `deploy/appview-lab/README.md` with:
+Update the publish path so:
 
-- the service list: `relay`, `indexer`, `appview`, `feedgen`, `viewer`
-- the rule that the Divine PDS stays external and authoritative
-- the rule that `divinevideo/rsky-relay` remains an external dependency
-- the real acceptance fixtures:
-  - `did:plc:ebt5msdpfavoklkap6gl54bm`
-  - `MA6mjTWZKEB`
-  - `hFxlUuKIIqU`
+- new `app.bsky.feed.post` writes use `createRecord`
+- the request body includes `"validate": true`
+- the bridge does not derive the post rkey from Nostr metadata
+- the bridge persists the returned AT-URI and rkey for later delete handling
+- historical read-only indexing keeps accepting legacy non-TID posts already on the Divine PDS
 
-Update `README.md`, `docs/runbooks/dev-bootstrap.md`, and `docs/runbooks/pds-operations.md` to distinguish:
+- [ ] **Step 4: Re-run the targeted tests**
 
-- the existing bridge/PDS local stack in `config/docker-compose.yml`
-- the new Divine-only read lab in `deploy/appview-lab/`
-
-- [ ] **Step 4: Re-run the contract test**
-
-Run: `cargo test -p divine-atbridge appview_lab_docs_and_layout_are_present -- --nocapture`
+Run: `cargo test -p divine-atbridge --test post_record_contract -- --nocapture`
 Expected: PASS
 
-- [ ] **Step 5: Commit**
+Run: `cargo test -p divine-atbridge --test publish_path_integration publish_path_integration_processes_video_event_through_http_collaborators -- --nocapture`
+Expected: PASS with the mocked write path now asserting `createRecord`.
+
+- [ ] **Step 5: Run focused compile verification**
+
+Run: `cargo check -p divine-atbridge`
+Expected: PASS
+
+- [ ] **Step 6: Commit**
 
 ```bash
-git add crates/divine-atbridge/tests/appview_lab_contract.rs deploy/appview-lab/README.md README.md docs/runbooks/dev-bootstrap.md docs/runbooks/pds-operations.md
-git commit -m "docs: define divine appview lab contract"
+git add crates/divine-atbridge/tests/post_record_contract.rs crates/divine-atbridge/src/publisher.rs crates/divine-atbridge/src/pipeline.rs crates/divine-atbridge/src/translator.rs crates/divine-atbridge/tests/publish_path_integration.rs
+git commit -m "fix: harden divine post creation contract"
 ```
 
-### Task 2: Add The Additive Compose Stack And Helper Scripts
+### Task 2: Enforce Video And Profile Lexicon Constraints
 
 **Files:**
-- Create: `deploy/appview-lab/docker-compose.yml`
-- Create: `deploy/appview-lab/env.example`
-- Create: `scripts/appview-lab-up.sh`
-- Create: `scripts/appview-lab-down.sh`
-- Modify: `crates/divine-atbridge/tests/appview_lab_contract.rs`
+- Create: `crates/divine-atbridge/tests/profile_record_contract.rs`
+- Create: `crates/divine-video-worker/src/normalize.rs`
+- Create: `crates/divine-video-worker/src/profile_image.rs`
+- Create: `crates/divine-video-worker/tests/normalize.rs`
+- Modify: `crates/divine-atbridge/src/pipeline.rs`
+- Modify: `crates/divine-atbridge/src/profile_sync.rs`
+- Modify: `crates/divine-atbridge/src/translator.rs`
+- Modify: `crates/divine-video-worker/src/main.rs`
 
-- [ ] **Step 1: Extend the contract test with compose assertions**
+- [ ] **Step 1: Write the failing media and profile tests**
+
+```rust
+#[tokio::test]
+async fn non_mp4_source_is_normalized_before_video_publish() {
+    let result = prepare_publishable_video(fake_webm_bytes(), "video/webm").await.unwrap();
+    assert_eq!(result.mime_type, "video/mp4");
+}
+```
 
 ```rust
 #[test]
-fn appview_lab_compose_defines_required_services() {
-    let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .and_then(|path| path.parent())
-        .unwrap();
-    let compose = std::fs::read_to_string(repo_root.join("deploy/appview-lab/docker-compose.yml")).unwrap();
-    let env = std::fs::read_to_string(repo_root.join("deploy/appview-lab/env.example")).unwrap();
-
-    for service in ["postgres:", "relay:", "indexer:", "appview:", "feedgen:", "viewer:"] {
-        assert!(compose.contains(service), "missing {service}");
-    }
-
-    assert!(compose.contains("RSKY_RELAY_IMAGE"));
-    assert!(env.contains("DIVINE_PDS_URL="));
-    assert!(env.contains("VIEWER_APPVIEW_URL="));
+fn profile_record_uses_website_field_instead_of_appending_to_description() {
+    let record = build_profile_record(&parsed_profile_with_website(), None, None);
+    assert_eq!(record["website"], "https://divine.video");
+    assert!(!record["description"].as_str().unwrap().contains("Website:"));
 }
 ```
 
-- [ ] **Step 2: Run the compose contract test and verify it fails**
+- [ ] **Step 2: Run the tests and verify they fail**
 
-Run: `cargo test -p divine-atbridge appview_lab_compose_defines_required_services -- --nocapture`
-Expected: FAIL because the compose files do not exist yet.
+Run: `cargo test -p divine-atbridge --test profile_record_contract -- --nocapture`
+Expected: FAIL because profile records still stuff the website into `description`.
 
-- [ ] **Step 3: Create the lab compose stack**
+Run: `cargo test -p divine-video-worker -- --nocapture`
+Expected: FAIL because video normalization helpers do not exist yet.
 
-Implement `deploy/appview-lab/docker-compose.yml` with:
+- [ ] **Step 3: Implement media and profile hardening**
 
-- `postgres` for the read model
-- `relay` using `${RSKY_RELAY_IMAGE:-ghcr.io/divinevideo/rsky-relay:latest}`
-- `indexer` as a source-mounted Rust container running `cargo run -p divine-appview-indexer`
-- `appview` as a source-mounted Rust container running `cargo run -p divine-appview`
-- `feedgen` as a source-mounted Rust container running `cargo run -p divine-feedgen`
-- `viewer` as a Node container running the React app
+Implement:
 
-The compose file must keep the PDS external and accept `DIVINE_PDS_URL` from env.
+- video normalization helpers that either produce MP4 output or fail early
+- size and MIME checks before `app.bsky.embed.video` publish
+- profile image normalization for avatar/banner constraints
+- profile record output that uses `website` and `createdAt`
+- post translation that omits `langs` when the source language is unknown
 
-- [ ] **Step 4: Document the env contract**
+- [ ] **Step 4: Re-run the targeted tests**
 
-Write `deploy/appview-lab/env.example` with:
-
-- `DIVINE_PDS_URL`
-- `DIVINE_PDS_HOST`
-- `APPVIEW_DATABASE_URL`
-- `RSKY_RELAY_IMAGE`
-- `APPVIEW_CORS_ORIGIN`
-- `VIEWER_APPVIEW_URL`
-- `VIEWER_FEEDGEN_URL`
-
-- [ ] **Step 5: Add helper scripts**
-
-Write:
-
-- `scripts/appview-lab-up.sh`
-- `scripts/appview-lab-down.sh`
-
-They should wrap the compose file and env example cleanly instead of requiring long manual commands.
-
-- [ ] **Step 6: Validate the compose stack**
-
-Run: `docker compose -f deploy/appview-lab/docker-compose.yml --env-file deploy/appview-lab/env.example config`
-Expected: exit code `0`
-
-- [ ] **Step 7: Re-run the contract test**
-
-Run: `cargo test -p divine-atbridge appview_lab_compose_defines_required_services -- --nocapture`
+Run: `cargo test -p divine-atbridge --test profile_record_contract -- --nocapture`
 Expected: PASS
 
-- [ ] **Step 8: Commit**
+Run: `cargo test -p divine-video-worker -- --nocapture`
+Expected: PASS
+
+- [ ] **Step 5: Run focused compile verification**
+
+Run: `cargo check -p divine-atbridge -p divine-video-worker`
+Expected: PASS
+
+- [ ] **Step 6: Commit**
 
 ```bash
-git add deploy/appview-lab/docker-compose.yml deploy/appview-lab/env.example scripts/appview-lab-up.sh scripts/appview-lab-down.sh crates/divine-atbridge/tests/appview_lab_contract.rs
-git commit -m "feat: add divine appview lab compose stack"
+git add crates/divine-atbridge/tests/profile_record_contract.rs crates/divine-atbridge/src/pipeline.rs crates/divine-atbridge/src/profile_sync.rs crates/divine-atbridge/src/translator.rs crates/divine-video-worker/src/normalize.rs crates/divine-video-worker/src/profile_image.rs crates/divine-video-worker/src/main.rs crates/divine-video-worker/tests/normalize.rs
+git commit -m "fix: enforce divine media and profile constraints"
 ```
 
-## Chunk 2: Read-Model Storage And Divine-Scoped Indexing
+## Chunk 2: Read Model And Media View State
 
 ### Task 3: Add The AppView Read-Model Migration And Database Helpers
 
@@ -257,34 +261,29 @@ git commit -m "feat: add divine appview lab compose stack"
 - Modify: `crates/divine-bridge-db/src/schema.rs`
 - Modify: `crates/divine-bridge-db/src/models.rs`
 - Modify: `crates/divine-bridge-db/src/queries.rs`
-- Modify: `crates/divine-atbridge/tests/appview_lab_contract.rs`
+- Create: `crates/divine-atbridge/tests/appview_lab_contract.rs`
 
-- [ ] **Step 1: Add a failing schema contract test**
+- [ ] **Step 1: Add the failing schema contract test**
 
 ```rust
 #[test]
-fn appview_lab_schema_files_define_required_tables() {
-    let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .and_then(|path| path.parent())
-        .unwrap();
+fn appview_schema_includes_media_view_tables_and_queries() {
+    let up = std::fs::read_to_string(repo_root().join("migrations/003_appview_read_model/up.sql")).unwrap();
+    let queries = std::fs::read_to_string(repo_root().join("crates/divine-bridge-db/src/queries.rs")).unwrap();
 
-    let up = std::fs::read_to_string(repo_root.join("migrations/003_appview_read_model/up.sql")).unwrap();
-    let queries = std::fs::read_to_string(repo_root.join("crates/divine-bridge-db/src/queries.rs")).unwrap();
-
-    for table in ["appview_repos", "appview_profiles", "appview_posts", "appview_service_state"] {
+    for table in ["appview_repos", "appview_profiles", "appview_posts", "appview_media_views", "appview_service_state"] {
         assert!(up.contains(table), "missing {table}");
     }
 
-    assert!(queries.contains("upsert_appview_profile"));
-    assert!(queries.contains("search_appview_posts"));
+    assert!(queries.contains("upsert_appview_media_view"));
+    assert!(queries.contains("load_post_with_media_view"));
 }
 ```
 
 - [ ] **Step 2: Run the schema contract test and verify it fails**
 
-Run: `cargo test -p divine-atbridge appview_lab_schema_files_define_required_tables -- --nocapture`
-Expected: FAIL because the migration and query helpers do not exist yet.
+Run: `cargo test -p divine-atbridge appview_schema_includes_media_view_tables_and_queries -- --nocapture`
+Expected: FAIL because the migration and media-view helpers do not exist yet.
 
 - [ ] **Step 3: Add the migration**
 
@@ -293,8 +292,9 @@ Implement `migrations/003_appview_read_model/up.sql` with:
 - `appview_repos`
 - `appview_profiles`
 - `appview_posts`
+- `appview_media_views`
 - `appview_service_state`
-- indexes for author feed ordering and text search
+- indexes for author feed ordering, blob lookup, and text search
 
 Implement `down.sql` to drop those tables in reverse dependency order.
 
@@ -303,12 +303,12 @@ Implement `down.sql` to drop those tables in reverse dependency order.
 Update `schema.rs`, `models.rs`, and `queries.rs` so the read stack can:
 
 - upsert repos
-- upsert profiles
-- upsert posts
-- soft-delete posts missing from a repo re-sync
-- fetch profile by handle or DID
+- upsert profiles with `website` and media CIDs
+- upsert posts with blob-CID metadata
+- upsert media-view rows with playlist and thumbnail URLs
+- fetch profiles by handle or DID
 - fetch author feeds with cursor pagination
-- fetch posts by URI
+- fetch posts by URI with joined media-view state
 - search post text
 - store and read service-state cursors
 
@@ -319,15 +319,17 @@ Expected: PASS
 
 - [ ] **Step 6: Re-run the schema contract test**
 
-Run: `cargo test -p divine-atbridge appview_lab_schema_files_define_required_tables -- --nocapture`
+Run: `cargo test -p divine-atbridge appview_schema_includes_media_view_tables_and_queries -- --nocapture`
 Expected: PASS
 
 - [ ] **Step 7: Commit**
 
 ```bash
 git add migrations/003_appview_read_model crates/divine-bridge-db/src/schema.rs crates/divine-bridge-db/src/models.rs crates/divine-bridge-db/src/queries.rs crates/divine-atbridge/tests/appview_lab_contract.rs
-git commit -m "feat: add appview read model schema"
+git commit -m "feat: add appview media view schema"
 ```
+
+## Chunk 3: Divine-Scoped Indexing And Media Derivation
 
 ### Task 4: Add The Divine-Scoped AppView Indexer
 
@@ -348,7 +350,7 @@ git commit -m "feat: add appview read model schema"
 
 ```rust
 #[tokio::test]
-async fn backfill_syncs_profiles_and_posts_from_pds() {
+async fn backfill_syncs_profiles_posts_and_blob_metadata_from_pds() {
     let pds = FakePdsClient::with_repo(
         "did:plc:ebt5msdpfavoklkap6gl54bm",
         fake_profile_record(),
@@ -361,6 +363,7 @@ async fn backfill_syncs_profiles_and_posts_from_pds() {
         .unwrap();
 
     assert_eq!(store.posts().len(), 2);
+    assert_eq!(store.posts()[0].embed_blob_cid.as_deref(), Some("bafkrei..."));
 }
 ```
 
@@ -368,14 +371,14 @@ async fn backfill_syncs_profiles_and_posts_from_pds() {
 
 ```rust
 #[tokio::test]
-async fn relay_event_triggers_repo_resync() {
+async fn relay_event_triggers_repo_resync_and_media_queueing() {
     let relay = FakeRelayStream::with_commit_for("did:plc:ebt5msdpfavoklkap6gl54bm");
     let pds = FakePdsClient::with_single_post("did:plc:ebt5msdpfavoklkap6gl54bm", "MA6mjTWZKEB");
     let store = MemoryStore::default();
 
     run_single_event_loop(&relay, &pds, &store).await.unwrap();
 
-    assert_eq!(store.posts()[0].rkey, "MA6mjTWZKEB");
+    assert_eq!(store.media_jobs().len(), 1);
 }
 ```
 
@@ -397,6 +400,7 @@ Implement:
   - full backfill on boot
   - relay subscription after backfill
   - cursor persistence in `appview_service_state`
+  - media-derivation queueing when indexed posts contain video blob CIDs
 
 Important implementation rule:
 
@@ -421,9 +425,61 @@ git add Cargo.toml crates/divine-appview-indexer
 git commit -m "feat: add divine appview indexer"
 ```
 
-## Chunk 3: AppView Read API And Discovery Feeds
+### Task 5: Build Media View Derivation For AppView Playback
 
-### Task 5: Add The `divine-appview` Read Service
+**Files:**
+- Create: `crates/divine-video-worker/src/derivatives.rs`
+- Create: `crates/divine-video-worker/tests/derivatives.rs`
+- Modify: `crates/divine-video-worker/src/main.rs`
+- Modify: `crates/divine-bridge-db/src/queries.rs`
+
+- [ ] **Step 1: Write the failing derivative test**
+
+```rust
+#[tokio::test]
+async fn derive_media_view_creates_playlist_and_thumbnail_urls() {
+    let view = derive_media_view(fake_mp4_asset()).await.unwrap();
+    assert!(view.playlist_url.ends_with(".m3u8"));
+    assert!(view.thumbnail_url.as_deref().unwrap().ends_with(".jpg"));
+}
+```
+
+- [ ] **Step 2: Run the derivative tests and verify they fail**
+
+Run: `cargo test -p divine-video-worker derivatives -- --nocapture`
+Expected: FAIL because the derivative generator does not exist yet.
+
+- [ ] **Step 3: Implement derivative generation**
+
+Extend `divine-video-worker` so it can:
+
+- take a Divine DID plus blob CID as the media identity
+- produce a playlist URL and optional thumbnail URL
+- persist the finished media-view row into `appview_media_views`
+- be rerun safely for backfilled legacy blobs already on the Divine PDS
+
+The worker can stay lab-simple. The important contract is that appview reads stable view URLs from the database instead of guessing or exposing raw blob fetch endpoints.
+
+- [ ] **Step 4: Run the targeted tests**
+
+Run: `cargo test -p divine-video-worker derivatives -- --nocapture`
+Expected: PASS
+
+- [ ] **Step 5: Run focused compile verification**
+
+Run: `cargo check -p divine-video-worker`
+Expected: PASS
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add crates/divine-video-worker/src/derivatives.rs crates/divine-video-worker/src/main.rs crates/divine-video-worker/tests/derivatives.rs crates/divine-bridge-db/src/queries.rs
+git commit -m "feat: derive appview media playback views"
+```
+
+## Chunk 4: AppView Read API And Discovery Feeds
+
+### Task 6: Add The `divine-appview` Read Service
 
 **Files:**
 - Modify: `Cargo.toml`
@@ -445,13 +501,16 @@ git commit -m "feat: add divine appview indexer"
 
 ```rust
 #[tokio::test]
-async fn get_profile_returns_divine_actor() {
-    let app = app_with_store(FakeStore::with_profile("did:plc:ebt5msdpfavoklkap6gl54bm"));
+async fn get_posts_hydrates_video_embed_view() {
+    let app = app_with_store(FakeStore::with_video_post(
+        "at://did:plc:ebt5msdpfavoklkap6gl54bm/app.bsky.feed.post/MA6mjTWZKEB",
+        "https://media.divine.test/playlists/bafkrei-demo.m3u8",
+    ));
 
     let response = app
         .oneshot(
             Request::builder()
-                .uri("/xrpc/app.bsky.actor.getProfile?actor=did:plc:ebt5msdpfavoklkap6gl54bm")
+                .uri("/xrpc/app.bsky.feed.getPosts?uris=at://did:plc:ebt5msdpfavoklkap6gl54bm/app.bsky.feed.post/MA6mjTWZKEB")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -464,23 +523,10 @@ async fn get_profile_returns_divine_actor() {
 
 ```rust
 #[tokio::test]
-async fn search_posts_returns_vine_demo_posts() {
-    let app = app_with_store(FakeStore::with_posts(vec![
-        "at://did:plc:ebt5msdpfavoklkap6gl54bm/app.bsky.feed.post/MA6mjTWZKEB",
-        "at://did:plc:ebt5msdpfavoklkap6gl54bm/app.bsky.feed.post/hFxlUuKIIqU",
-    ]));
-
-    let response = app
-        .oneshot(
-            Request::builder()
-                .uri("/xrpc/app.bsky.feed.searchPosts?q=vine")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-
-    assert_eq!(response.status(), StatusCode::OK);
+async fn search_posts_returns_video_views_without_raw_blob_urls() {
+    let body = read_search_response(search_app()).await;
+    assert!(body.contains("\"playlist\""));
+    assert!(!body.contains("com.atproto.sync.getBlob"));
 }
 ```
 
@@ -507,7 +553,9 @@ Implementation notes:
 - resolve `actor` by DID or handle
 - paginate author feed and search results with stable cursors
 - return readiness failure when the indexer freshness state is missing or stale
-- add CORS config for the local React viewer origin
+- hydrate post views and profile views from the local read model
+- return `app.bsky.embed.video#view` for video posts using `appview_media_views`
+- add CORS config for the local JS viewer origin
 
 - [ ] **Step 4: Run the route tests**
 
@@ -526,7 +574,7 @@ git add Cargo.toml crates/divine-appview
 git commit -m "feat: add divine appview read service"
 ```
 
-### Task 6: Replace Static Feedgen Data With Read-Model Queries
+### Task 7: Replace Static Feedgen Data With Read-Model Queries
 
 **Files:**
 - Modify: `crates/divine-feedgen/src/lib.rs`
@@ -562,10 +610,9 @@ Update `divine-feedgen` so:
 
 - `latest` returns newest indexed Divine posts
 - `trending` uses a deterministic lab heuristic:
-  - prefer parsed loop/like counts when present in archived text
+  - rank by any indexed engagement fields that actually exist
   - otherwise fall back to recency
-
-Keep the public feed URIs stable so the viewer can rely on them.
+- the response stays skeleton-only and returns post AT-URIs, not hydrated media or profile data
 
 - [ ] **Step 4: Run the feedgen tests**
 
@@ -584,98 +631,99 @@ git add crates/divine-feedgen/src/lib.rs crates/divine-feedgen/src/skeleton.rs c
 git commit -m "feat: back feedgen with appview read model"
 ```
 
-## Chunk 4: Tiny React Viewer And End-To-End Verification
+## Chunk 5: Viewer, Local Orchestration, And End-To-End Verification
 
-### Task 7: Add The Tiny React Video Viewer
+### Task 8: Add The AppView Lab Compose Stack, Viewer, And Operator Smoke
 
 **Files:**
-- Create: `apps/divine-video-viewer/package.json`
-- Create: `apps/divine-video-viewer/vite.config.ts`
-- Create: `apps/divine-video-viewer/tsconfig.json`
-- Create: `apps/divine-video-viewer/index.html`
-- Create: `apps/divine-video-viewer/src/api.ts`
-- Create: `apps/divine-video-viewer/src/App.tsx`
-- Create: `apps/divine-video-viewer/src/main.tsx`
-- Create: `apps/divine-video-viewer/src/styles.css`
-- Create: `apps/divine-video-viewer/src/components/FeedGrid.tsx`
-- Create: `apps/divine-video-viewer/src/components/SearchBar.tsx`
-- Create: `apps/divine-video-viewer/src/components/VideoCard.tsx`
+- Create: `deploy/appview-lab/README.md`
+- Create: `deploy/appview-lab/docker-compose.yml`
+- Create: `deploy/appview-lab/env.example`
+- Create: `apps/divine-blacksky-viewer/package.json`
+- Create: `apps/divine-blacksky-viewer/vite.config.ts`
+- Create: `apps/divine-blacksky-viewer/tsconfig.json`
+- Create: `apps/divine-blacksky-viewer/index.html`
+- Create: `apps/divine-blacksky-viewer/src/api.ts`
+- Create: `apps/divine-blacksky-viewer/src/App.tsx`
+- Create: `apps/divine-blacksky-viewer/src/main.tsx`
+- Create: `apps/divine-blacksky-viewer/src/styles.css`
+- Create: `apps/divine-blacksky-viewer/src/components/AuthorPage.tsx`
+- Create: `apps/divine-blacksky-viewer/src/components/FeedSwitcher.tsx`
+- Create: `apps/divine-blacksky-viewer/src/components/PostDetail.tsx`
+- Create: `apps/divine-blacksky-viewer/src/components/SearchBar.tsx`
+- Create: `apps/divine-blacksky-viewer/src/components/VideoCard.tsx`
+- Create: `scripts/appview-lab-up.sh`
+- Create: `scripts/appview-lab-down.sh`
+- Create: `scripts/appview-lab-smoke.sh`
+- Create: `docs/runbooks/appview-lab.md`
+- Modify: `README.md`
+- Modify: `docs/runbooks/dev-bootstrap.md`
+- Modify: `docs/runbooks/pds-operations.md`
 
-- [ ] **Step 1: Write the failing viewer smoke test**
+- [ ] **Step 1: Write the failing contract and smoke tests**
 
-Create a minimal frontend smoke, either:
+Create:
 
-- `apps/divine-video-viewer/src/App.test.tsx`, or
-- a scripted build-time smoke in `package.json`
+- a frontend smoke that asserts feed cards render from mocked appview and feedgen responses
+- a shell smoke that asserts:
+  - the demo profile DID resolves
+  - author feed includes `MA6mjTWZKEB` and `hFxlUuKIIqU`
+  - search returns both demo posts
+  - the hydrated post view includes a `playlist` field
 
-The test must assert that the app can render feed cards from mocked ATProto responses.
+- [ ] **Step 2: Run the build and smoke checks and verify they fail**
 
-- [ ] **Step 2: Run the frontend test or build and verify it fails**
-
-Run: `cd apps/divine-video-viewer && npm install && npm run build`
+Run: `cd apps/divine-blacksky-viewer && npm install && npm run build`
 Expected: FAIL because the app does not exist yet.
 
-- [ ] **Step 3: Implement the viewer**
+Run: `bash scripts/appview-lab-smoke.sh`
+Expected: FAIL because the stack and smoke script do not exist yet.
+
+- [ ] **Step 3: Implement the appview lab runtime**
+
+Implement `deploy/appview-lab/docker-compose.yml` with:
+
+- `postgres`
+- `relay` using `${RSKY_RELAY_IMAGE:-ghcr.io/divinevideo/rsky-relay:latest}`
+- `indexer` as a source-mounted Rust container running `cargo run -p divine-appview-indexer`
+- `media-worker` as a source-mounted Rust container running the media-derivation job
+- `appview` as a source-mounted Rust container running `cargo run -p divine-appview`
+- `feedgen` as a source-mounted Rust container running `cargo run -p divine-feedgen`
+- `viewer` as a Node container running the JS app
+
+The compose file must keep the PDS external and accept `DIVINE_PDS_URL` from env.
+
+- [ ] **Step 4: Implement the lightweight viewer**
 
 The viewer should provide:
 
 - a latest feed view using `divine-feedgen`
 - a trending feed view using `divine-feedgen`
-- a search input using `app.bsky.feed.searchPosts`
-- post cards that hydrate profile and post data via `divine-appview`
-- direct links or detail expansion for the two known Vine demo posts
+- author pages using `app.bsky.actor.getProfile` plus `getAuthorFeed`
+- post detail using `app.bsky.feed.getPostThread` or `getPosts`
+- search using `app.bsky.feed.searchPosts`
+- HTML5 playback from the returned `playlist` URL
 
 Keep the app intentionally small. No auth, no mutations, no styling sprawl.
 
-- [ ] **Step 4: Run the frontend build**
+- [ ] **Step 5: Document operator flow**
 
-Run: `cd apps/divine-video-viewer && npm install && npm run build`
-Expected: PASS
-
-- [ ] **Step 5: Commit**
-
-```bash
-git add apps/divine-video-viewer
-git commit -m "feat: add divine video viewer app"
-```
-
-### Task 8: Add The End-To-End Smoke Script And Operator Runbook
-
-**Files:**
-- Create: `scripts/appview-lab-smoke.sh`
-- Create: `docs/runbooks/appview-lab.md`
-- Modify: `deploy/appview-lab/README.md`
-- Modify: `docs/runbooks/dev-bootstrap.md`
-- Modify: `docs/runbooks/pds-operations.md`
-
-- [ ] **Step 1: Write the failing smoke script**
-
-Create `scripts/appview-lab-smoke.sh` that verifies:
-
-- the local appview returns the demo profile DID
-- `getAuthorFeed` includes `MA6mjTWZKEB` and `hFxlUuKIIqU`
-- `searchPosts?q=vine` returns both demo posts
-- `divine-feedgen` latest or trending returns Divine-owned URIs
-
-The script should exit non-zero when any expectation fails.
-
-- [ ] **Step 2: Run the smoke script and verify it fails**
-
-Run: `bash scripts/appview-lab-smoke.sh`
-Expected: FAIL because the stack is not fully implemented yet.
-
-- [ ] **Step 3: Document operator flow**
-
-Write `docs/runbooks/appview-lab.md` and update the existing runbooks with:
+Write `deploy/appview-lab/README.md`, `docs/runbooks/appview-lab.md`, and update the existing runbooks with:
 
 1. required env setup
 2. compose startup
 3. expected health endpoints
 4. smoke command
 5. viewer URL
-6. troubleshooting for stale index or relay lag
+6. troubleshooting for stale index, relay lag, and missing playlist derivatives
 
-- [ ] **Step 4: Bring the stack up and run the smoke**
+- [ ] **Step 6: Validate the lab**
+
+Run: `docker compose -f deploy/appview-lab/docker-compose.yml --env-file deploy/appview-lab/env.example config`
+Expected: exit code `0`
+
+Run: `cd apps/divine-blacksky-viewer && npm install && npm run build`
+Expected: PASS
 
 Run: `bash scripts/appview-lab-up.sh`
 Expected: compose services start successfully
@@ -685,7 +733,7 @@ Expected: PASS and explicitly mention:
 - `at://did:plc:ebt5msdpfavoklkap6gl54bm/app.bsky.feed.post/MA6mjTWZKEB`
 - `at://did:plc:ebt5msdpfavoklkap6gl54bm/app.bsky.feed.post/hFxlUuKIIqU`
 
-- [ ] **Step 5: Run final verification**
+- [ ] **Step 7: Run final verification**
 
 Run: `cargo check --workspace`
 Expected: PASS
@@ -693,19 +741,21 @@ Expected: PASS
 Run: `bash scripts/test-workspace.sh`
 Expected: PASS
 
-Run: `cd apps/divine-video-viewer && npm run build`
+Run: `cd apps/divine-blacksky-viewer && npm run build`
 Expected: PASS
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 8: Commit**
 
 ```bash
-git add scripts/appview-lab-smoke.sh docs/runbooks/appview-lab.md deploy/appview-lab/README.md docs/runbooks/dev-bootstrap.md docs/runbooks/pds-operations.md
-git commit -m "docs: add divine appview lab runbook"
+git add deploy/appview-lab apps/divine-blacksky-viewer scripts/appview-lab-up.sh scripts/appview-lab-down.sh scripts/appview-lab-smoke.sh docs/runbooks/appview-lab.md README.md docs/runbooks/dev-bootstrap.md docs/runbooks/pds-operations.md
+git commit -m "feat: add divine appview lab runtime and viewer"
 ```
 
 ## Execution Notes
 
 - The external relay behavior belongs in `divinevideo/rsky-relay`, not in this repository.
 - If the relay fork needs Divine-only flags or host allowlisting, document those flags in `deploy/appview-lab/env.example` and `deploy/appview-lab/README.md`, but keep the implementation in the fork.
-- The appview indexer should keep its first version simple and explicit: relay events indicate which DID changed, and the indexer re-reads the relevant PDS records instead of trying to decode the full firehose payload into a generic network-wide dataplane.
-- Do not broaden scope into auth, likes, or wider-network indexing before the known demo posts render end to end.
+- Treat the media-view layer as a first-class contract. Do not leak raw `getBlob` URLs into viewer code just because it is easy.
+- Keep the first appview indexer simple and explicit: relay events indicate which DID changed, and the indexer re-reads the relevant PDS records instead of trying to decode the full firehose payload into a generic network-wide dataplane.
+- Do not broaden scope into auth, likes, replies, or wider-network indexing before the known demo posts render end to end.
+- Do not rewrite legacy fixture URIs as part of this plan. Index them correctly, but make new bridge publishes spec-friendlier going forward.
