@@ -41,8 +41,8 @@ impl DbStore {
     }
 
     pub fn get_at_uri_by_event_id(&self, nostr_event_id: &str) -> Result<Option<(String, String)>> {
-        use divine_bridge_db::schema::record_mappings;
         use diesel::prelude::*;
+        use divine_bridge_db::schema::record_mappings;
 
         let mut conn = self.connection.lock().unwrap();
         let result = record_mappings::table

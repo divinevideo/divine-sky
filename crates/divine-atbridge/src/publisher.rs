@@ -19,6 +19,8 @@ use crate::pipeline::{BlobUploader, PdsPublisher, PublishedRecord};
 pub struct CreateRecordResponse {
     pub uri: String,
     pub cid: String,
+    #[serde(rename = "validationStatus")]
+    pub validation_status: Option<String>,
 }
 
 /// Response from `com.atproto.repo.putRecord`.
@@ -124,7 +126,6 @@ impl PdsClient {
         &self,
         did: &str,
         collection: &str,
-        rkey: &str,
         record: &serde_json::Value,
     ) -> Result<CreateRecordResponse> {
         let url = format!("{}/xrpc/com.atproto.repo.createRecord", self.base_url);
@@ -132,7 +133,7 @@ impl PdsClient {
         let body = serde_json::json!({
             "repo": did,
             "collection": collection,
-            "rkey": rkey,
+            "validate": true,
             "record": record,
         });
 
@@ -153,9 +154,16 @@ impl PdsClient {
             anyhow::bail!("createRecord failed ({}): {}", status.as_u16(), detail);
         }
 
-        resp.json()
+        let response: CreateRecordResponse = resp
+            .json()
             .await
-            .context("failed to parse createRecord response")
+            .context("failed to parse createRecord response")?;
+
+        if matches!(response.validation_status.as_deref(), Some("unknown")) {
+            anyhow::bail!("createRecord returned unknown validation status");
+        }
+
+        Ok(response)
     }
 
     /// Upsert a record in a PDS repository.
@@ -241,6 +249,39 @@ impl BlobUploader for PdsClient {
 
 #[async_trait::async_trait]
 impl PdsPublisher for PdsClient {
+    async fn create_record(
+        &self,
+        did: &str,
+        collection: &str,
+        record: &serde_json::Value,
+    ) -> Result<String> {
+        Ok(PdsClient::create_record(self, did, collection, record)
+            .await?
+            .uri)
+    }
+
+    async fn create_record_with_meta(
+        &self,
+        did: &str,
+        collection: &str,
+        record: &serde_json::Value,
+    ) -> Result<PublishedRecord> {
+        let response = PdsClient::create_record(self, did, collection, record).await?;
+        let rkey = response
+            .uri
+            .rsplit('/')
+            .next()
+            .filter(|segment| !segment.is_empty())
+            .context("createRecord response URI is missing an rkey segment")?
+            .to_string();
+
+        Ok(PublishedRecord {
+            at_uri: response.uri,
+            rkey,
+            cid: Some(response.cid),
+        })
+    }
+
     async fn put_record(
         &self,
         did: &str,
@@ -263,6 +304,7 @@ impl PdsPublisher for PdsClient {
         let response = PdsClient::put_record(self, did, collection, rkey, record).await?;
         Ok(PublishedRecord {
             at_uri: response.uri,
+            rkey: rkey.to_string(),
             cid: Some(response.cid),
         })
     }
@@ -309,7 +351,7 @@ mod tests {
                 serde_json::json!({
                     "repo": "did:plc:abc123",
                     "collection": "app.bsky.feed.post",
-                    "rkey": "my-rkey",
+                    "validate": true,
                     "record": {"text": "hello"}
                 })
                 .to_string(),
@@ -319,7 +361,8 @@ mod tests {
             .with_body(
                 serde_json::json!({
                     "uri": "at://did:plc:abc123/app.bsky.feed.post/my-rkey",
-                    "cid": "bafyrei123"
+                    "cid": "bafyrei123",
+                    "validationStatus": "valid"
                 })
                 .to_string(),
             )
@@ -329,12 +372,42 @@ mod tests {
         let client = PdsClient::new(server.url(), "test-token");
         let record = serde_json::json!({"text": "hello"});
         let resp = client
-            .create_record("did:plc:abc123", "app.bsky.feed.post", "my-rkey", &record)
+            .create_record("did:plc:abc123", "app.bsky.feed.post", &record)
             .await
             .unwrap();
 
         assert_eq!(resp.uri, "at://did:plc:abc123/app.bsky.feed.post/my-rkey");
         assert_eq!(resp.cid, "bafyrei123");
+        assert_eq!(resp.validation_status.as_deref(), Some("valid"));
+        mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn create_record_rejects_unknown_validation_status() {
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("POST", "/xrpc/com.atproto.repo.createRecord")
+            .with_status(200)
+            .with_header("Content-Type", "application/json")
+            .with_body(
+                serde_json::json!({
+                    "uri": "at://did:plc:abc123/app.bsky.feed.post/my-rkey",
+                    "cid": "bafyrei123",
+                    "validationStatus": "unknown"
+                })
+                .to_string(),
+            )
+            .create_async()
+            .await;
+
+        let client = PdsClient::new(server.url(), "test-token");
+        let record = serde_json::json!({"text": "hello"});
+        let err = client
+            .create_record("did:plc:abc123", "app.bsky.feed.post", &record)
+            .await
+            .expect_err("unknown validation status should fail");
+
+        assert!(err.to_string().contains("unknown validation status"));
         mock.assert_async().await;
     }
 
@@ -460,7 +533,7 @@ mod tests {
 
         let client = PdsClient::new(server.url(), "tok");
         let err = client
-            .create_record("did:plc:x", "col", "rk", &serde_json::json!({}))
+            .create_record("did:plc:x", "col", &serde_json::json!({}))
             .await
             .unwrap_err();
 
@@ -492,7 +565,7 @@ mod tests {
 
         let client = PdsClient::new(server.url(), "bad-tok");
         let err = client
-            .create_record("did:plc:x", "col", "rk", &serde_json::json!({}))
+            .create_record("did:plc:x", "col", &serde_json::json!({}))
             .await
             .unwrap_err();
 

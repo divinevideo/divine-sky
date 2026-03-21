@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>diVine Feed Generator</title>
+<title>Divine Blacksky Feed Generator</title>
 <style>
 :root {
     --primary: #27C58B;
@@ -107,8 +107,8 @@ a { color: var(--primary); }
 </style>
 </head>
 <body>
-<h1>diVine Feed Generator</h1>
-<p class="muted">ATProto feed generator for diVine video content</p>
+<h1>Divine Blacksky Feed Generator</h1>
+<p class="muted">ATProto feed skeleton service for the Divine Blacksky Viewer Lab</p>
 
 <h2>Endpoints</h2>
 <div class="endpoint"><code>GET</code> <code>/xrpc/app.bsky.feed.describeFeedGenerator</code> &mdash; Feed metadata</div>
@@ -116,8 +116,13 @@ a { color: var(--primary); }
 <div class="endpoint"><code>GET</code> <code>/health</code> &mdash; Health check</div>
 <div class="endpoint"><code>GET</code> <code>/health/ready</code> &mdash; Readiness check</div>
 
-<h2>Links</h2>
-<p><a href="https://divine.video">divine.video</a> &middot; <a href="https://github.com/nicobao/divine">GitHub</a></p>
+<h2>Viewer Lab</h2>
+<p>
+  <a href="http://127.0.0.1:4173">Viewer</a> &middot;
+  <a href="http://127.0.0.1:3004">AppView</a> &middot;
+  <a href="http://127.0.0.1:3100">Media View</a> &middot;
+  <a href="http://127.0.0.1:2583">Mock PDS</a>
+</p>
 
 <div class="card">
   <h2>Describe Feed Generator</h2>
@@ -144,7 +149,7 @@ a { color: var(--primary); }
 </div>
 
 <hr style="border-color: var(--border); margin-top: 2rem;">
-<p class="muted" style="font-size: 0.85em;">Powered by diVine</p>
+<p class="muted" style="font-size: 0.85em;">Powered by the Divine Blacksky Viewer Lab</p>
 
 <script>
 let lastCursor = null;

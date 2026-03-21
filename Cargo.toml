@@ -1,6 +1,8 @@
 [workspace]
 members = [
     "crates/divine-atbridge",
+    "crates/divine-appview",
+    "crates/divine-appview-indexer",
     "crates/divine-bridge-db",
     "crates/divine-bridge-types",
     "crates/divine-feedgen",

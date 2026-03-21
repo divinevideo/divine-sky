@@ -10,6 +10,7 @@ path = "src/main.rs"
 [dependencies]
 divine-bridge-db = { path = "../divine-bridge-db" }
 divine-bridge-types = { path = "../divine-bridge-types" }
+divine-video-worker = { path = "../divine-video-worker" }
 anyhow = { workspace = true }
 axum = "0.7"
 diesel = { workspace = true }

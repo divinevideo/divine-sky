@@ -142,6 +142,28 @@ struct TrackingPublisher;
 
 #[async_trait]
 impl PdsPublisher for TrackingPublisher {
+    async fn create_record(
+        &self,
+        did: &str,
+        collection: &str,
+        _record: &serde_json::Value,
+    ) -> Result<String> {
+        Ok(format!("at://{did}/{collection}/3lineagemedia"))
+    }
+
+    async fn create_record_with_meta(
+        &self,
+        did: &str,
+        collection: &str,
+        record: &serde_json::Value,
+    ) -> Result<PublishedRecord> {
+        Ok(PublishedRecord {
+            at_uri: self.create_record(did, collection, record).await?,
+            rkey: "3lineagemedia".to_string(),
+            cid: Some("bafyrecordcid123".to_string()),
+        })
+    }
+
     async fn put_record(
         &self,
         did: &str,
@@ -161,6 +183,7 @@ impl PdsPublisher for TrackingPublisher {
     ) -> Result<PublishedRecord> {
         Ok(PublishedRecord {
             at_uri: self.put_record(did, collection, rkey, record).await?,
+            rkey: rkey.to_string(),
             cid: Some("bafyrecordcid123".to_string()),
         })
     }
@@ -197,7 +220,7 @@ async fn media_lineage_persists_manifest_and_publish_status() {
     match result {
         ProcessResult::Published { at_uri, rkey } => {
             assert!(at_uri.contains("did:plc:media"));
-            assert_eq!(rkey, "hash-lineage");
+            assert_eq!(rkey, "3lineagemedia");
         }
         other => panic!("expected Published, got {other:?}"),
     }

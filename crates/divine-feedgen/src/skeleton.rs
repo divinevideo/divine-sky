@@ -1,5 +1,9 @@
 use anyhow::{anyhow, Result};
+use async_trait::async_trait;
+use diesel::{Connection, PgConnection};
+use divine_bridge_db::{list_latest_appview_posts, list_trending_appview_posts};
 use serde::Serialize;
+use std::sync::Arc;
 
 const FEED_DID: &str = "did:plc:divine.feed";
 const LATEST_URI: &str = "at://did:plc:divine.feed/app.bsky.feed.generator/latest";
@@ -32,6 +36,49 @@ pub struct FeedSkeletonResponse {
     pub cursor: Option<String>,
 }
 
+#[async_trait]
+pub trait FeedStore: Send + Sync {
+    async fn latest_posts(&self, limit: usize) -> Result<Vec<String>>;
+    async fn trending_posts(&self, limit: usize) -> Result<Vec<String>>;
+}
+
+pub type DynFeedStore = Arc<dyn FeedStore>;
+
+pub struct DbFeedStore {
+    database_url: String,
+}
+
+impl DbFeedStore {
+    pub fn from_env() -> Self {
+        Self {
+            database_url: std::env::var("DATABASE_URL").expect("DATABASE_URL is required"),
+        }
+    }
+
+    fn connect(&self) -> Result<PgConnection> {
+        Ok(PgConnection::establish(&self.database_url)?)
+    }
+}
+
+#[async_trait]
+impl FeedStore for DbFeedStore {
+    async fn latest_posts(&self, limit: usize) -> Result<Vec<String>> {
+        let mut conn = self.connect()?;
+        Ok(list_latest_appview_posts(&mut conn, limit as i64)?
+            .into_iter()
+            .map(|post| post.uri)
+            .collect())
+    }
+
+    async fn trending_posts(&self, limit: usize) -> Result<Vec<String>> {
+        let mut conn = self.connect()?;
+        Ok(list_trending_appview_posts(&mut conn, limit as i64)?
+            .into_iter()
+            .map(|post| post.uri)
+            .collect())
+    }
+}
+
 pub fn describe_feed_generator() -> DescribeFeedGeneratorResponse {
     DescribeFeedGeneratorResponse {
         did: FEED_DID.to_string(),
@@ -50,10 +97,14 @@ pub fn describe_feed_generator() -> DescribeFeedGeneratorResponse {
     }
 }
 
-pub fn feed_skeleton(feed: &str) -> Result<FeedSkeletonResponse> {
+pub async fn feed_skeleton(
+    store: &dyn FeedStore,
+    feed: &str,
+    limit: usize,
+) -> Result<FeedSkeletonResponse> {
     let items = match feed {
-        LATEST_URI => latest_posts(),
-        TRENDING_URI => trending_posts(),
+        LATEST_URI => store.latest_posts(limit).await?,
+        TRENDING_URI => store.trending_posts(limit).await?,
         _ => return Err(anyhow!("unknown feed URI: {feed}")),
     };
 
@@ -61,20 +112,4 @@ pub fn feed_skeleton(feed: &str) -> Result<FeedSkeletonResponse> {
         feed: items.into_iter().map(|post| FeedItem { post }).collect(),
         cursor: None,
     })
-}
-
-fn latest_posts() -> Vec<String> {
-    vec![
-        "at://did:plc:divine.creator/app.bsky.feed.post/latest-001".to_string(),
-        "at://did:plc:divine.creator/app.bsky.feed.post/latest-002".to_string(),
-        "at://did:plc:divine.creator/app.bsky.feed.post/latest-003".to_string(),
-    ]
-}
-
-fn trending_posts() -> Vec<String> {
-    vec![
-        "at://did:plc:divine.rank/app.bsky.feed.post/trending-900".to_string(),
-        "at://did:plc:divine.rank/app.bsky.feed.post/trending-650".to_string(),
-        "at://did:plc:divine.rank/app.bsky.feed.post/trending-420".to_string(),
-    ]
 }

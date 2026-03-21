@@ -15,8 +15,8 @@ fn main() -> Result<()> {
     let signing_key_hex = get_arg(&args, "--signing-key")?;
     let pds_endpoint = get_arg(&args, "--pds-endpoint")?;
     let handle = get_arg(&args, "--handle")?;
-    let plc_directory = get_arg(&args, "--plc-directory")
-        .unwrap_or_else(|_| "https://plc.directory".to_string());
+    let plc_directory =
+        get_arg(&args, "--plc-directory").unwrap_or_else(|_| "https://plc.directory".to_string());
 
     // Derive public key from signing key
     let key_bytes = hex::decode(&signing_key_hex).context("invalid hex signing key")?;
@@ -85,7 +85,9 @@ fn main() -> Result<()> {
     } else if body.contains("does not match DID identifier") {
         // PLC directory computed a different hash — use their DID
         if let Some(correct_did) = body.split("does not match DID identifier: ").nth(1) {
-            let correct_did = correct_did.trim().trim_end_matches(|c: char| !c.is_alphanumeric() && c != ':');
+            let correct_did = correct_did
+                .trim()
+                .trim_end_matches(|c: char| !c.is_alphanumeric() && c != ':');
             eprintln!("DID hash mismatch — PLC directory says correct DID is: {correct_did}");
             let retry_url = format!("{}/{}", plc_directory.trim_end_matches('/'), correct_did);
             eprintln!("POST {retry_url}");
@@ -133,10 +135,7 @@ fn pubkey_to_did_key(pubkey: &PublicKey) -> String {
     format!("did:key:z{encoded}")
 }
 
-fn sign_plc_operation(
-    operation: &serde_json::Value,
-    secret_key: &SecretKey,
-) -> Result<String> {
+fn sign_plc_operation(operation: &serde_json::Value, secret_key: &SecretKey) -> Result<String> {
     use sha2::{Digest, Sha256};
 
     let mut op_clone = operation.clone();
@@ -159,8 +158,8 @@ fn derive_did_plc(operation: &serde_json::Value) -> String {
     if let Some(obj) = op_clone.as_object_mut() {
         obj.remove("sig");
     }
-    let cbor_bytes = serde_ipld_dagcbor::to_vec(&op_clone)
-        .expect("valid PLC operations encode to DAG-CBOR");
+    let cbor_bytes =
+        serde_ipld_dagcbor::to_vec(&op_clone).expect("valid PLC operations encode to DAG-CBOR");
     let hash = Sha256::digest(&cbor_bytes);
     let encoded = data_encoding::BASE32_NOPAD
         .encode(&hash[..15])

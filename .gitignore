@@ -2,3 +2,9 @@
 /.claude/
 /.worktrees/
 /firebase-debug.log
+node_modules/
+dist/
+*.tsbuildinfo
+__pycache__/
+*.pyc
+deploy/appview-lab/.env

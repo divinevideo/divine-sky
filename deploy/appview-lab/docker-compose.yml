@@ -1,0 +1,83 @@
+services:
+  appview-db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${APPVIEW_DB_NAME:-divine_appview}
+      POSTGRES_USER: ${APPVIEW_DB_USER:-divine}
+      POSTGRES_PASSWORD: ${APPVIEW_DB_PASSWORD:-divine}
+    ports:
+      - "${APPVIEW_DB_PORT:-55432}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${APPVIEW_DB_USER:-divine} -d ${APPVIEW_DB_NAME:-divine_appview}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    volumes:
+      - appview-pgdata:/var/lib/postgresql/data
+      - ../..:/workspace:ro
+
+  relay:
+    image: ${RSKY_RELAY_IMAGE:-ghcr.io/divinevideo/rsky-relay:latest}
+    profiles: ["relay"]
+    restart: unless-stopped
+    ports:
+      - "${DIVINE_RELAY_PORT:-3001}:3001"
+    environment:
+      DIVINE_PDS_URL: ${DIVINE_PDS_URL:-http://127.0.0.1:3000}
+
+  mock-pds:
+    image: python:3.12-alpine
+    profiles: ["local-pds"]
+    restart: unless-stopped
+    working_dir: /workspace
+    command: ["python", "/workspace/deploy/appview-lab/mock_pds.py"]
+    ports:
+      - "2583:2583"
+    environment:
+      MOCK_PDS_HOST: 0.0.0.0
+    volumes:
+      - ../..:/workspace:ro
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:2583/xrpc/_health').read()\""]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  media-view:
+    image: python:3.12-alpine
+    restart: unless-stopped
+    working_dir: /workspace
+    command: ["python", "/workspace/deploy/appview-lab/media_view_server.py"]
+    ports:
+      - "3100:3100"
+    environment:
+      DIVINE_PDS_URL: ${APPVIEW_MEDIA_PDS_URL:-http://mock-pds:2583}
+      APPVIEW_MEDIA_HOST: 0.0.0.0
+      APPVIEW_MEDIA_PORT: 3100
+      VIEWER_ORIGIN: ${VIEWER_ORIGIN:-http://127.0.0.1:4173}
+    volumes:
+      - ../..:/workspace:ro
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:3100/health').read()\""]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  viewer:
+    image: python:3.12-alpine
+    restart: unless-stopped
+    working_dir: /workspace/apps/divine-blacksky-viewer
+    command: ["python", "-m", "http.server", "4173", "--bind", "0.0.0.0", "-d", "/workspace/apps/divine-blacksky-viewer/dist"]
+    ports:
+      - "${VIEWER_PORT:-4173}:4173"
+    volumes:
+      - ../..:/workspace:ro
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:4173').read()\""]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  appview-pgdata:

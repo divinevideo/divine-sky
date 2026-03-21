@@ -176,6 +176,15 @@ struct FlakyPublisher {
 
 #[async_trait]
 impl PdsPublisher for FlakyPublisher {
+    async fn create_record(
+        &self,
+        _did: &str,
+        _collection: &str,
+        _record: &serde_json::Value,
+    ) -> Result<String> {
+        Err(anyhow!("video publish path not used in this test"))
+    }
+
     async fn put_record(
         &self,
         _did: &str,
@@ -201,6 +210,7 @@ impl PdsPublisher for FlakyPublisher {
     ) -> Result<PublishedRecord> {
         Ok(PublishedRecord {
             at_uri: self.put_record(did, collection, rkey, record).await?,
+            rkey: rkey.to_string(),
             cid: Some("bafyrecord".to_string()),
         })
     }
@@ -276,6 +286,9 @@ async fn run_bridge_session_continues_after_processing_error() {
 
     let result = run_bridge_session(&mut consumer, &mut connection, &pipeline).await;
 
-    assert!(result.is_ok(), "processing failure should not terminate the session");
+    assert!(
+        result.is_ok(),
+        "processing failure should not terminate the session"
+    );
     assert_eq!(consumer.last_seen_timestamp, Some(1_700_000_021));
 }

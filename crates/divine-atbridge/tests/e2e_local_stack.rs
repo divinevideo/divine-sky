@@ -345,17 +345,22 @@ async fn e2e_local_stack_covers_publish_delete_replay_and_profile_sync() {
         )
         .create_async()
         .await;
-    let video_put = pds_server
-        .mock("POST", "/xrpc/com.atproto.repo.putRecord")
-        .match_body(mockito::Matcher::Regex(
-            "app\\.bsky\\.feed\\.post".to_string(),
-        ))
+    let video_create = pds_server
+        .mock("POST", "/xrpc/com.atproto.repo.createRecord")
+        .match_request(|request| {
+            let body: serde_json::Value =
+                serde_json::from_str(&request.utf8_lossy_body().unwrap()).unwrap();
+            body["collection"] == "app.bsky.feed.post"
+                && body["validate"] == true
+                && body.get("rkey").is_none()
+        })
         .with_status(200)
         .with_header("content-type", "application/json")
         .with_body(
             serde_json::json!({
                 "uri": "at://did:plc:e2e/app.bsky.feed.post/e2e-video",
-                "cid": "bafyrecorde2evideo"
+                "cid": "bafyrecorde2evideo",
+                "validationStatus": "valid"
             })
             .to_string(),
         )
@@ -367,7 +372,7 @@ async fn e2e_local_stack_covers_publish_delete_replay_and_profile_sync() {
             "app\\.bsky\\.actor\\.profile".to_string(),
         ))
         .match_body(mockito::Matcher::Regex(
-            "Website: https://divine.video".to_string(),
+            "\"website\":\"https://divine.video\"".to_string(),
         ))
         .with_status(200)
         .with_header("content-type", "application/json")
@@ -453,7 +458,7 @@ async fn e2e_local_stack_covers_publish_delete_replay_and_profile_sync() {
     let req: serde_json::Value = serde_json::from_str(&replay_connection.outgoing[0]).unwrap();
     assert_eq!(req[2]["since"], delete_event.created_at);
 
-    video_put.assert_async().await;
+    video_create.assert_async().await;
     profile_put.assert_async().await;
     delete_mock.assert_async().await;
 }

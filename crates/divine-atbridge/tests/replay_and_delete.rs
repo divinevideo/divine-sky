@@ -169,6 +169,15 @@ impl TrackingPublisher {
 
 #[async_trait]
 impl PdsPublisher for TrackingPublisher {
+    async fn create_record(
+        &self,
+        _did: &str,
+        _collection: &str,
+        _record: &serde_json::Value,
+    ) -> Result<String> {
+        Ok("at://did:plc:test/app.bsky.feed.post/3replayrecord".to_string())
+    }
+
     async fn put_record(
         &self,
         _did: &str,

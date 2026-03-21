@@ -3,8 +3,8 @@ use axum::extract::State;
 use axum::http::header::AUTHORIZATION;
 use axum::http::{Request, StatusCode};
 use axum::middleware::{self, Next};
-use axum::response::Response;
 use axum::response::Html;
+use axum::response::Response;
 use axum::routing::{get, post};
 use axum::Router;
 use k256::ecdsa::SigningKey;
@@ -39,7 +39,6 @@ async fn root_info(State(state): State<AppState>) -> Html<String> {
     let html = include_str!("root_page.html");
     Html(html.replace("{{LABELER_DID}}", &state.labeler_did))
 }
-
 
 pub fn app_with_state(state: AppState) -> Router {
     let webhook_routes = Router::new()

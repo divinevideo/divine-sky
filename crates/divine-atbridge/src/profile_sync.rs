@@ -20,6 +20,7 @@ pub struct ParsedProfile {
     pub avatar_url: Option<String>,
     pub banner_url: Option<String>,
     pub website: Option<String>,
+    pub created_at: String,
 }
 
 pub fn parse_kind0_profile(event: &NostrEvent) -> Result<ParsedProfile> {
@@ -41,6 +42,7 @@ pub fn parse_kind0_profile(event: &NostrEvent) -> Result<ParsedProfile> {
         avatar_url,
         banner_url,
         website,
+        created_at: unix_to_iso8601(event.created_at),
     })
 }
 
@@ -62,6 +64,13 @@ pub fn build_profile_record(
         }
         if let Some(description) = profile_description(parsed) {
             obj.insert("description".to_string(), Value::String(description));
+        }
+        obj.insert(
+            "createdAt".to_string(),
+            Value::String(parsed.created_at.clone()),
+        );
+        if let Some(website) = &parsed.website {
+            obj.insert("website".to_string(), Value::String(website.clone()));
         }
         if let Some(avatar) = avatar {
             obj.insert("avatar".to_string(), serde_json::to_value(avatar).unwrap());
@@ -90,12 +99,15 @@ fn get_string(obj: &Map<String, Value>, keys: &[&str]) -> Option<String> {
 }
 
 fn profile_description(parsed: &ParsedProfile) -> Option<String> {
-    match (&parsed.description, &parsed.website) {
-        (Some(description), Some(website)) => Some(format!("{description}\n\nWebsite: {website}")),
-        (Some(description), None) => Some(description.clone()),
-        (None, Some(website)) => Some(format!("Website: {website}")),
-        (None, None) => None,
-    }
+    parsed.description.clone()
+}
+
+fn unix_to_iso8601(ts: i64) -> String {
+    use chrono::{TimeZone, Utc};
+    Utc.timestamp_opt(ts, 0)
+        .single()
+        .map(|dt| dt.to_rfc3339_opts(chrono::SecondsFormat::Secs, true))
+        .unwrap_or_else(|| "1970-01-01T00:00:00Z".to_string())
 }
 
 #[cfg(test)]
@@ -138,24 +150,25 @@ mod tests {
             Some("https://cdn.example/banner.png")
         );
         assert_eq!(parsed.website.as_deref(), Some("https://divine.video"));
+        assert_eq!(parsed.created_at, "2023-11-14T22:13:20Z");
     }
 
     #[test]
-    fn build_profile_record_appends_website_to_description() {
+    fn build_profile_record_uses_website_field_and_created_at() {
         let parsed = ParsedProfile {
             display_name: Some("DiVine".to_string()),
             description: Some("Short bio".to_string()),
             avatar_url: None,
             banner_url: None,
             website: Some("https://divine.video".to_string()),
+            created_at: "2023-11-14T22:13:20Z".to_string(),
         };
 
         let record = build_profile_record(&parsed, None, None);
         assert_eq!(record["$type"], PROFILE_COLLECTION);
         assert_eq!(record["displayName"], "DiVine");
-        assert_eq!(
-            record["description"],
-            "Short bio\n\nWebsite: https://divine.video"
-        );
+        assert_eq!(record["description"], "Short bio");
+        assert_eq!(record["website"], "https://divine.video");
+        assert_eq!(record["createdAt"], "2023-11-14T22:13:20Z");
     }
 }

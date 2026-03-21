@@ -8,6 +8,8 @@
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use divine_bridge_types::{BlobRef, NostrEvent, RecordStatus};
+use divine_video_worker::normalize::prepare_publishable_video;
+use divine_video_worker::profile_image::{prepare_profile_image, ProfileImageKind};
 use sha2::{Digest, Sha256};
 use std::time::Duration;
 
@@ -16,7 +18,7 @@ use crate::profile_sync::{
     build_profile_record, parse_kind0_profile, profile_assets, PROFILE_COLLECTION, PROFILE_RKEY,
 };
 use crate::signature::verify_nostr_event;
-use crate::translator::{derive_rkey, translate_nip71_to_post};
+use crate::translator::translate_nip71_to_post;
 
 // ---------------------------------------------------------------------------
 // Types
@@ -64,6 +66,7 @@ pub struct FetchedBlob {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PublishedRecord {
     pub at_uri: String,
+    pub rkey: String,
     pub cid: Option<String>,
 }
 
@@ -145,6 +148,27 @@ pub trait BlobUploader: Send + Sync {
 /// Publish / delete records on a PDS.
 #[async_trait]
 pub trait PdsPublisher: Send + Sync {
+    async fn create_record(
+        &self,
+        did: &str,
+        collection: &str,
+        record: &serde_json::Value,
+    ) -> Result<String>;
+    async fn create_record_with_meta(
+        &self,
+        did: &str,
+        collection: &str,
+        record: &serde_json::Value,
+    ) -> Result<PublishedRecord> {
+        let at_uri = self.create_record(did, collection, record).await?;
+        let rkey = parse_rkey_from_at_uri(&at_uri)?;
+        Ok(PublishedRecord {
+            at_uri,
+            rkey,
+            cid: None,
+        })
+    }
+
     async fn put_record(
         &self,
         did: &str,
@@ -161,6 +185,7 @@ pub trait PdsPublisher: Send + Sync {
     ) -> Result<PublishedRecord> {
         Ok(PublishedRecord {
             at_uri: self.put_record(did, collection, rkey, record).await?,
+            rkey: rkey.to_string(),
             cid: None,
         })
     }
@@ -270,6 +295,15 @@ fn get_deleted_event_id(event: &NostrEvent) -> Option<&str> {
         .iter()
         .find(|t| t.len() >= 2 && t[0] == "e")
         .map(|t| t[1].as_str())
+}
+
+fn parse_rkey_from_at_uri(at_uri: &str) -> Result<String> {
+    at_uri
+        .rsplit('/')
+        .next()
+        .filter(|segment| !segment.is_empty())
+        .map(str::to_string)
+        .context("published AT-URI is missing an rkey segment")
 }
 
 // ---------------------------------------------------------------------------
@@ -402,10 +436,13 @@ where
             .await
             .context("failed to fetch blob")?;
 
+        let prepared_video = prepare_publishable_video(&fetched.data, &fetched.mime_type)
+            .context("failed to prepare publishable video")?;
+
         // Upload blob to PDS
         let blob_ref = self
             .blob_uploader
-            .upload_blob(&fetched.data, &fetched.mime_type)
+            .upload_blob(&prepared_video.data, &prepared_video.mime_type)
             .await
             .context("failed to upload blob to PDS")?;
 
@@ -416,13 +453,11 @@ where
         let record_value =
             serde_json::to_value(&post).context("failed to serialize ATProto post")?;
 
-        // Derive rkey and write record
-        let rkey = derive_rkey(event);
         let collection = "app.bsky.feed.post";
 
         let published = self
             .pds_publisher
-            .put_record_with_meta(&account.did, collection, &rkey, &record_value)
+            .create_record_with_meta(&account.did, collection, &record_value)
             .await
             .context("failed to write record to PDS")?;
 
@@ -433,7 +468,7 @@ where
                 at_uri: published.at_uri.clone(),
                 did: account.did.clone(),
                 collection: collection.to_string(),
-                rkey: rkey.clone(),
+                rkey: published.rkey.clone(),
                 deleted: false,
             })
             .await
@@ -444,8 +479,8 @@ where
                 source_sha256: fetched.source_sha256,
                 blossom_url: Some(video_url),
                 at_blob_cid: blob_ref.cid().to_string(),
-                mime: fetched.mime_type,
-                bytes: blob_ref.size,
+                mime: prepared_video.mime_type,
+                bytes: prepared_video.bytes,
                 is_derivative: false,
             })
             .await
@@ -462,7 +497,7 @@ where
 
         Ok(ProcessResult::Published {
             at_uri: published.at_uri,
-            rkey,
+            rkey: published.rkey,
         })
     }
 
@@ -481,9 +516,15 @@ where
                     .fetch_blob_verified(&url, None)
                     .await
                     .context("failed to fetch avatar")?;
+                let prepared = prepare_profile_image(
+                    &fetched.data,
+                    &fetched.mime_type,
+                    ProfileImageKind::Avatar,
+                )
+                .context("failed to prepare avatar")?;
                 Some(
                     self.blob_uploader
-                        .upload_blob(&fetched.data, &fetched.mime_type)
+                        .upload_blob(&prepared.data, &prepared.mime_type)
                         .await
                         .context("failed to upload avatar")?,
                 )
@@ -498,9 +539,15 @@ where
                     .fetch_blob_verified(&url, None)
                     .await
                     .context("failed to fetch banner")?;
+                let prepared = prepare_profile_image(
+                    &fetched.data,
+                    &fetched.mime_type,
+                    ProfileImageKind::Banner,
+                )
+                .context("failed to prepare banner")?;
                 Some(
                     self.blob_uploader
-                        .upload_blob(&fetched.data, &fetched.mime_type)
+                        .upload_blob(&prepared.data, &prepared.mime_type)
                         .await
                         .context("failed to upload banner")?,
                 )
@@ -521,7 +568,7 @@ where
                 at_uri: published.at_uri.clone(),
                 did: account.did.clone(),
                 collection: PROFILE_COLLECTION.to_string(),
-                rkey: PROFILE_RKEY.to_string(),
+                rkey: published.rkey.clone(),
                 deleted: false,
             })
             .await
@@ -538,7 +585,7 @@ where
 
         Ok(ProcessResult::ProfileSynced {
             at_uri: published.at_uri,
-            rkey: PROFILE_RKEY.to_string(),
+            rkey: published.rkey,
         })
     }
 
@@ -783,6 +830,21 @@ mod tests {
 
     #[async_trait]
     impl PdsPublisher for MockPdsPublisher {
+        async fn create_record(
+            &self,
+            did: &str,
+            collection: &str,
+            _record: &serde_json::Value,
+        ) -> Result<String> {
+            let rkey = "3mockvideorkey";
+            self.published.lock().unwrap().push((
+                did.to_string(),
+                collection.to_string(),
+                rkey.to_string(),
+            ));
+            Ok(format!("at://{}/{}/{}", did, collection, rkey))
+        }
+
         async fn put_record(
             &self,
             did: &str,
@@ -807,6 +869,7 @@ mod tests {
         ) -> Result<PublishedRecord> {
             Ok(PublishedRecord {
                 at_uri: self.put_record(did, collection, rkey, record).await?,
+                rkey: rkey.to_string(),
                 cid: Some("bafytestrecord".to_string()),
             })
         }
@@ -871,7 +934,7 @@ mod tests {
             ProcessResult::Published { at_uri, rkey } => {
                 assert!(at_uri.contains("did:plc:testuser"));
                 assert!(at_uri.contains("app.bsky.feed.post"));
-                assert_eq!(rkey, "test-video");
+                assert_eq!(rkey, "3mockvideorkey");
             }
             other => panic!("expected Published, got {:?}", other),
         }
@@ -880,7 +943,7 @@ mod tests {
         let saved = pipeline.record_store.saved.lock().unwrap();
         assert_eq!(saved.len(), 1);
         assert_eq!(saved[0].nostr_event_id, event.id);
-        assert_eq!(saved[0].rkey, "test-video");
+        assert_eq!(saved[0].rkey, "3mockvideorkey");
     }
 
     #[tokio::test]
