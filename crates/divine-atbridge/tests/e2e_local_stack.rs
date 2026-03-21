@@ -205,6 +205,8 @@ fn e2e_local_stack_defines_required_services_and_healthchecks() {
         .expect("config/docker-compose.yml should exist");
     let pds_compose = fs::read_to_string(repo_root.join("deploy/pds/docker-compose.yml"))
         .expect("deploy/pds/docker-compose.yml should exist");
+    let pds_env = fs::read_to_string(repo_root.join("deploy/pds/env.example"))
+        .expect("deploy/pds/env.example should exist");
     let minio_init = fs::read_to_string(repo_root.join("config/minio-init.sh"))
         .expect("config/minio-init.sh should exist");
     let mock_blossom = fs::read_to_string(repo_root.join("config/mock-blossom/server.py"))
@@ -247,6 +249,46 @@ fn e2e_local_stack_defines_required_services_and_healthchecks() {
     assert!(
         compose.contains("PDS_AUTH_TOKEN: local-dev-token"),
         "bridge service should provide an explicit PDS auth token"
+    );
+    assert!(
+        compose.contains("PDS_BLOBSTORE_S3_BUCKET: pds-blobs"),
+        "local compose should pin the PDS blob bucket name"
+    );
+    assert!(
+        compose.contains("AWS_ENDPOINT_BUCKET: pds-blobs"),
+        "local compose should expose the endpoint bucket name for blob copy operations"
+    );
+    assert!(
+        compose.contains("build:"),
+        "local compose should build the patched rsky-pds image"
+    );
+    assert!(
+        compose.contains("context: ../../rsky"),
+        "local compose should build rsky-pds from the sibling fork checkout"
+    );
+    assert!(
+        pds_compose.contains("PDS_BLOBSTORE_S3_BUCKET=${PDS_BLOBSTORE_S3_BUCKET:-pds-blobs}"),
+        "standalone pds compose should pin the PDS blob bucket name"
+    );
+    assert!(
+        pds_compose.contains("AWS_ENDPOINT_BUCKET=${AWS_ENDPOINT_BUCKET:-pds-blobs}"),
+        "standalone pds compose should expose the endpoint bucket name"
+    );
+    assert!(
+        pds_compose.contains("build:"),
+        "standalone pds compose should build the patched rsky-pds image"
+    );
+    assert!(
+        pds_compose.contains("context: ../../../rsky"),
+        "standalone pds compose should build rsky-pds from the sibling fork checkout"
+    );
+    assert!(
+        pds_env.contains("PDS_BLOBSTORE_S3_BUCKET=pds-blobs"),
+        "pds env example should document the required blob bucket setting"
+    );
+    assert!(
+        pds_env.contains("AWS_ENDPOINT_BUCKET=pds-blobs"),
+        "pds env example should document the endpoint bucket setting"
     );
     assert!(
         !compose.contains("tail -f /dev/null"),

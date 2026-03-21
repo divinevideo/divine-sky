@@ -14,8 +14,13 @@ The runtime slice uses the compose stack in [config/docker-compose.yml](/Users/r
 Bring it up with:
 
 ```bash
-docker compose -f config/docker-compose.yml up -d
+docker compose -f config/docker-compose.yml up --build -d
 ```
+
+The `pds` service builds the patched sibling checkout at `../rsky` and injects the blob-store env vars required by that fork:
+
+- `PDS_BLOBSTORE_S3_BUCKET=pds-blobs`
+- `AWS_ENDPOINT_BUCKET=pds-blobs`
 
 ## Bucket Bootstrap
 
