@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -173,12 +174,13 @@ pub fn app_with_config(config: AppConfig) -> anyhow::Result<Router> {
 
 pub fn app_with_state_for_tests() -> Router {
     let root = std::env::temp_dir().join(format!(
-        "divine-localnet-admin-test-{}-{}",
+        "divine-localnet-admin-test-{}-{}-{}",
         std::process::id(),
         SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
-            .as_nanos()
+            .as_nanos(),
+        next_test_root_suffix()
     ));
     std::fs::create_dir_all(&root).expect("test data dir should be created");
     let config = AppConfig {
@@ -188,6 +190,23 @@ pub fn app_with_state_for_tests() -> Router {
         wildcard_ip: "100.64.0.10".to_string(),
     };
     app_with_config(config).expect("test app should build")
+}
+
+fn next_test_root_suffix() -> u64 {
+    static TEST_ROOT_COUNTER: AtomicU64 = AtomicU64::new(0);
+    TEST_ROOT_COUNTER.fetch_add(1, Ordering::Relaxed)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::next_test_root_suffix;
+
+    #[test]
+    fn test_root_suffix_increments() {
+        let first = next_test_root_suffix();
+        let second = next_test_root_suffix();
+        assert!(second > first);
+    }
 }
 
 fn app_with_state(state: AppState) -> Router {
