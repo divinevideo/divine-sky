@@ -2,18 +2,31 @@
 # Post Vine archive videos to staging PDS as app.bsky.feed.post records.
 #
 # Required environment:
-#   PDS_URL          — e.g. https://pds.staging.dvines.org
-#   PDS_AUTH_TOKEN   — Bearer token (admin password or session accessJwt)
-#   DID              — the repo DID, e.g. did:plc:ebt5msdpfavoklkap6gl54bm
+#   PDS_URL      — e.g. https://pds.staging.dvines.org
+#   PDS_HANDLE   — account handle or DID for createSession
+#   PDS_PASSWORD — account password for createSession
+#   DID          — the repo DID to post into
 
 set -euo pipefail
 
 : "${PDS_URL:?PDS_URL must be set}"
-: "${PDS_AUTH_TOKEN:?PDS_AUTH_TOKEN must be set}"
+: "${PDS_HANDLE:?PDS_HANDLE must be set}"
+: "${PDS_PASSWORD:?PDS_PASSWORD must be set}"
 : "${DID:?DID must be set}"
 
 tmpdir="$(mktemp -d)"
 trap 'rm -rf "$tmpdir"' EXIT
+
+# Create session to get JWT
+echo "=== Creating session ==="
+session_resp=$(curl -fsSL --max-time 15 \
+  -X POST "${PDS_URL}/xrpc/com.atproto.server.createSession" \
+  -H "Content-Type: application/json" \
+  -d "{\"identifier\":\"${PDS_HANDLE}\",\"password\":\"${PDS_PASSWORD}\"}")
+
+JWT=$(echo "$session_resp" | jq -r '.accessJwt')
+SESSION_DID=$(echo "$session_resp" | jq -r '.did')
+echo "  Authenticated as ${SESSION_DID}"
 
 upload_and_post() {
   local rkey="$1"
@@ -38,9 +51,9 @@ upload_and_post() {
   # 2. Upload blob to PDS
   echo "  Uploading blob to PDS..."
   local upload_resp
-  upload_resp=$(curl -fsSL \
+  upload_resp=$(curl -fsSL --max-time 120 \
     -X POST "${PDS_URL}/xrpc/com.atproto.repo.uploadBlob" \
-    -H "Authorization: Bearer ${PDS_AUTH_TOKEN}" \
+    -H "Authorization: Bearer ${JWT}" \
     -H "Content-Type: video/mp4" \
     --data-binary "@${video_file}")
 
@@ -102,9 +115,9 @@ upload_and_post() {
     }')
 
   local put_resp
-  put_resp=$(curl -fsSL \
+  put_resp=$(curl -fsSL --max-time 30 \
     -X POST "${PDS_URL}/xrpc/com.atproto.repo.putRecord" \
-    -H "Authorization: Bearer ${PDS_AUTH_TOKEN}" \
+    -H "Authorization: Bearer ${JWT}" \
     -H "Content-Type: application/json" \
     -d "$put_body")
 

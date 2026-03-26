@@ -5,19 +5,28 @@
 #   PDS_URL
 #   PDS_ADMIN_PASSWORD
 #   CANARY_HANDLE
+#
+# Required when CANARY_DID is NOT set (PLC-minting path):
 #   CANARY_EMAIL
 #   CANARY_PASSWORD
 #
 # Optional:
-#   CANARY_DID
+#   CANARY_DID  — when set, uses admin DID-import path (no email/password needed)
 
 set -euo pipefail
 
 : "${PDS_URL:?PDS_URL must be set}"
 : "${PDS_ADMIN_PASSWORD:?PDS_ADMIN_PASSWORD must be set}"
 : "${CANARY_HANDLE:?CANARY_HANDLE must be set}"
-: "${CANARY_EMAIL:?CANARY_EMAIL must be set}"
-: "${CANARY_PASSWORD:?CANARY_PASSWORD must be set}"
+
+# Email and password are only required for the PLC-minting path (no DID supplied)
+if [[ -z "${CANARY_DID:-}" ]]; then
+  : "${CANARY_EMAIL:?CANARY_EMAIL must be set when CANARY_DID is not provided}"
+  : "${CANARY_PASSWORD:?CANARY_PASSWORD must be set when CANARY_DID is not provided}"
+fi
+
+# Admin auth uses HTTP Basic (admin:<password>)
+BASIC_AUTH="$(printf 'admin:%s' "$PDS_ADMIN_PASSWORD" | base64)"
 
 tmpdir="$(mktemp -d)"
 trap 'rm -rf "$tmpdir"' EXIT
@@ -75,18 +84,16 @@ extract_json_field() {
 }
 
 if [[ -n "${CANARY_DID:-}" ]]; then
+  # Admin DID-import path: only handle and DID needed (server generates placeholder email/password)
   create_account_payload="$(
-    printf \
-      '{"email":"%s","password":"%s","handle":"%s","did":"%s"}' \
-      "$CANARY_EMAIL" \
-      "$CANARY_PASSWORD" \
+    printf '{"handle":"%s","did":"%s"}' \
       "$CANARY_HANDLE" \
       "$CANARY_DID"
   )"
 else
+  # PLC-minting path: full payload required
   create_account_payload="$(
-    printf \
-      '{"email":"%s","password":"%s","handle":"%s"}' \
+    printf '{"email":"%s","password":"%s","handle":"%s"}' \
       "$CANARY_EMAIL" \
       "$CANARY_PASSWORD" \
       "$CANARY_HANDLE"
@@ -100,7 +107,7 @@ run_step \
 run_step \
   "Create account" \
   -X POST "$PDS_URL/xrpc/com.atproto.server.createAccount" \
-  -H "Authorization: Bearer $PDS_ADMIN_PASSWORD" \
+  -H "Authorization: Basic $BASIC_AUTH" \
   -H "Content-Type: application/json" \
   -d "$create_account_payload"
 
@@ -117,6 +124,6 @@ fi
 run_step \
   "Describe repo" \
   "$PDS_URL/xrpc/com.atproto.repo.describeRepo?repo=$resolved_did" \
-  -H "Authorization: Bearer $PDS_ADMIN_PASSWORD"
+  -H "Authorization: Basic $BASIC_AUTH"
 
 printf 'Smoke flow passed for %s (%s)\n' "$CANARY_HANDLE" "$resolved_did"
