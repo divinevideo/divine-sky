@@ -1,6 +1,7 @@
 //! PDS account provisioning client.
 
 use anyhow::{Context, Result};
+use data_encoding::BASE64;
 use reqwest::StatusCode;
 use std::time::Duration;
 
@@ -11,19 +12,20 @@ const DEFAULT_MAX_ATTEMPTS: usize = 3;
 #[derive(Debug, Clone)]
 pub struct PdsAccountsClient {
     base_url: String,
-    admin_token: String,
+    /// Pre-computed HTTP Basic auth header value: `Basic base64(admin:<password>)`
+    basic_auth_header: String,
     client: reqwest::Client,
     max_attempts: usize,
 }
 
 impl PdsAccountsClient {
-    pub fn new(base_url: impl Into<String>, admin_token: impl Into<String>) -> Self {
-        Self::with_max_attempts(base_url, admin_token, DEFAULT_MAX_ATTEMPTS)
+    pub fn new(base_url: impl Into<String>, admin_password: impl Into<String>) -> Self {
+        Self::with_max_attempts(base_url, admin_password, DEFAULT_MAX_ATTEMPTS)
     }
 
     pub fn with_max_attempts(
         base_url: impl Into<String>,
-        admin_token: impl Into<String>,
+        admin_password: impl Into<String>,
         max_attempts: usize,
     ) -> Self {
         let client = reqwest::Client::builder()
@@ -32,9 +34,13 @@ impl PdsAccountsClient {
             .build()
             .expect("reqwest client builder should succeed");
 
+        let password = admin_password.into();
+        let encoded = BASE64.encode(format!("admin:{}", password).as_bytes());
+        let basic_auth_header = format!("Basic {}", encoded);
+
         Self {
             base_url: base_url.into(),
-            admin_token: admin_token.into(),
+            basic_auth_header,
             client,
             max_attempts: max_attempts.max(1),
         }
@@ -59,7 +65,7 @@ impl PdsAccountsClient {
             .client
             .get(self.describe_repo_endpoint())
             .query(&[("repo", did)])
-            .header("Authorization", format!("Bearer {}", self.admin_token))
+            .header("Authorization", &self.basic_auth_header)
             .send()
             .await
             .context("sending describeRepo request")?;
@@ -113,7 +119,7 @@ impl PdsAccountCreator for PdsAccountsClient {
             let response = match self
                 .client
                 .post(self.create_account_endpoint())
-                .header("Authorization", format!("Bearer {}", self.admin_token))
+                .header("Authorization", &self.basic_auth_header)
                 .json(&body)
                 .send()
                 .await
@@ -199,7 +205,7 @@ mod tests {
         let mut server = mockito::Server::new_async().await;
         let mock = server
             .mock("POST", "/xrpc/com.atproto.server.createAccount")
-            .match_header("authorization", "Bearer admin-token")
+            .match_header("authorization", "Basic YWRtaW46YWRtaW4tdG9rZW4=")
             .match_header("content-type", "application/json")
             .match_body(mockito::Matcher::JsonString(
                 serde_json::json!({
