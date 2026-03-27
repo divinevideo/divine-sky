@@ -5,6 +5,7 @@ use diesel::Connection;
 use diesel::PgConnection;
 use diesel::RunQueryDsl;
 use divine_handle_gateway::{app_with_config, AppConfig};
+use mockito::Matcher;
 use serde_json::json;
 use serde_json::Value;
 use serial_test::serial;
@@ -39,12 +40,10 @@ fn reset_database(database_url: &str) {
         PgConnection::establish(database_url).expect("test database should be reachable");
     execute_batch(
         &mut conn,
-        include_str!("../../../migrations/001_bridge_tables/down.sql"),
+        "DROP SCHEMA IF EXISTS public CASCADE;
+         CREATE SCHEMA public;",
     );
-    execute_batch(
-        &mut conn,
-        include_str!("../../../migrations/001_bridge_tables/up.sql"),
-    );
+    execute_batch(&mut conn, include_str!("../../../migrations/001_bridge_tables/up.sql"));
 }
 
 fn build_app(database_url: String, name_server_url: String) -> axum::Router {
@@ -226,6 +225,65 @@ async fn control_plane_status_and_export_reflect_provisioned_link() {
         .unwrap();
 
     assert_eq!(export_response.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+#[serial]
+async fn control_plane_manual_provision_syncs_ready_state_downstream() {
+    let database_url = test_database_url();
+    reset_database(&database_url);
+
+    let mut name_server = mockito::Server::new_async().await;
+    let keycast_sync = name_server
+        .mock("POST", "/api/internal/atproto/state")
+        .match_header("authorization", AUTH_HEADER)
+        .match_body(Matcher::Json(json!({
+            "nostr_pubkey": "npub1alice",
+            "enabled": true,
+            "state": "ready",
+            "did": "did:plc:alice123",
+            "error": Value::Null
+        })))
+        .with_status(200)
+        .create_async()
+        .await;
+    let name_server_sync = name_server
+        .mock("POST", "/api/internal/username/set-atproto")
+        .match_header("authorization", "Bearer test-sync-token")
+        .match_body(Matcher::Json(json!({
+            "name": "alice",
+            "atproto_did": "did:plc:alice123",
+            "atproto_state": "ready"
+        })))
+        .with_status(200)
+        .create_async()
+        .await;
+
+    let app = build_app(database_url, name_server.url());
+
+    let provision_response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/account-links/provision")
+                .header("content-type", "application/json")
+                .header("authorization", AUTH_HEADER)
+                .body(Body::from(
+                    json!({
+                        "nostr_pubkey": "npub1alice",
+                        "handle": "alice.divine.video",
+                        "did": "did:plc:alice123"
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(provision_response.status(), StatusCode::OK);
+    keycast_sync.assert_async().await;
+    name_server_sync.assert_async().await;
 }
 
 #[tokio::test]

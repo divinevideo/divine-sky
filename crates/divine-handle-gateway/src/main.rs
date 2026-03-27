@@ -37,6 +37,16 @@ async fn main() -> anyhow::Result<()> {
         tracing::info!(replayed, "replayed pending provisioning rows at startup");
     }
 
+    let reconciled = provision_runner
+        .reconcile_existing_from_database(&config.database_url)
+        .await?;
+    if reconciled > 0 {
+        tracing::info!(
+            reconciled,
+            "reconciled existing lifecycle rows at startup"
+        );
+    }
+
     let addr: SocketAddr = std::env::var("BIND_ADDR")
         .unwrap_or_else(|_| "0.0.0.0:3000".to_string())
         .parse()?;

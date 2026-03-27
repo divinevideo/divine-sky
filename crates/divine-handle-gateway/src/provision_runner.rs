@@ -5,6 +5,8 @@ use diesel::Connection;
 use diesel::PgConnection;
 use diesel::QueryableByName;
 use diesel::RunQueryDsl;
+use divine_bridge_db::list_account_link_lifecycle_for_reconciliation;
+use divine_bridge_db::models::AccountLinkLifecycleRow;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 
@@ -141,6 +143,101 @@ impl ProvisionRunner {
         Ok(pending.len())
     }
 
+    pub async fn reconcile_existing_from_database(&self, database_url: &str) -> Result<usize> {
+        let mut connection = PgConnection::establish(database_url)
+            .context("connecting for startup lifecycle reconciliation")?;
+        let rows = list_account_link_lifecycle_for_reconciliation(&mut connection)
+            .context("loading lifecycle rows for startup reconciliation")?;
+
+        for row in &rows {
+            if let Err(error) = self.reconcile_row(row).await {
+                tracing::error!(
+                    nostr_pubkey = %row.nostr_pubkey,
+                    handle = %row.handle,
+                    provisioning_state = %row.provisioning_state,
+                    error = %error,
+                    "startup reconciliation failed for account link row",
+                );
+            }
+        }
+
+        Ok(rows.len())
+    }
+
+    async fn reconcile_row(&self, row: &AccountLinkLifecycleRow) -> Result<()> {
+        match row.provisioning_state.as_str() {
+            "ready" => {
+                let did = row
+                    .did
+                    .as_deref()
+                    .context("ready lifecycle row missing did")?;
+                self.sync_ready_state(&row.nostr_pubkey, &row.handle, did).await
+            }
+            "failed" => {
+                let error = row
+                    .provisioning_error
+                    .as_deref()
+                    .unwrap_or("account provisioning previously failed");
+                self.sync_failed_state(&row.nostr_pubkey, &row.handle, error)
+                    .await
+            }
+            "disabled" => {
+                self.sync_disabled_state(&row.nostr_pubkey, &row.handle)
+                    .await
+            }
+            state => {
+                tracing::warn!(
+                    nostr_pubkey = %row.nostr_pubkey,
+                    handle = %row.handle,
+                    provisioning_state = %state,
+                    "skipping unexpected lifecycle state during startup reconciliation",
+                );
+                Ok(())
+            }
+        }
+    }
+
+    async fn sync_ready_state(&self, nostr_pubkey: &str, handle: &str, did: &str) -> Result<()> {
+        self.keycast_client
+            .sync_ready(nostr_pubkey, did)
+            .await
+            .context("failed to sync ready state to keycast")?;
+        self.name_server_client
+            .sync_state_for_handle(handle, Some(did), "ready")
+            .await
+            .context("failed to sync ready state to name server")?;
+        Ok(())
+    }
+
+    async fn sync_failed_state(
+        &self,
+        nostr_pubkey: &str,
+        handle: &str,
+        error: &str,
+    ) -> Result<()> {
+        self.keycast_client
+            .sync_failed(nostr_pubkey, error)
+            .await
+            .context("failed to sync failed state to keycast")?;
+        self.name_server_client
+            .sync_state_for_handle(handle, None, "failed")
+            .await
+            .context("failed to sync failed state to name server")?;
+        Ok(())
+    }
+
+    async fn sync_disabled_state(&self, nostr_pubkey: &str, handle: &str) -> Result<()> {
+        self.keycast_client
+            .sync_disabled(nostr_pubkey)
+            .await
+            .context("failed to sync disabled state to keycast")?;
+        self.name_server_client
+            .sync_state_for_handle(handle, None, "disabled")
+            .await
+            .context("failed to sync disabled state to name server")?;
+        Ok(())
+    }
+
     async fn run_once(&self, nostr_pubkey: &str, handle: &str) -> Result<()> {
         match self
             .provisioning_client
@@ -151,28 +248,16 @@ impl ProvisionRunner {
                 self.store
                     .mark_ready(nostr_pubkey, &response.did)
                     .context("failed to mark account link ready")?;
-                self.keycast_client
-                    .sync_ready(nostr_pubkey, &response.did)
-                    .await
-                    .context("failed to sync ready state to keycast")?;
-                self.name_server_client
-                    .sync_state_for_handle(handle, Some(&response.did), "ready")
-                    .await
-                    .context("failed to sync ready state to name server")?;
+                self.sync_ready_state(nostr_pubkey, handle, &response.did)
+                    .await?;
             }
             Err(error) => {
                 let message = error.to_string();
                 self.store
                     .mark_failed(nostr_pubkey, None, &message)
                     .context("failed to mark account link failed")?;
-                self.keycast_client
-                    .sync_failed(nostr_pubkey, &message)
-                    .await
-                    .context("failed to sync failed state to keycast")?;
-                self.name_server_client
-                    .sync_state_for_handle(handle, None, "failed")
-                    .await
-                    .context("failed to sync failed state to name server")?;
+                self.sync_failed_state(nostr_pubkey, handle, &message)
+                    .await?;
             }
         }
 

@@ -166,6 +166,18 @@ impl AppState {
             .expect("failed to mark account link ready")
     }
 
+    pub(crate) async fn sync_ready_state(
+        &self,
+        nostr_pubkey: &str,
+        handle: &str,
+        did: &str,
+    ) -> anyhow::Result<()> {
+        self.keycast_client.sync_ready(nostr_pubkey, did).await?;
+        self.name_server_client
+            .sync_state_for_handle(handle, Some(did), "ready")
+            .await
+    }
+
     pub(crate) fn get_by_pubkey_result(
         &self,
         nostr_pubkey: &str,

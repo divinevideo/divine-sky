@@ -80,3 +80,9 @@ For launch, treat the flow as:
 - divine-name-server publishes public handle state
 - divine-router resolves `/.well-known/atproto-did` only for active + ready users
 - divine-atbridge publishes only for opted-in + ready users
+
+`divine-handle-gateway` also self-heals persisted lifecycle state on startup:
+
+- it replays `pending` rows through provisioning
+- it republishes existing `ready`, `failed`, and `disabled` rows to keycast and `divine-name-server`
+- this repairs stale public handle resolution after older deploys or manual provisioning paths wrote `account_links` without updating the public read model

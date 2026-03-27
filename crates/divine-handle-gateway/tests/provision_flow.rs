@@ -37,12 +37,38 @@ fn reset_database(database_url: &str) {
         PgConnection::establish(database_url).expect("test database should be reachable");
     execute_batch(
         &mut conn,
-        include_str!("../../../migrations/001_bridge_tables/down.sql"),
+        "DROP SCHEMA IF EXISTS public CASCADE;
+         CREATE SCHEMA public;",
     );
-    execute_batch(
-        &mut conn,
-        include_str!("../../../migrations/001_bridge_tables/up.sql"),
-    );
+    execute_batch(&mut conn, include_str!("../../../migrations/001_bridge_tables/up.sql"));
+}
+
+fn insert_account_link_row(database_url: &str, values_sql: &str) {
+    let mut conn =
+        PgConnection::establish(database_url).expect("test database should be reachable");
+    diesel::sql_query(format!(
+        "INSERT INTO account_links (
+            nostr_pubkey, did, handle, crosspost_enabled, signing_key_id,
+            plc_rotation_key_ref, provisioning_state, provisioning_error,
+            disabled_at, created_at, updated_at
+         ) VALUES {values_sql}"
+    ))
+    .execute(&mut conn)
+    .expect("account link row should insert");
+}
+
+fn build_runner(
+    database_url: &str,
+    provision_url: String,
+    name_server_url: String,
+    keycast_url: String,
+) -> ProvisionRunner {
+    ProvisionRunner::new(
+        DbStore::connect(database_url).expect("store should connect"),
+        ProvisioningClient::new(provision_url, None),
+        NameServerClient::new(name_server_url, "test-sync-token".to_string()),
+        KeycastClient::new(keycast_url, "test-keycast-token".to_string()),
+    )
 }
 
 fn build_app(
@@ -386,6 +412,186 @@ async fn startup_replay_retries_preexisting_pending_rows() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(payload["provisioning_state"], "ready");
     assert_eq!(payload["did"], "did:plc:replay");
+}
+
+#[tokio::test]
+#[serial]
+async fn startup_reconciliation_republishes_ready_rows() {
+    let database_url = test_database_url();
+    reset_database(&database_url);
+    insert_account_link_row(
+        &database_url,
+        "(
+            'npub1ready', 'did:plc:ready1', 'ready.divine.video', TRUE, 'signing-key:ready',
+            'rotation-key:ready', 'ready', NULL, NULL, NOW(), NOW()
+        )",
+    );
+
+    let provision_server = mockito::Server::new_async().await;
+    let mut name_server = mockito::Server::new_async().await;
+    let mut keycast = mockito::Server::new_async().await;
+
+    let keycast_ready_mock = keycast
+        .mock("POST", "/api/internal/atproto/state")
+        .match_header("authorization", "Bearer test-keycast-token")
+        .match_body(Matcher::Json(json!({
+            "nostr_pubkey": "npub1ready",
+            "enabled": true,
+            "state": "ready",
+            "did": "did:plc:ready1",
+            "error": Value::Null
+        })))
+        .with_status(200)
+        .create_async()
+        .await;
+
+    let name_server_ready_mock = name_server
+        .mock("POST", "/api/internal/username/set-atproto")
+        .match_header("authorization", "Bearer test-sync-token")
+        .match_body(Matcher::Json(json!({
+            "name": "ready",
+            "atproto_did": "did:plc:ready1",
+            "atproto_state": "ready"
+        })))
+        .with_status(200)
+        .create_async()
+        .await;
+
+    let runner = build_runner(
+        &database_url,
+        format!("{}/provision", provision_server.url()),
+        format!("{}/api/internal/username/set-atproto", name_server.url()),
+        format!("{}/api/internal/atproto/state", keycast.url()),
+    );
+
+    let reconciled = runner
+        .reconcile_existing_from_database(&database_url)
+        .await
+        .expect("startup reconciliation should succeed");
+    assert_eq!(reconciled, 1);
+
+    keycast_ready_mock.assert_async().await;
+    name_server_ready_mock.assert_async().await;
+}
+
+#[tokio::test]
+#[serial]
+async fn startup_reconciliation_republishes_failed_rows() {
+    let database_url = test_database_url();
+    reset_database(&database_url);
+    insert_account_link_row(
+        &database_url,
+        "(
+            'npub1failed', 'did:plc:failed1', 'failed.divine.video', TRUE, 'signing-key:failed',
+            'rotation-key:failed', 'failed', 'createAccount failed', NULL, NOW(), NOW()
+        )",
+    );
+
+    let provision_server = mockito::Server::new_async().await;
+    let mut name_server = mockito::Server::new_async().await;
+    let mut keycast = mockito::Server::new_async().await;
+
+    let keycast_failed_mock = keycast
+        .mock("POST", "/api/internal/atproto/state")
+        .match_header("authorization", "Bearer test-keycast-token")
+        .match_body(Matcher::Json(json!({
+            "nostr_pubkey": "npub1failed",
+            "enabled": true,
+            "state": "failed",
+            "did": Value::Null,
+            "error": "createAccount failed"
+        })))
+        .with_status(200)
+        .create_async()
+        .await;
+
+    let name_server_failed_mock = name_server
+        .mock("POST", "/api/internal/username/set-atproto")
+        .match_header("authorization", "Bearer test-sync-token")
+        .match_body(Matcher::Json(json!({
+            "name": "failed",
+            "atproto_did": Value::Null,
+            "atproto_state": "failed"
+        })))
+        .with_status(200)
+        .create_async()
+        .await;
+
+    let runner = build_runner(
+        &database_url,
+        format!("{}/provision", provision_server.url()),
+        format!("{}/api/internal/username/set-atproto", name_server.url()),
+        format!("{}/api/internal/atproto/state", keycast.url()),
+    );
+
+    let reconciled = runner
+        .reconcile_existing_from_database(&database_url)
+        .await
+        .expect("startup reconciliation should succeed");
+    assert_eq!(reconciled, 1);
+
+    keycast_failed_mock.assert_async().await;
+    name_server_failed_mock.assert_async().await;
+}
+
+#[tokio::test]
+#[serial]
+async fn startup_reconciliation_republishes_disabled_rows() {
+    let database_url = test_database_url();
+    reset_database(&database_url);
+    insert_account_link_row(
+        &database_url,
+        "(
+            'npub1disabled', 'did:plc:disabled1', 'disabled.divine.video', FALSE, 'signing-key:disabled',
+            'rotation-key:disabled', 'disabled', NULL, NOW(), NOW(), NOW()
+        )",
+    );
+
+    let provision_server = mockito::Server::new_async().await;
+    let mut name_server = mockito::Server::new_async().await;
+    let mut keycast = mockito::Server::new_async().await;
+
+    let keycast_disabled_mock = keycast
+        .mock("POST", "/api/internal/atproto/state")
+        .match_header("authorization", "Bearer test-keycast-token")
+        .match_body(Matcher::Json(json!({
+            "nostr_pubkey": "npub1disabled",
+            "enabled": false,
+            "state": "disabled",
+            "did": Value::Null,
+            "error": Value::Null
+        })))
+        .with_status(200)
+        .create_async()
+        .await;
+
+    let name_server_disabled_mock = name_server
+        .mock("POST", "/api/internal/username/set-atproto")
+        .match_header("authorization", "Bearer test-sync-token")
+        .match_body(Matcher::Json(json!({
+            "name": "disabled",
+            "atproto_did": Value::Null,
+            "atproto_state": "disabled"
+        })))
+        .with_status(200)
+        .create_async()
+        .await;
+
+    let runner = build_runner(
+        &database_url,
+        format!("{}/provision", provision_server.url()),
+        format!("{}/api/internal/username/set-atproto", name_server.url()),
+        format!("{}/api/internal/atproto/state", keycast.url()),
+    );
+
+    let reconciled = runner
+        .reconcile_existing_from_database(&database_url)
+        .await
+        .expect("startup reconciliation should succeed");
+    assert_eq!(reconciled, 1);
+
+    keycast_disabled_mock.assert_async().await;
+    name_server_disabled_mock.assert_async().await;
 }
 
 #[tokio::test]

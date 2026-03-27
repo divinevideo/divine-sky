@@ -89,6 +89,22 @@ pub fn get_account_link_lifecycle_by_handle(
     Ok(result)
 }
 
+/// Load persisted non-pending lifecycle rows that should be republished on startup.
+pub fn list_account_link_lifecycle_for_reconciliation(
+    conn: &mut PgConnection,
+) -> Result<Vec<AccountLinkLifecycleRow>> {
+    let rows = sql_query(
+        "SELECT nostr_pubkey, did, handle, crosspost_enabled, signing_key_id, \
+         plc_rotation_key_ref, provisioning_state, provisioning_error, disabled_at, \
+         created_at, updated_at \
+         FROM account_links
+         WHERE provisioning_state IN ('ready', 'failed', 'disabled')
+         ORDER BY created_at ASC",
+    )
+    .load::<AccountLinkLifecycleRow>(conn)?;
+    Ok(rows)
+}
+
 /// Insert or update the pending lifecycle state before PLC/PDS side effects.
 pub fn upsert_pending_account_link(
     conn: &mut PgConnection,
