@@ -4,7 +4,7 @@
 
 **Goal:** Build the first production-shaped ATProto-native Divine web app slice: sign in, browse a video-first feed, open a watch page, inspect a creator profile, and publish a standard ATProto video post.
 
-**Architecture:** Add a new `hatk` application at `apps/divine-atproto-web/` as the main product surface. Treat the public ATProto network as the default runtime, keep Divine-only ranking as an additive custom feed, and use standard `app.bsky.*` records plus OAuth-backed sessions for writes.
+**Architecture:** Create a standalone `hatk` repository rooted at `divine-atproto-web/` as the main product surface. Treat the public ATProto network as the default runtime, keep Divine-only ranking as an additive custom feed, and use standard `app.bsky.*` records plus OAuth-backed sessions for writes.
 
 **Tech Stack:** `hatk`, SvelteKit, TypeScript, Vitest, ATProto OAuth, standard `app.bsky.*` records, ATProto blob upload, Vite+
 
@@ -14,26 +14,24 @@
 
 ### New App
 
-- Create: `apps/divine-atproto-web/`
-- Create: `apps/divine-atproto-web/app/routes/+layout.server.ts`
-- Create: `apps/divine-atproto-web/app/routes/+layout.svelte`
-- Create: `apps/divine-atproto-web/app/routes/+page.server.ts`
-- Create: `apps/divine-atproto-web/app/routes/+page.svelte`
-- Create: `apps/divine-atproto-web/app/routes/watch/[did]/[rkey]/+page.server.ts`
-- Create: `apps/divine-atproto-web/app/routes/watch/[did]/[rkey]/+page.svelte`
-- Create: `apps/divine-atproto-web/app/routes/profile/[actor]/+page.server.ts`
-- Create: `apps/divine-atproto-web/app/routes/profile/[actor]/+page.svelte`
-- Create: `apps/divine-atproto-web/app/routes/publish/+page.server.ts`
-- Create: `apps/divine-atproto-web/app/routes/publish/+page.svelte`
-- Create: `apps/divine-atproto-web/app/lib/atproto.ts`
-- Create: `apps/divine-atproto-web/app/lib/ui/`
-- Create: `apps/divine-atproto-web/app/lib/publish.ts`
-- Create: `apps/divine-atproto-web/app/app.css`
-- Create: `apps/divine-atproto-web/server/feeds/divine-discovery.ts`
-- Create: `apps/divine-atproto-web/server/xrpc/dev.divine.getPublishSupport.ts`
-- Create: `apps/divine-atproto-web/lexicons/dev/divine/getPublishSupport.json`
-- Create: `apps/divine-atproto-web/test/`
-- Create: `apps/divine-atproto-web/README.md`
+- Create: `app/routes/+layout.server.ts`
+- Create: `app/routes/+layout.svelte`
+- Create: `app/routes/+page.server.ts`
+- Create: `app/routes/+page.svelte`
+- Create: `app/routes/watch/[did]/[rkey]/+page.server.ts`
+- Create: `app/routes/watch/[did]/[rkey]/+page.svelte`
+- Create: `app/routes/profile/[actor]/+page.server.ts`
+- Create: `app/routes/profile/[actor]/+page.svelte`
+- Create: `app/routes/publish/+page.server.ts`
+- Create: `app/routes/publish/+page.svelte`
+- Create: `app/lib/atproto.ts`
+- Create: `app/lib/ui/`
+- Create: `app/lib/publish.ts`
+- Create: `app/app.css`
+- Create: `server/feeds/divine-discovery.ts`
+- Create: `server/xrpc/dev.divine.getPublishSupport.ts`
+- Create: `lexicons/dev/divine/getPublishSupport.json`
+- Create: `test/`
 
 ### Repo Docs
 
@@ -44,15 +42,15 @@
 
 ### Likely Generated Files
 
-- Create: `apps/divine-atproto-web/hatk.config.ts`
-- Create: `apps/divine-atproto-web/hatk.generated.ts`
-- Create: `apps/divine-atproto-web/hatk.generated.client.ts`
-- Create: `apps/divine-atproto-web/svelte.config.js`
-- Create: `apps/divine-atproto-web/vite.config.ts`
-- Create: `apps/divine-atproto-web/package.json`
-- Create: `apps/divine-atproto-web/tsconfig.json`
-- Create: `apps/divine-atproto-web/tsconfig.server.json`
-- Create: `apps/divine-atproto-web/docker-compose.yml`
+- Create: `hatk.config.ts`
+- Create: `hatk.generated.ts`
+- Create: `hatk.generated.client.ts`
+- Create: `svelte.config.js`
+- Create: `vite.config.ts`
+- Create: `package.json`
+- Create: `tsconfig.json`
+- Create: `tsconfig.server.json`
+- Create: `docker-compose.yml`
 
 ---
 
@@ -61,10 +59,10 @@
 ### Task 1: Bootstrap The App And Verify The Template Runs
 
 **Files:**
-- Create: `apps/divine-atproto-web/` from the `hatk` starter template
-- Verify: `apps/divine-atproto-web/package.json`
-- Verify: `apps/divine-atproto-web/hatk.config.ts`
-- Verify: `apps/divine-atproto-web/svelte.config.js`
+- Create: `/Users/rabble/code/divine/divine-atproto-web/` from the `hatk` starter template
+- Verify: `package.json`
+- Verify: `hatk.config.ts`
+- Verify: `svelte.config.js`
 
 - [ ] **Step 1: Install Vite+ if it is missing**
 
@@ -86,18 +84,18 @@ vp help
 Run:
 
 ```bash
-cd /Users/rabble/code/divine/divine-sky/apps
+cd /Users/rabble/code/divine
 vp create github:hatk-dev/hatk-template-starter divine-atproto-web
 ```
 
-Expected: a new `apps/divine-atproto-web/` tree containing `app/`, `server/`, `lexicons/`, `hatk.config.ts`, generated type files, and local docker bootstrap files.
+Expected: a new `/Users/rabble/code/divine/divine-atproto-web/` repo containing `app/`, `server/`, `lexicons/`, `hatk.config.ts`, generated type files, and local docker bootstrap files.
 
 - [ ] **Step 3: Sync SvelteKit and install dependencies**
 
 Run:
 
 ```bash
-cd /Users/rabble/code/divine/divine-sky/apps/divine-atproto-web
+cd /Users/rabble/code/divine/divine-atproto-web
 npx svelte-kit sync
 npm install
 ```
@@ -109,7 +107,7 @@ Expected: dependency install completes and generated SvelteKit files are current
 Run:
 
 ```bash
-cd /Users/rabble/code/divine/divine-sky/apps/divine-atproto-web
+cd /Users/rabble/code/divine/divine-atproto-web
 vp dev
 ```
 
@@ -118,23 +116,23 @@ Expected: the starter app runs locally on `http://127.0.0.1:3000` with the defau
 - [ ] **Step 5: Commit the clean scaffold**
 
 ```bash
-git add apps/divine-atproto-web
+git add .
 git commit -m "feat: scaffold hatk app for divine atproto web"
 ```
 
 ### Task 2: Strip The Starter Into Divine’s Thin-Slice Shape
 
 **Files:**
-- Modify: `apps/divine-atproto-web/app/routes/+page.svelte`
-- Modify: `apps/divine-atproto-web/app/routes/+page.server.ts`
-- Modify: `apps/divine-atproto-web/app/routes/+layout.server.ts`
-- Modify: `apps/divine-atproto-web/app/routes/+layout.svelte`
-- Modify: `apps/divine-atproto-web/app/app.css`
+- Modify: `app/routes/+page.svelte`
+- Modify: `app/routes/+page.server.ts`
+- Modify: `app/routes/+layout.server.ts`
+- Modify: `app/routes/+layout.svelte`
+- Modify: `app/app.css`
 - Delete or replace any starter-only demo route and seed code that does not serve the thin slice
 
 - [ ] **Step 1: Write a failing test for the Divine shell**
 
-Create a test under `apps/divine-atproto-web/test/root.test.ts` that starts the app with `startTestServer()` and asserts:
+Create a test under `test/root.test.ts` that starts the app with `startTestServer()` and asserts:
 
 - the root page contains Divine branding
 - the root page links to feed, publish, and profile surfaces
@@ -145,7 +143,7 @@ Create a test under `apps/divine-atproto-web/test/root.test.ts` that starts the 
 Run:
 
 ```bash
-cd /Users/rabble/code/divine/divine-sky/apps/divine-atproto-web
+cd /Users/rabble/code/divine/divine-atproto-web
 npx vitest run test/root.test.ts
 ```
 
@@ -174,7 +172,7 @@ Expected: PASS.
 - [ ] **Step 5: Commit the shell**
 
 ```bash
-git add apps/divine-atproto-web
+git add .
 git commit -m "feat: replace hatk starter shell with divine app shell"
 ```
 
@@ -185,8 +183,8 @@ git commit -m "feat: replace hatk starter shell with divine app shell"
 ### Task 3: Add Shared ATProto Read Helpers
 
 **Files:**
-- Create: `apps/divine-atproto-web/app/lib/atproto.ts`
-- Test: `apps/divine-atproto-web/test/atproto-read.test.ts`
+- Create: `app/lib/atproto.ts`
+- Test: `test/atproto-read.test.ts`
 
 - [ ] **Step 1: Write a failing test for the shared read helper**
 
@@ -231,20 +229,20 @@ Expected: PASS.
 - [ ] **Step 5: Commit**
 
 ```bash
-git add apps/divine-atproto-web
+git add .
 git commit -m "feat: add shared atproto read helpers"
 ```
 
 ### Task 4: Build The Home Feed And Watch Page
 
 **Files:**
-- Modify: `apps/divine-atproto-web/app/routes/+page.server.ts`
-- Modify: `apps/divine-atproto-web/app/routes/+page.svelte`
-- Create: `apps/divine-atproto-web/app/routes/watch/[did]/[rkey]/+page.server.ts`
-- Create: `apps/divine-atproto-web/app/routes/watch/[did]/[rkey]/+page.svelte`
-- Create: `apps/divine-atproto-web/app/lib/ui/feed-card.svelte`
-- Create: `apps/divine-atproto-web/app/lib/ui/video-player.svelte`
-- Test: `apps/divine-atproto-web/test/feed-and-watch.test.ts`
+- Modify: `app/routes/+page.server.ts`
+- Modify: `app/routes/+page.svelte`
+- Create: `app/routes/watch/[did]/[rkey]/+page.server.ts`
+- Create: `app/routes/watch/[did]/[rkey]/+page.svelte`
+- Create: `app/lib/ui/feed-card.svelte`
+- Create: `app/lib/ui/video-player.svelte`
+- Test: `test/feed-and-watch.test.ts`
 
 - [ ] **Step 1: Write failing route tests**
 
@@ -296,17 +294,17 @@ Expected: PASS.
 - [ ] **Step 6: Commit**
 
 ```bash
-git add apps/divine-atproto-web
+git add .
 git commit -m "feat: add divine feed and watch routes"
 ```
 
 ### Task 5: Build The Creator Profile Route
 
 **Files:**
-- Create: `apps/divine-atproto-web/app/routes/profile/[actor]/+page.server.ts`
-- Create: `apps/divine-atproto-web/app/routes/profile/[actor]/+page.svelte`
-- Create: `apps/divine-atproto-web/app/lib/ui/profile-header.svelte`
-- Test: `apps/divine-atproto-web/test/profile.test.ts`
+- Create: `app/routes/profile/[actor]/+page.server.ts`
+- Create: `app/routes/profile/[actor]/+page.svelte`
+- Create: `app/lib/ui/profile-header.svelte`
+- Test: `test/profile.test.ts`
 
 - [ ] **Step 1: Write the failing profile test**
 
@@ -347,7 +345,7 @@ Expected: PASS.
 - [ ] **Step 5: Commit**
 
 ```bash
-git add apps/divine-atproto-web
+git add .
 git commit -m "feat: add creator profile route"
 ```
 
@@ -358,9 +356,9 @@ git commit -m "feat: add creator profile route"
 ### Task 6: Wire Real Session State Into The Layout
 
 **Files:**
-- Modify: `apps/divine-atproto-web/app/routes/+layout.server.ts`
-- Modify: `apps/divine-atproto-web/app/routes/+layout.svelte`
-- Test: `apps/divine-atproto-web/test/auth-layout.test.ts`
+- Modify: `app/routes/+layout.server.ts`
+- Modify: `app/routes/+layout.svelte`
+- Test: `test/auth-layout.test.ts`
 
 - [ ] **Step 1: Write the failing auth-layout test**
 
@@ -403,23 +401,23 @@ Expected: PASS.
 - [ ] **Step 5: Commit**
 
 ```bash
-git add apps/divine-atproto-web
+git add .
 git commit -m "feat: add oauth-backed session layout"
 ```
 
 ### Task 7: Add The Divine Discovery Feed
 
 **Files:**
-- Create: `apps/divine-atproto-web/server/feeds/divine-discovery.ts`
-- Create or modify: related generated test in `apps/divine-atproto-web/test/`
-- Modify: `apps/divine-atproto-web/app/routes/+page.server.ts`
+- Create: `server/feeds/divine-discovery.ts`
+- Create or modify: related generated test in `test/`
+- Modify: `app/routes/+page.server.ts`
 
 - [ ] **Step 1: Generate the feed scaffold**
 
 Run:
 
 ```bash
-cd /Users/rabble/code/divine/divine-sky/apps/divine-atproto-web
+cd /Users/rabble/code/divine/divine-atproto-web
 npx hatk generate feed divine-discovery
 ```
 
@@ -466,7 +464,7 @@ Expected: PASS.
 - [ ] **Step 6: Commit**
 
 ```bash
-git add apps/divine-atproto-web
+git add .
 git commit -m "feat: add divine discovery feed"
 ```
 
@@ -477,16 +475,16 @@ git commit -m "feat: add divine discovery feed"
 ### Task 8: Add Publish Capability Detection
 
 **Files:**
-- Create: `apps/divine-atproto-web/lexicons/dev/divine/getPublishSupport.json`
-- Create: `apps/divine-atproto-web/server/xrpc/dev.divine.getPublishSupport.ts`
-- Test: `apps/divine-atproto-web/test/publish-support.test.ts`
+- Create: `lexicons/dev/divine/getPublishSupport.json`
+- Create: `server/xrpc/dev.divine.getPublishSupport.ts`
+- Test: `test/publish-support.test.ts`
 
 - [ ] **Step 1: Generate the XRPC handler scaffold**
 
 Run:
 
 ```bash
-cd /Users/rabble/code/divine/divine-sky/apps/divine-atproto-web
+cd /Users/rabble/code/divine/divine-atproto-web
 npx hatk generate xrpc dev.divine.getPublishSupport
 ```
 
@@ -528,18 +526,18 @@ Expected: PASS.
 - [ ] **Step 6: Commit**
 
 ```bash
-git add apps/divine-atproto-web
+git add .
 git commit -m "feat: add publish capability endpoint"
 ```
 
 ### Task 9: Implement The Publish Route And Draft State
 
 **Files:**
-- Create: `apps/divine-atproto-web/app/routes/publish/+page.server.ts`
-- Create: `apps/divine-atproto-web/app/routes/publish/+page.svelte`
-- Create: `apps/divine-atproto-web/app/lib/publish.ts`
-- Create: `apps/divine-atproto-web/app/lib/ui/publish-form.svelte`
-- Test: `apps/divine-atproto-web/test/publish-route.test.ts`
+- Create: `app/routes/publish/+page.server.ts`
+- Create: `app/routes/publish/+page.svelte`
+- Create: `app/lib/publish.ts`
+- Create: `app/lib/ui/publish-form.svelte`
+- Test: `test/publish-route.test.ts`
 
 - [ ] **Step 1: Write the failing publish route test**
 
@@ -581,15 +579,15 @@ Expected: PASS.
 - [ ] **Step 5: Commit**
 
 ```bash
-git add apps/divine-atproto-web
+git add .
 git commit -m "feat: add publish route and draft states"
 ```
 
 ### Task 10: Implement Video Upload And Post Creation
 
 **Files:**
-- Modify: `apps/divine-atproto-web/app/lib/publish.ts`
-- Test: `apps/divine-atproto-web/test/video-publish.test.ts`
+- Modify: `app/lib/publish.ts`
+- Test: `test/video-publish.test.ts`
 
 - [ ] **Step 1: Write the failing publish integration test**
 
@@ -635,7 +633,7 @@ Expected: PASS.
 Run:
 
 ```bash
-cd /Users/rabble/code/divine/divine-sky/apps/divine-atproto-web
+cd /Users/rabble/code/divine/divine-atproto-web
 vp dev
 ```
 
@@ -652,7 +650,7 @@ Expected: the created post is visible in the app and on a public-network read pa
 - [ ] **Step 6: Commit**
 
 ```bash
-git add apps/divine-atproto-web
+git add .
 git commit -m "feat: publish video posts from divine atproto web"
 ```
 
@@ -667,13 +665,13 @@ git commit -m "feat: publish video posts from divine atproto web"
 - Modify: `AGENTS.md`
 - Modify: `docs/runbooks/dev-bootstrap.md`
 - Create: `docs/runbooks/divine-atproto-web.md`
-- Create or modify: `apps/divine-atproto-web/README.md`
 
 - [ ] **Step 1: Write the failing docs checklist**
 
 Create a simple local checklist in the PR notes or commit notes covering:
 
 - new app path documented
+- standalone repo purpose documented
 - local bootstrap documented
 - auth expectations documented
 - core commands documented
@@ -682,16 +680,16 @@ Create a simple local checklist in the PR notes or commit notes covering:
 
 Document:
 
-- the new app location
+- the repo purpose
 - bootstrap commands
 - expected local ports
 - how to run the app
-- the relationship between the old viewer lab and the new product app
+- the relationship between this standalone repo and the older `divine-sky` viewer-lab work
 
 - [ ] **Step 3: Commit the docs**
 
 ```bash
-git add README.md AGENTS.md docs/runbooks/dev-bootstrap.md docs/runbooks/divine-atproto-web.md apps/divine-atproto-web/README.md
+git add README.md AGENTS.md docs/runbooks/dev-bootstrap.md docs/runbooks/divine-atproto-web.md
 git commit -m "docs: add divine atproto web runbook and repo guidance"
 ```
 
@@ -705,7 +703,7 @@ git commit -m "docs: add divine atproto web runbook and repo guidance"
 Run:
 
 ```bash
-cd /Users/rabble/code/divine/divine-sky/apps/divine-atproto-web
+cd /Users/rabble/code/divine/divine-atproto-web
 npx vitest run
 ```
 
@@ -716,23 +714,31 @@ Expected: all app tests pass.
 Run:
 
 ```bash
-cd /Users/rabble/code/divine/divine-sky/apps/divine-atproto-web
+cd /Users/rabble/code/divine/divine-atproto-web
 npx svelte-kit sync
 npm run build
 ```
 
 Expected: successful build with no type or route errors.
 
-- [ ] **Step 3: Re-run the Rust workspace baseline to make sure the new app didn’t break repo expectations**
+- [ ] **Step 3: Run one final local smoke pass**
 
 Run:
 
 ```bash
-cd /Users/rabble/code/divine/divine-sky
-bash scripts/test-workspace.sh
+cd /Users/rabble/code/divine/divine-atproto-web
+vp dev
 ```
 
-Expected: Rust workspace checks still pass.
+Manual check:
+
+1. open the local app
+2. verify the home feed renders
+3. verify sign-in appears
+4. open a watch route
+5. verify publish route loads
+
+Expected: the thin slice is navigable end to end.
 
 - [ ] **Step 4: Final commit if needed**
 

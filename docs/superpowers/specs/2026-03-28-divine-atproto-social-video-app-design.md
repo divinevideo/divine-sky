@@ -89,7 +89,7 @@ The app is not a generic social client that happens to support videos. It is a s
 
 ### Primary Application Stack
 
-Create a new app at `apps/divine-atproto-web/` using `hatk` as the primary full-stack web framework.
+Create a new standalone repository, expected at `divine-atproto-web/`, using `hatk` as the primary full-stack web framework.
 
 This app owns:
 
@@ -117,25 +117,25 @@ The app should operate as a public ATProto client first:
 
 The app can still expose Divine-specific feeds or helper endpoints, but the baseline experience should not require a Divine-only server cluster.
 
-### Relationship To Existing Rust Services
+### Relationship To Existing `divine-sky` Services
 
-Existing Rust services in this repo are no longer the primary product frontend path.
+Existing Rust services in `divine-sky` are no longer the primary product frontend path.
 
-They now fall into three buckets:
+For the standalone repo, they should be treated as external reference implementations or optional later integrations:
 
-1. `Keep as lab/support infrastructure`
+1. `Reference only`
    - `divine-appview`
    - `divine-appview-indexer`
    - `divine-feedgen`
 
-2. `Keep as optional Divine-specific media or bridge utilities`
+2. `Optional future integration`
    - `divine-video-worker`
    - `divine-atbridge`
 
-3. `Do not make core product correctness depend on them`
-   - the app must still function as a public-network ATProto client if these services are absent
+3. `Non-dependency rule`
+   - the standalone app must still function as a public-network ATProto client if every `divine-sky` service is absent
 
-This keeps the ATProto product honest. If a Divine-specific backend service adds value, it should do so because it improves the product, not because the product cannot function without it.
+This keeps the ATProto product honest. If a Divine-specific backend service adds value later, it should do so because it improves the product, not because the product cannot function without it.
 
 ## Read Behavior
 
@@ -158,7 +158,7 @@ V1 should ship with two core feed surfaces:
   - Divine’s opinionated social-video discovery feed
   - product-defining differentiator
 
-`Divine Discovery` can be implemented as a custom `hatk` feed generator or a thin adapter over a Divine-owned ranking service, but the contract returned to clients should still be ATProto feed items.
+`Divine Discovery` can be implemented as a custom `hatk` feed generator inside the standalone repo or as a thin adapter over a later Divine-owned ranking service, but the contract returned to clients should still be ATProto feed items.
 
 ## Write Behavior
 
@@ -278,7 +278,7 @@ This product is too broad for a single implementation plan. It should be deliver
 
 Ship a real but narrow product slice:
 
-- `hatk` app scaffolded in-repo
+- `hatk` app scaffolded as the new repo root
 - public-network sign-in
 - logged-out and logged-in home feed
 - watch page for video posts
@@ -318,7 +318,7 @@ Only after the ATProto product stands on its own:
 
 ## Repository Impact
 
-This project adds a new first-class app under `apps/`.
+This project should live in its own repository rooted at `divine-atproto-web/`.
 
 When implementation begins, the repo docs must be updated alongside the code:
 
