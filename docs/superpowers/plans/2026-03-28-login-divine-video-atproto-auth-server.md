@@ -10,6 +10,39 @@
 
 ---
 
+## Chunk 0: Create Isolated `keycast` And `rsky` Workspaces
+
+### Task 0: Prepare sibling-repo worktrees before implementation
+
+**Files:**
+- Verify only
+
+- [ ] **Step 1: Create the `keycast` worktree**
+
+Run:
+
+```bash
+cd /Users/rabble/code/divine/keycast
+git worktree add .worktrees/phase2-atproto-auth-server -b feat/phase2-atproto-auth-server
+```
+
+- [ ] **Step 2: Create the `rsky` worktree**
+
+Run:
+
+```bash
+cd /Users/rabble/code/divine/rsky
+git worktree add .worktrees/phase2-atproto-protected-resource -b feat/phase2-atproto-protected-resource
+```
+
+- [ ] **Step 3: Verify a focused clean baseline in both repos**
+
+Run:
+- `cd /Users/rabble/code/divine/keycast/.worktrees/phase2-atproto-auth-server/api && cargo test --test oauth_unit_test -- --nocapture`
+- `cd /Users/rabble/code/divine/rsky/.worktrees/phase2-atproto-protected-resource && cargo test -p rsky-pds build_id_resolver_uses_identity_config_timeout_and_cache_ttls -- --nocapture`
+
+Expected: PASS before starting protocol changes.
+
 ## Chunk 1: Metadata And Boundary Contract
 
 ### Task 1: Add protected-resource metadata to `rsky-pds`
@@ -29,7 +62,7 @@ The test should assert:
 
 - [ ] **Step 2: Run the focused PDS integration test and verify it fails correctly**
 
-Run: `cd ../rsky && cargo test -p rsky-pds integration_tests -- --nocapture`
+Run: `cd /Users/rabble/code/divine/rsky/.worktrees/phase2-atproto-protected-resource && cargo test -p rsky-pds integration_tests -- --nocapture`
 
 Expected: FAIL because the endpoint does not exist yet.
 
@@ -42,7 +75,7 @@ Rules:
 
 - [ ] **Step 4: Re-run the focused PDS test**
 
-Run: `cd ../rsky && cargo test -p rsky-pds integration_tests -- --nocapture`
+Run: `cd /Users/rabble/code/divine/rsky/.worktrees/phase2-atproto-protected-resource && cargo test -p rsky-pds integration_tests -- --nocapture`
 
 Expected: PASS.
 
@@ -66,7 +99,7 @@ Assert required fields:
 
 - [ ] **Step 2: Run the focused keycast test**
 
-Run: `cd ../keycast/api && cargo test --test atproto_oauth_metadata_test -- --nocapture`
+Run: `cd /Users/rabble/code/divine/keycast/.worktrees/phase2-atproto-auth-server/api && cargo test --test atproto_oauth_metadata_test -- --nocapture`
 
 Expected: FAIL because the endpoint does not exist yet.
 
@@ -76,7 +109,7 @@ Keep this module ATProto-specific. Do not patch the existing generic OAuth handl
 
 - [ ] **Step 4: Re-run the focused metadata test**
 
-Run: `cd ../keycast/api && cargo test --test atproto_oauth_metadata_test -- --nocapture`
+Run: `cd /Users/rabble/code/divine/keycast/.worktrees/phase2-atproto-auth-server/api && cargo test --test atproto_oauth_metadata_test -- --nocapture`
 
 Expected: PASS.
 
@@ -100,7 +133,7 @@ Cover:
 
 - [ ] **Step 2: Run the repository test**
 
-Run: `cd ../keycast/api && cargo test --test atproto_oauth_session_test -- --nocapture`
+Run: `cd /Users/rabble/code/divine/keycast/.worktrees/phase2-atproto-auth-server/api && cargo test --test atproto_oauth_session_test -- --nocapture`
 
 Expected: FAIL because the storage does not exist.
 
@@ -110,7 +143,7 @@ Do not reuse `oauth_authorizations` for ATProto sessions.
 
 - [ ] **Step 4: Re-run the repository test**
 
-Run: `cd ../keycast/api && cargo test --test atproto_oauth_session_test -- --nocapture`
+Run: `cd /Users/rabble/code/divine/keycast/.worktrees/phase2-atproto-auth-server/api && cargo test --test atproto_oauth_session_test -- --nocapture`
 
 Expected: PASS.
 
@@ -133,7 +166,7 @@ Cover:
 
 - [ ] **Step 2: Run the focused HTTP test**
 
-Run: `cd ../keycast/api && cargo test --test atproto_oauth_http_test -- --nocapture`
+Run: `cd /Users/rabble/code/divine/keycast/.worktrees/phase2-atproto-auth-server/api && cargo test --test atproto_oauth_http_test -- --nocapture`
 
 Expected: FAIL because the endpoints do not exist yet.
 
@@ -147,7 +180,7 @@ Rules:
 
 - [ ] **Step 4: Re-run the focused HTTP test**
 
-Run: `cd ../keycast/api && cargo test --test atproto_oauth_http_test -- --nocapture`
+Run: `cd /Users/rabble/code/divine/keycast/.worktrees/phase2-atproto-auth-server/api && cargo test --test atproto_oauth_http_test -- --nocapture`
 
 Expected: PASS.
 
@@ -170,7 +203,7 @@ The test should prove:
 
 - [ ] **Step 2: Run the focused PDS test**
 
-Run: `cd ../rsky && cargo test -p rsky-pds integration_tests -- --nocapture`
+Run: `cd /Users/rabble/code/divine/rsky/.worktrees/phase2-atproto-protected-resource && cargo test -p rsky-pds integration_tests -- --nocapture`
 
 Expected: FAIL because external auth-server trust is not implemented.
 
@@ -180,7 +213,7 @@ Prefer explicit issuer/origin config and narrow validation. Do not weaken curren
 
 - [ ] **Step 4: Re-run the focused PDS test**
 
-Run: `cd ../rsky && cargo test -p rsky-pds integration_tests -- --nocapture`
+Run: `cd /Users/rabble/code/divine/rsky/.worktrees/phase2-atproto-protected-resource && cargo test -p rsky-pds integration_tests -- --nocapture`
 
 Expected: PASS.
 
@@ -207,18 +240,18 @@ Include:
 - [ ] **Step 2: Run service-level verification**
 
 Run:
-- `cd ../keycast/api && cargo test --test atproto_oauth_metadata_test -- --nocapture`
-- `cd ../keycast/api && cargo test --test atproto_oauth_http_test -- --nocapture`
-- `cd ../rsky && cargo test -p rsky-pds integration_tests -- --nocapture`
+- `cd /Users/rabble/code/divine/keycast/.worktrees/phase2-atproto-auth-server/api && cargo test --test atproto_oauth_metadata_test -- --nocapture`
+- `cd /Users/rabble/code/divine/keycast/.worktrees/phase2-atproto-auth-server/api && cargo test --test atproto_oauth_http_test -- --nocapture`
+- `cd /Users/rabble/code/divine/rsky/.worktrees/phase2-atproto-protected-resource && cargo test -p rsky-pds integration_tests -- --nocapture`
 
 Expected: PASS.
 
 - [ ] **Step 3: Commit the Phase 2 implementation branch**
 
 ```bash
-git -C /Users/rabble/code/divine/keycast add api/src/api/http/atproto_oauth_metadata.rs api/src/api/http/atproto_oauth.rs api/src/api/http/routes.rs api/tests/atproto_oauth_metadata_test.rs api/tests/atproto_oauth_http_test.rs database/migrations core/src/repositories/atproto_oauth_session.rs core/src/repositories/mod.rs web/src/routes/login/+page.svelte
-git -C /Users/rabble/code/divine/rsky add rsky-pds/src/apis/oauth/protected_resource.rs rsky-pds/src/lib.rs rsky-pds/src/well_known.rs rsky-pds/src/auth_verifier.rs rsky-pds/src/config/mod.rs rsky-pds/src/apis/com/atproto/server/describe_server.rs rsky-pds/tests/integration_tests.rs
-git -C /Users/rabble/code/divine/divine-sky add docs/runbooks/login-divine-video.md docs/runbooks/launch-checklist.md docs/runbooks/atproto-auth-server-smoke-test.md
-git -C /Users/rabble/code/divine/keycast commit -m "feat: add atproto authorization server surface"
-git -C /Users/rabble/code/divine/rsky commit -m "feat: trust external atproto authorization server"
+git -C /Users/rabble/code/divine/keycast/.worktrees/phase2-atproto-auth-server add api/src/api/http/atproto_oauth_metadata.rs api/src/api/http/atproto_oauth.rs api/src/api/http/routes.rs api/tests/atproto_oauth_metadata_test.rs api/tests/atproto_oauth_http_test.rs database/migrations core/src/repositories/atproto_oauth_session.rs core/src/repositories/mod.rs web/src/routes/login/+page.svelte
+git -C /Users/rabble/code/divine/rsky/.worktrees/phase2-atproto-protected-resource add rsky-pds/src/apis/oauth/protected_resource.rs rsky-pds/src/lib.rs rsky-pds/src/well_known.rs rsky-pds/src/auth_verifier.rs rsky-pds/src/config/mod.rs rsky-pds/src/apis/com/atproto/server/describe_server.rs rsky-pds/tests/integration_tests.rs
+git -C /Users/rabble/code/divine/divine-sky/.worktrees/plan-phase2-atproto-auth-server add docs/runbooks/login-divine-video.md docs/runbooks/launch-checklist.md docs/runbooks/atproto-auth-server-smoke-test.md
+git -C /Users/rabble/code/divine/keycast/.worktrees/phase2-atproto-auth-server commit -m "feat: add atproto authorization server surface"
+git -C /Users/rabble/code/divine/rsky/.worktrees/phase2-atproto-protected-resource commit -m "feat: trust external atproto authorization server"
 ```
