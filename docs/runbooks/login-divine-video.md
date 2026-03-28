@@ -6,8 +6,36 @@
 
 It does not serve `/.well-known/atproto-did`. That read-only host resolution now belongs to `divine-router`, which reads the public state published by `divine-name-server`.
 
+## Phase 1 User Surface
+
+Phase 1 ships the user-visible ATProto controls inside the existing advanced settings page at `settings/security`.
+
+The page exposes a `Bluesky Account` card for authenticated cookie-session users:
+
+- no username claimed:
+  - show username entry and `Claim username`
+- username claimed, Bluesky disabled:
+  - show `username.divine.video`
+  - show `Enable Bluesky account`
+- pending:
+  - show provisioning progress and keep polling keycast status
+- ready:
+  - show `@username.divine.video`
+  - show the resolved `did:plc:...`
+  - explain that public DID resolution and future cross-posting are active
+- failed:
+  - show the last provisioning error from keycast
+  - allow retry via `Enable Bluesky account`
+- disabled:
+  - explain that public DID resolution and future cross-posting are off
+  - allow re-enable with the existing username
+
+The card is visible without the password-unlock flow that protects private-key export. Email verification requirements still follow the existing security settings page rules.
+
 ## Route Responsibilities
 
+- `GET /api/user/profile`
+  Returns the claimed username source of truth for the authenticated user.
 - `POST /api/user/profile`
   Claims or updates `username.divine.video` for NIP-05 only. This must not auto-enable ATProto.
 - `POST /api/user/atproto/enable`
@@ -118,6 +146,14 @@ For launch, treat the flow as:
 - divine-router resolves `/.well-known/atproto-did` only for active + ready users
 - rsky-pds publishes `/.well-known/oauth-protected-resource` and trusts the configured auth-server signing key
 - divine-atbridge publishes only for opted-in + ready users
+
+From the user perspective, `ready` means all of the following are true:
+
+- keycast shows `enabled = true` and `state = ready`
+- the user can see a `did:plc:...` on `settings/security`
+- `divine-name-server` has published the public handle state
+- `divine-router` can serve `/.well-known/atproto-did`
+- future Nostr video publishes are eligible for mirroring because the bridge sees `crosspost_enabled && ready`
 
 `divine-handle-gateway` also self-heals persisted lifecycle state on startup:
 

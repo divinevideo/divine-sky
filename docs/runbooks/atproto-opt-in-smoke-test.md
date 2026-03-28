@@ -33,36 +33,47 @@ For a localnet run instead of staging:
 
 ## Happy Path
 
-1. Create or log in to a user in keycast.
-2. Claim `username.divine.video`.
-3. Verify `https://divine.video/.well-known/nostr.json?name=username` or the equivalent subdomain NIP-05 response.
-4. Confirm ATProto is still disabled immediately after claim.
-   - expected: `enabled = false`
-   - expected: `state = null`
-5. Enable ATProto from the authenticated client surface.
-6. Verify keycast status reaches `pending`.
-7. Verify the same user reaches `ready`.
+1. Create or log in to a verified cookie-auth user in `login.divine.video`.
+2. Open `settings/security`.
+3. In the `Bluesky Account` card, claim `username.divine.video` if the user does not already have one.
+4. Verify the card shows the claimed handle preview and does not auto-enable ATProto.
+   - expected UI: `Enable Bluesky account`
+   - expected status: `enabled = false`
+   - expected status: `state = null`
+5. Verify `https://divine.video/.well-known/nostr.json?name=username` or the equivalent subdomain NIP-05 response.
+6. Click `Enable Bluesky account` from the settings page.
+7. Verify the card reaches `pending`.
+   - expected UI: provisioning in progress
+   - expected status: `enabled = true`
+   - expected status: `state = pending`
+8. Wait for the same user to reach `ready`.
+   - expected UI: `@username.divine.video`
+   - expected UI: visible `did:plc:...`
    - keycast status endpoint shows `state = ready`
    - `divine-sky` `account_links` shows `pending -> ready`
-8. Inspect the `divine-name-server` D1 row for the username.
+9. Inspect the `divine-name-server` D1 row for the username.
    - expected: `atproto_did = did:plc:...`
    - expected: `atproto_state = ready`
-9. Inspect the Fastly KV record for `user:<username>`.
+10. Inspect the Fastly KV record for `user:<username>`.
    - expected payload fields:
      - `status = active`
      - `atproto_did = did:plc:...`
      - `atproto_state = ready`
-10. Verify `divine-router` serves `https://username.divine.video/.well-known/atproto-did` and returns the bare DID.
-11. Publish a Nostr video for the opted-in user.
-12. Verify the mirrored ATProto post exists after the user is `ready`.
-13. Disable ATProto.
-14. Verify keycast status reaches `disabled`.
-15. Verify future mirrored posts stop and `divine-router` returns `404` for `/.well-known/atproto-did`.
+11. Verify `divine-router` serves `https://username.divine.video/.well-known/atproto-did` and returns the bare DID.
+12. Publish a Nostr video for the opted-in user.
+13. Verify the mirrored ATProto post exists after the user is `ready`.
+14. Return to `settings/security` and click `Disable Bluesky account`.
+15. Verify the card reaches `disabled`.
+   - expected UI: public DID resolution and future cross-posting are disabled
+   - expected status: `enabled = false`
+   - expected status: `state = disabled`
+16. Verify future mirrored posts stop and `divine-router` returns `404` for `/.well-known/atproto-did`.
 
 ## Failure Checks
 
 - Username claim must not auto-enable ATProto.
 - `pending`, `failed`, and `disabled` users must not resolve `/.well-known/atproto-did` through `divine-router`.
+- `failed` must show the last provisioning error in the `Bluesky Account` card and keep a retry path on the same page.
 - The PDS canary must pass before the user-facing opt-in flow is considered healthy.
 - The bridge must not publish while `crosspost_enabled = false`, even if a DID already exists.
 - Client feature flags must be required to expose the ATProto controls on mobile and web.
