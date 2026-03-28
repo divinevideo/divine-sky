@@ -39,6 +39,16 @@ pub struct VideoEmbed {
     pub alt: Option<String>,
     #[serde(rename = "aspectRatio", skip_serializing_if = "Option::is_none")]
     pub aspect_ratio: Option<AspectRatio>,
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub captions: Vec<VideoCaption>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VideoCaption {
+    #[serde(rename = "$type")]
+    pub type_: String, // "app.bsky.embed.video#caption"
+    pub lang: String,
+    pub file: BlobRef,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -201,8 +211,11 @@ pub fn translate_nip71_to_post(event: &NostrEvent, blob_ref: &BlobRef) -> Result
     let (text, facets) = text_builder::build_post_text(event);
     let created_at = unix_to_iso8601(event.created_at);
 
-    // Video embed
-    let alt = get_tag(event, "alt").map(String::from);
+    // Alt text: prefer explicit alt tag, fall back to summary
+    let alt = get_tag(event, "alt")
+        .or_else(|| get_tag(event, "summary"))
+        .map(String::from);
+
     let aspect_ratio = get_imeta_field(event, "dim").and_then(parse_aspect_ratio);
 
     let embed = Some(VideoEmbed {
@@ -210,21 +223,49 @@ pub fn translate_nip71_to_post(event: &NostrEvent, blob_ref: &BlobRef) -> Result
         video: blob_ref.clone(),
         alt,
         aspect_ratio,
+        captions: Vec::new(), // populated externally when subtitle blobs are available
     });
 
-    // Content warning → self-labels
+    // Content warnings + verification status → self-labels
     let labels = {
-        let cw_values: Vec<&str> = get_tags(event, "content-warning");
-        if cw_values.is_empty() {
+        let mut label_values: Vec<SelfLabelValue> = Vec::new();
+
+        // Content warnings
+        for cw in get_tags(event, "content-warning") {
+            label_values.push(SelfLabelValue {
+                val: cw.to_string(),
+            });
+        }
+
+        // Verification status (e.g. "verified_mobile" from ProofMode)
+        if get_tag(event, "verification").is_some() || get_tag(event, "proofmode").is_some() {
+            label_values.push(SelfLabelValue {
+                val: "source-verified".to_string(),
+            });
+        }
+
+        if label_values.is_empty() {
             None
         } else {
             Some(SelfLabels {
                 type_: "com.atproto.label.defs#selfLabels".to_string(),
-                values: cw_values
-                    .into_iter()
-                    .map(|v| SelfLabelValue { val: v.to_string() })
-                    .collect(),
+                values: label_values,
             })
+        }
+    };
+
+    // Language tags from NIP-71 ISO-639-1 labels
+    let langs = {
+        let lang_values: Vec<String> = event
+            .tags
+            .iter()
+            .filter(|t| t.len() >= 3 && t[0] == "l" && t[2] == "ISO-639-1")
+            .map(|t| t[1].clone())
+            .collect();
+        if lang_values.is_empty() {
+            None
+        } else {
+            Some(lang_values)
         }
     };
 
@@ -233,7 +274,7 @@ pub fn translate_nip71_to_post(event: &NostrEvent, blob_ref: &BlobRef) -> Result
         text,
         created_at,
         facets,
-        langs: None,
+        langs,
         embed,
         labels,
     })
