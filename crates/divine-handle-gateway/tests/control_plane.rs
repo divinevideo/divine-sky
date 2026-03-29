@@ -256,7 +256,9 @@ async fn control_plane_manual_provision_syncs_ready_state_downstream() {
         .match_body(Matcher::Json(json!({
             "name": "alice",
             "atproto_did": "did:plc:alice123",
-            "atproto_state": "ready"
+            "atproto_state": "ready",
+            "atproto_pds_host": "pds.divine.video",
+            "atproto_authorization_server_host": "entryway.divine.video"
         })))
         .with_status(200)
         .create_async()

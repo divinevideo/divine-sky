@@ -163,7 +163,9 @@ async fn successful_provision_syncs_ready_state_to_name_server() {
         .match_body(Matcher::Json(json!({
             "name": "alice",
             "atproto_did": "did:plc:abc",
-            "atproto_state": "ready"
+            "atproto_state": "ready",
+            "atproto_pds_host": "pds.divine.video",
+            "atproto_authorization_server_host": "entryway.divine.video"
         })))
         .with_status(200)
         .create_async()
@@ -260,7 +262,9 @@ async fn failed_provision_syncs_failed_state_to_keycast_and_name_server() {
         .match_body(Matcher::Json(json!({
             "name": "alice",
             "atproto_did": Value::Null,
-            "atproto_state": "failed"
+            "atproto_state": "failed",
+            "atproto_pds_host": "pds.divine.video",
+            "atproto_authorization_server_host": "entryway.divine.video"
         })))
         .with_status(200)
         .create_async()
@@ -375,7 +379,9 @@ async fn startup_replay_retries_preexisting_pending_rows() {
         .match_body(Matcher::Json(json!({
             "name": "replay",
             "atproto_did": "did:plc:replay",
-            "atproto_state": "ready"
+            "atproto_state": "ready",
+            "atproto_pds_host": "pds.divine.video",
+            "atproto_authorization_server_host": "entryway.divine.video"
         })))
         .with_status(200)
         .create_async()
@@ -454,7 +460,9 @@ async fn startup_reconciliation_republishes_ready_rows() {
         .match_body(Matcher::Json(json!({
             "name": "ready",
             "atproto_did": "did:plc:ready1",
-            "atproto_state": "ready"
+            "atproto_state": "ready",
+            "atproto_pds_host": "pds.divine.video",
+            "atproto_authorization_server_host": "entryway.divine.video"
         })))
         .with_status(200)
         .create_async()
@@ -514,7 +522,9 @@ async fn startup_reconciliation_republishes_failed_rows() {
         .match_body(Matcher::Json(json!({
             "name": "failed",
             "atproto_did": Value::Null,
-            "atproto_state": "failed"
+            "atproto_state": "failed",
+            "atproto_pds_host": "pds.divine.video",
+            "atproto_authorization_server_host": "entryway.divine.video"
         })))
         .with_status(200)
         .create_async()
@@ -574,7 +584,9 @@ async fn startup_reconciliation_republishes_disabled_rows() {
         .match_body(Matcher::Json(json!({
             "name": "disabled",
             "atproto_did": Value::Null,
-            "atproto_state": "disabled"
+            "atproto_state": "disabled",
+            "atproto_pds_host": "pds.divine.video",
+            "atproto_authorization_server_host": "entryway.divine.video"
         })))
         .with_status(200)
         .create_async()
@@ -628,7 +640,9 @@ async fn disable_syncs_disabled_state_to_name_server() {
         .match_body(Matcher::Json(json!({
             "name": "alice",
             "atproto_did": Value::Null,
-            "atproto_state": "disabled"
+            "atproto_state": "disabled",
+            "atproto_pds_host": "pds.divine.video",
+            "atproto_authorization_server_host": "entryway.divine.video"
         })))
         .with_status(200)
         .create_async()
