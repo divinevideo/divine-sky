@@ -263,4 +263,49 @@ mod tests {
         mock.assert_async().await;
         assert_eq!(did, expected);
     }
+
+    #[tokio::test]
+    async fn update_did_retries_server_errors() {
+        let mut server = mockito::Server::new_async().await;
+        let _first = server
+            .mock("POST", "/did:plc:alice123")
+            .with_status(503)
+            .with_body("temporary")
+            .expect(1)
+            .create_async()
+            .await;
+        let second = server
+            .mock("POST", "/did:plc:alice123")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body("{}")
+            .expect(1)
+            .create_async()
+            .await;
+
+        let client = PlcDirectoryClient::with_max_attempts(server.url(), 2);
+        client.update_did("did:plc:alice123", &operation()).await.unwrap();
+        second.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn update_did_returns_client_errors_without_retry() {
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("POST", "/did:plc:alice123")
+            .with_status(400)
+            .with_body("{\"message\":\"invalid signature\"}")
+            .expect(1)
+            .create_async()
+            .await;
+
+        let client = PlcDirectoryClient::with_max_attempts(server.url(), 3);
+        let err = client
+            .update_did("did:plc:alice123", &operation())
+            .await
+            .expect_err("4xx errors should not retry");
+
+        mock.assert_async().await;
+        assert!(err.to_string().contains("invalid signature"));
+    }
 }
