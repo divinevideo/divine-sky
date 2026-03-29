@@ -185,6 +185,7 @@ assert_json_string "$PLC_BODY" id "$resolved_did" "PLC DID document"
 assert_json_string "$PLC_BODY" service.0.serviceEndpoint "https://pds.divine.video" "PLC DID document"
 assert_no_staging "$PLC_BODY" "PLC DID document"
 
+# The public PDS must answer as a real resource server, not an HTML landing page.
 PDS_DESCRIBE_BODY="$tmpdir/pds-describe.json"
 PDS_DESCRIBE_HEADERS="$tmpdir/pds-describe.headers"
 fetch "https://pds.divine.video/xrpc/com.atproto.server.describeServer" "$PDS_DESCRIBE_BODY" "$PDS_DESCRIBE_HEADERS"
@@ -197,6 +198,7 @@ fetch "https://pds.divine.video/.well-known/oauth-protected-resource" "$PDS_PROT
 assert_json "$PDS_PROTECTED_BODY" "pds.divine.video protected-resource metadata"
 assert_array_contains "$PDS_PROTECTED_BODY" authorization_servers "https://entryway.divine.video" "pds.divine.video protected-resource metadata"
 
+# The entryway must expose OAuth metadata for client discovery.
 ENTRYWAY_AUTHZ_BODY="$tmpdir/entryway-authz.json"
 ENTRYWAY_AUTHZ_HEADERS="$tmpdir/entryway-authz.headers"
 fetch "https://entryway.divine.video/.well-known/oauth-authorization-server" "$ENTRYWAY_AUTHZ_BODY" "$ENTRYWAY_AUTHZ_HEADERS"

@@ -11,6 +11,8 @@ The production login contract is separate from the lifecycle smoke:
 - `pds.divine.video` is the production PDS host that must appear in user DID documents
 - `entryway.divine.video` is the ATProto Authorization Server
 
+Do not use `login.divine.video` as a protocol origin in production checks; the public discovery chain should go handle -> DID -> PDS -> entryway.
+
 Use `scripts/smoke-divine-atproto-login.sh` to validate the handle, DID, PDS, and entryway chain before running the opt-in lifecycle checks below.
 
 1. Run the production login-chain smoke first:

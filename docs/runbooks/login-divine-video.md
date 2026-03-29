@@ -6,7 +6,7 @@
 
 It does not serve `/.well-known/atproto-did`. That read-only host resolution now belongs to `divine-router`, which reads the public state published by `divine-name-server`.
 
-The ATProto protocol split is:
+The login and ATProto protocol split is:
 
 - `username.divine.video`
   Public handle host and user-facing profile surface.

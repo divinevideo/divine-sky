@@ -2,7 +2,14 @@
 
 ## Purpose
 
-Use this runbook to validate the handle-first login contract for a Divine ATProto account before treating a deployment as production-ready.
+Use this runbook to validate the handle-first login contract and the login/entryway/PDS split for a Divine ATProto account before treating a deployment as production-ready.
+
+## Split Contract
+
+- `username.divine.video` is the public handle host.
+- `login.divine.video` is the human console only.
+- `entryway.divine.video` is the ATProto Authorization Server.
+- `pds.divine.video` is the production PDS host that belongs in user DID documents.
 
 The required split is:
 
