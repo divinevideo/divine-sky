@@ -97,7 +97,15 @@ pub enum QueueDecision {
         target_nostr_event_id: String,
         tombstone_job: PublishJobEnvelope,
     },
-    Skip { reason: String },
+    Skip {
+        reason: String,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DedupeMode {
+    QueueAware,
+    PublishedOnly,
 }
 
 // ---------------------------------------------------------------------------
@@ -355,7 +363,10 @@ fn parse_rkey_from_at_uri(at_uri: &str) -> Result<String> {
         .context("published AT-URI is missing an rkey segment")
 }
 
-fn build_publish_job_envelope(event: &NostrEvent, nostr_event_id: String) -> Result<PublishJobEnvelope> {
+fn build_publish_job_envelope(
+    event: &NostrEvent,
+    nostr_event_id: String,
+) -> Result<PublishJobEnvelope> {
     Ok(PublishJobEnvelope {
         nostr_event_id,
         nostr_pubkey: event.pubkey.clone(),
@@ -484,12 +495,16 @@ where
     pub async fn execute_publish_job(&self, job: &PublishJobEnvelope) -> Result<ProcessResult> {
         let event: NostrEvent = serde_json::from_value(job.event_payload.clone())
             .context("failed to deserialize queued event payload")?;
-        self.process_event_inner(&event).await
+        self.process_event_inner(&event, DedupeMode::PublishedOnly)
+            .await
     }
 
     /// Process a single Nostr event through the full bridge pipeline.
     pub async fn process_event(&self, event: &NostrEvent) -> ProcessResult {
-        match self.process_event_inner(event).await {
+        match self
+            .process_event_inner(event, DedupeMode::QueueAware)
+            .await
+        {
             Ok(result) => result,
             Err(e) => ProcessResult::Error {
                 message: format!("{e:#}"),
@@ -497,7 +512,11 @@ where
         }
     }
 
-    async fn process_event_inner(&self, event: &NostrEvent) -> Result<ProcessResult> {
+    async fn process_event_inner(
+        &self,
+        event: &NostrEvent,
+        dedupe_mode: DedupeMode,
+    ) -> Result<ProcessResult> {
         // 1. Verify Nostr signature
         match verify_nostr_event(event) {
             Ok(true) => {}
@@ -540,12 +559,20 @@ where
         }
 
         // 4. Check idempotency
-        if self
-            .record_store
-            .is_event_processed(&event.id)
-            .await
-            .context("failed to check idempotency")?
-        {
+        let already_processed = match dedupe_mode {
+            DedupeMode::QueueAware => self
+                .record_store
+                .is_event_processed(&event.id)
+                .await
+                .context("failed to check idempotency")?,
+            DedupeMode::PublishedOnly => self
+                .record_store
+                .get_mapping_by_nostr_id(&event.id)
+                .await
+                .context("failed to look up record mapping")?
+                .is_some(),
+        };
+        if already_processed {
             return Ok(ProcessResult::Skipped {
                 reason: "event already processed".to_string(),
             });

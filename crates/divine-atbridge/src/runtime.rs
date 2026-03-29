@@ -6,14 +6,16 @@ use chrono::{DateTime, Utc};
 use diesel::Connection;
 use diesel::PgConnection;
 use divine_bridge_db::models::{
-    AccountLinkLifecycleRow, NewAssetManifestEntry, NewRecordMapping, UpsertIngestOffset,
+    AccountLinkLifecycleRow, NewAssetManifestEntry, NewPublishJob, NewRecordMapping, PublishJob,
+    UpsertIngestOffset,
 };
 use divine_bridge_db::{
+    cancel_publish_job, claim_next_backfill_job, claim_next_live_job, enqueue_publish_job,
     get_account_link_lifecycle, get_ingest_offset, get_publish_job, get_record_mapping,
-    insert_asset, insert_record_mapping,
+    insert_asset, insert_record_mapping, mark_publish_job_completed, mark_publish_job_failed,
     update_record_mapping_status as update_record_mapping_status_query, upsert_ingest_offset,
 };
-use divine_bridge_types::RecordStatus;
+use divine_bridge_types::{NostrEvent, PublishJobSource, PublishState, RecordStatus};
 
 use crate::backfill_planner::{BackfillPlanner, BackfillRelayConnector};
 use crate::config::BridgeConfig;
@@ -23,14 +25,30 @@ use crate::nostr_consumer::{
     parse_relay_message, NostrConsumer, RelayConnection, RelayMessage, WebSocketRelayConnection,
 };
 use crate::pipeline::{
-    AccountLink, AccountStore, AssetManifestRecord, BridgePipeline, HttpBlobFetcher, RecordMapping,
-    RecordStore,
+    AccountLink, AccountStore, AssetManifestRecord, BridgePipeline, HttpBlobFetcher,
+    PublishJobEnvelope, QueueDecision, RecordMapping, RecordStore,
 };
 use crate::publisher::PdsClient;
 use crate::video_service::VideoServiceUploader;
 use crate::runtime_filter;
 
 pub type SharedConnection = Arc<Mutex<PgConnection>>;
+
+const DEFAULT_PUBLISH_JOB_LEASE_SECS: i64 = 120;
+const DEFAULT_LIVE_WORKER_INTERVAL_MILLIS: u64 = 250;
+const DEFAULT_BACKFILL_WORKER_INTERVAL_MILLIS: u64 = 1_000;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WorkerRunResult {
+    Idle,
+    Completed {
+        nostr_event_id: String,
+    },
+    Failed {
+        nostr_event_id: String,
+        error: String,
+    },
+}
 
 #[derive(Clone)]
 pub struct DbAccountStore {
@@ -187,6 +205,137 @@ fn persist_relay_cursor(
     Ok(())
 }
 
+fn event_timestamp(created_at: i64) -> Result<DateTime<Utc>> {
+    DateTime::<Utc>::from_timestamp(created_at, 0).context("relay event timestamp is out of range")
+}
+
+fn new_publish_job<'a>(
+    envelope: &'a PublishJobEnvelope,
+    source: PublishJobSource,
+) -> Result<NewPublishJob<'a>> {
+    Ok(NewPublishJob {
+        nostr_event_id: &envelope.nostr_event_id,
+        nostr_pubkey: &envelope.nostr_pubkey,
+        event_created_at: event_timestamp(envelope.event_created_at)?,
+        event_payload: envelope.event_payload.clone(),
+        job_source: source.as_str(),
+        state: PublishState::Pending.as_str(),
+    })
+}
+
+fn delete_execution_envelope(tombstone_job: &PublishJobEnvelope) -> Result<PublishJobEnvelope> {
+    let event: NostrEvent = serde_json::from_value(tombstone_job.event_payload.clone())
+        .context("failed to deserialize delete event payload")?;
+    Ok(PublishJobEnvelope {
+        nostr_event_id: event.id.clone(),
+        nostr_pubkey: event.pubkey,
+        event_created_at: event.created_at,
+        event_payload: tombstone_job.event_payload.clone(),
+    })
+}
+
+fn publish_job_envelope(job: &PublishJob) -> PublishJobEnvelope {
+    PublishJobEnvelope {
+        nostr_event_id: job.nostr_event_id.clone(),
+        nostr_pubkey: job.nostr_pubkey.clone(),
+        event_created_at: job.event_created_at.timestamp(),
+        event_payload: job.event_payload.clone(),
+    }
+}
+
+pub async fn enqueue_live_event<A, R, F, U, P>(
+    connection: &SharedConnection,
+    relay_source_name: &str,
+    pipeline: &BridgePipeline<A, R, F, U, P>,
+    event: &NostrEvent,
+) -> Result<()>
+where
+    A: AccountStore,
+    R: RecordStore,
+    F: crate::pipeline::BlobFetcher,
+    U: crate::pipeline::BlobUploader,
+    P: crate::pipeline::PdsPublisher,
+{
+    let decision = pipeline.prepare_publish_job(event).await?;
+
+    {
+        let mut conn = connection.lock().unwrap();
+        match decision {
+            QueueDecision::Enqueue(job) => {
+                let queued = new_publish_job(&job, PublishJobSource::Live)?;
+                enqueue_publish_job(&mut conn, &queued)?;
+            }
+            QueueDecision::Cancel {
+                target_nostr_event_id,
+                tombstone_job,
+            } => {
+                let tombstone = new_publish_job(&tombstone_job, PublishJobSource::Live)?;
+                cancel_publish_job(&mut conn, &tombstone, Some("live delete replay"))?;
+
+                if get_record_mapping(&mut conn, &target_nostr_event_id)?.is_some() {
+                    let delete_job_envelope = delete_execution_envelope(&tombstone_job)?;
+                    let delete_job = new_publish_job(&delete_job_envelope, PublishJobSource::Live)?;
+                    enqueue_publish_job(&mut conn, &delete_job)?;
+                }
+            }
+            QueueDecision::Skip { .. } => {}
+        }
+    }
+
+    persist_relay_cursor(connection, relay_source_name, &event.id, event.created_at)
+}
+
+pub async fn run_publish_worker_once<A, R, F, U, P>(
+    connection: &SharedConnection,
+    pipeline: &BridgePipeline<A, R, F, U, P>,
+    lane: PublishJobSource,
+    worker_name: &str,
+) -> Result<WorkerRunResult>
+where
+    A: AccountStore,
+    R: RecordStore,
+    F: crate::pipeline::BlobFetcher,
+    U: crate::pipeline::BlobUploader,
+    P: crate::pipeline::PdsPublisher,
+{
+    let lease_expires_at = Utc::now() + chrono::Duration::seconds(DEFAULT_PUBLISH_JOB_LEASE_SECS);
+    let job = {
+        let mut conn = connection.lock().unwrap();
+        match lane {
+            PublishJobSource::Live => {
+                claim_next_live_job(&mut conn, worker_name, lease_expires_at)?
+            }
+            PublishJobSource::Backfill => {
+                claim_next_backfill_job(&mut conn, worker_name, lease_expires_at)?
+            }
+        }
+    };
+
+    let Some(job) = job else {
+        return Ok(WorkerRunResult::Idle);
+    };
+
+    let envelope = publish_job_envelope(&job);
+    match pipeline.execute_publish_job(&envelope).await {
+        Ok(_) => {
+            let mut conn = connection.lock().unwrap();
+            mark_publish_job_completed(&mut conn, &job.nostr_event_id)?;
+            Ok(WorkerRunResult::Completed {
+                nostr_event_id: job.nostr_event_id,
+            })
+        }
+        Err(error) => {
+            let error_message = format!("{error:#}");
+            let mut conn = connection.lock().unwrap();
+            mark_publish_job_failed(&mut conn, &job.nostr_event_id, &error_message)?;
+            Ok(WorkerRunResult::Failed {
+                nostr_event_id: job.nostr_event_id,
+                error: error_message,
+            })
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RelayReadOutcome {
     Message,
@@ -265,6 +414,54 @@ where
     }
 }
 
+async fn publish_worker_loop<A, R, F, U, P>(
+    lane: PublishJobSource,
+    connection: SharedConnection,
+    pipeline: Arc<BridgePipeline<A, R, F, U, P>>,
+    health: RuntimeHealthState,
+) where
+    A: AccountStore + 'static,
+    R: RecordStore + 'static,
+    F: crate::pipeline::BlobFetcher + 'static,
+    U: crate::pipeline::BlobUploader + 'static,
+    P: crate::pipeline::PdsPublisher + 'static,
+{
+    let interval_millis = match lane {
+        PublishJobSource::Live => DEFAULT_LIVE_WORKER_INTERVAL_MILLIS,
+        PublishJobSource::Backfill => DEFAULT_BACKFILL_WORKER_INTERVAL_MILLIS,
+    };
+    let worker_name = format!("{}-worker-{}", lane.as_str(), std::process::id());
+    let mut ticker = tokio::time::interval(Duration::from_millis(interval_millis));
+
+    loop {
+        ticker.tick().await;
+        match run_publish_worker_once(&connection, pipeline.as_ref(), lane, &worker_name).await {
+            Ok(WorkerRunResult::Idle) | Ok(WorkerRunResult::Completed { .. }) => {}
+            Ok(WorkerRunResult::Failed {
+                nostr_event_id,
+                error,
+            }) => {
+                tracing::warn!(
+                    lane = %lane,
+                    nostr_event_id = %nostr_event_id,
+                    error = %error,
+                    "publish worker job failed"
+                );
+                health.record_processing_failure(error);
+            }
+            Err(error) => {
+                tracing::warn!(
+                    lane = %lane,
+                    error = %error,
+                    "publish worker iteration failed"
+                );
+                health.record_runtime_failure(error.to_string());
+                tokio::time::sleep(health.next_retry_delay()).await;
+            }
+        }
+    }
+}
+
 pub async fn run_service(config: &BridgeConfig) -> Result<()> {
     run_service_with_state(config, RuntimeHealthState::new()).await
 }
@@ -310,7 +507,7 @@ pub async fn run_service_with_state(
         RuntimeBackfillRelayConnector,
         DEFAULT_BACKFILL_BATCH_SIZE,
     );
-
+    let planner_health = health.clone();
     tokio::spawn(async move {
         let mut ticker =
             tokio::time::interval(Duration::from_secs(DEFAULT_BACKFILL_PLANNER_INTERVAL_SECS));
@@ -318,9 +515,22 @@ pub async fn run_service_with_state(
             ticker.tick().await;
             if let Err(error) = backfill_planner.run_once().await {
                 tracing::warn!(error = %error, "backfill planner run failed");
+                planner_health.record_runtime_failure(error.to_string());
             }
         }
     });
+    tokio::spawn(publish_worker_loop(
+        PublishJobSource::Live,
+        connection.clone(),
+        pipeline.clone(),
+        health.clone(),
+    ));
+    tokio::spawn(publish_worker_loop(
+        PublishJobSource::Backfill,
+        connection.clone(),
+        pipeline.clone(),
+        health.clone(),
+    ));
 
     loop {
         let mut consumer = NostrConsumer::new(config.relay_url.clone());
@@ -378,35 +588,27 @@ pub async fn run_service_with_state(
 
             match parse_relay_message(&raw) {
                 Ok(RelayMessage::Event { event, .. }) => {
-                    let event_id = event.id.clone();
                     let created_at = event.created_at;
-                    let result = pipeline.process_event(&event).await;
-                    match result {
-                        crate::pipeline::ProcessResult::Error { message } => {
-                            tracing::error!(
-                                error = %message,
-                                event_id = %event_id,
-                                "bridge pipeline rejected relay event"
-                            );
-                            health.record_processing_failure(message);
-                        }
-                        _ => {
-                            if let Err(error) = persist_relay_cursor(
-                                &connection,
-                                &config.relay_source_name,
-                                &event_id,
-                                created_at,
-                            ) {
-                                tracing::error!(
-                                    error = %error,
-                                    event_id = %event_id,
-                                    "failed to persist relay cursor"
-                                );
-                                health.record_runtime_failure(error.to_string());
-                                continue;
-                            }
+                    let event_id = event.id.clone();
+                    match enqueue_live_event(
+                        &connection,
+                        &config.relay_source_name,
+                        pipeline.as_ref(),
+                        &event,
+                    )
+                    .await
+                    {
+                        Ok(()) => {
                             consumer.last_seen_timestamp = Some(created_at);
                             health.record_success();
+                        }
+                        Err(error) => {
+                            tracing::error!(
+                                error = %error,
+                                event_id = %event_id,
+                                "bridge scheduler rejected relay event"
+                            );
+                            health.record_runtime_failure(error.to_string());
                         }
                     }
                 }
