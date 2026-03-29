@@ -109,10 +109,11 @@ The relay ingest path should:
 - persist or upsert a `publish_jobs` row
 - advance the relay cursor only after enqueue succeeds
 
-The publish worker should:
+The publish workers should:
 
 - claim jobs using a lease
-- prefer `live` jobs before `backfill` jobs
+- run one live lane that only claims `live` jobs
+- run one backlog lane that only claims `backfill` jobs
 - process `backfill` jobs oldest first by `event_created_at`
 - run the heavy pipeline work that fetches blobs, uploads assets, writes PDS records, and stores mappings
 
@@ -124,18 +125,21 @@ The planner scans `account_links` for rows that are both:
 - `provisioning_state = 'ready'`
 - `publish_backfill_state IN ('not_started', 'failed')`
 
-For each eligible user, it opens an author-filtered relay subscription for historical publish kinds, reads until `EOSE`, and enqueues every eligible post as a `backfill` job. When the historical scan completes, it marks the account backlog state complete.
+For each eligible user, it opens an author-filtered relay subscription for historical publish and delete kinds, reads until `EOSE`, sorts the stored history by `(created_at, id)`, and then replays that ordered history into the scheduler:
+
+- publish events become `backfill` jobs
+- delete events cancel queued historical jobs that have not published yet
+
+When the historical scan completes, it marks the account backlog state complete.
 
 Repeated planner runs are safe because enqueue is idempotent on `nostr_event_id`.
-
-The planner does not need the relay to return events in chronological order. The worker is responsible for oldest-first publish order by claiming `backfill` jobs on `event_created_at ASC`.
 
 ## Ordering Semantics
 
 The scheduler guarantees:
 
 - `backfill` jobs for a user are published oldest first by source event timestamp
-- `live` jobs are always eligible to jump ahead of queued `backfill` jobs
+- `live` jobs publish through a separate live lane and may overtake queued `backfill` jobs
 
 The scheduler does not guarantee a perfectly chronological merged timeline between backlog and live traffic. A live post created after migration can appear on ATProto before an older backlog post that is still draining. That trade-off is intentional.
 
@@ -145,6 +149,7 @@ Delete handling has two branches:
 
 - if the target event already has a `record_mapping`, use the existing ATProto delete path
 - if the target event only has a queued publish job, mark that job `skipped` or canceled so the create never publishes later
+- if the delete is observed during historical backlog replay, apply the same cancellation rule before the backlog worker ever sees that create
 
 The system should not emit an ATProto delete for a post that never created an ATProto record.
 

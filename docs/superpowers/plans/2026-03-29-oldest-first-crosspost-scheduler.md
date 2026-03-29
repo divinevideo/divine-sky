@@ -4,7 +4,7 @@
 
 **Goal:** Turn ATProto crossposting into a durable scheduler that enqueues live relay events, seeds migrated-user backlog jobs oldest first, and lets new live posts publish immediately ahead of backlog work.
 
-**Architecture:** Expand `publish_jobs` into the real scheduler, add durable backlog state to `account_links`, split relay ingest from publish execution, add a backlog planner that seeds historical jobs per eligible account, and run a worker loop that prioritizes `live` jobs before oldest-first `backfill` jobs.
+**Architecture:** Expand `publish_jobs` into the real scheduler, add durable backlog state to `account_links`, split relay ingest from publish execution, add a backlog planner that replays historical publish and delete events in chronological order per eligible account, and run separate live and backlog worker lanes so new posts publish immediately while backlog still drains oldest first.
 
 **Tech Stack:** Rust, Tokio, Axum, Diesel, PostgreSQL, Nostr relay WebSocket
 
@@ -109,8 +109,8 @@ git commit -m "feat: add publish scheduler schema"
 Cover:
 
 - enqueue is idempotent on `nostr_event_id`
-- live jobs claim ahead of backfill jobs
-- backfill jobs claim oldest first by `event_created_at`
+- live-lane claims only `live` jobs
+- backlog-lane claims only `backfill` jobs oldest first by `event_created_at`
 - expired leases become claimable again
 - eligible backlog accounts load in account creation order
 
@@ -124,7 +124,8 @@ Implement query functions such as:
 
 ```rust
 pub fn enqueue_publish_job(...)
-pub fn claim_next_publish_job(...)
+pub fn claim_next_live_job(...)
+pub fn claim_next_backfill_job(...)
 pub fn mark_publish_job_completed(...)
 pub fn mark_publish_job_failed(...)
 pub fn cancel_publish_job(...)
@@ -135,10 +136,10 @@ pub fn mark_account_backfill_completed(...)
 pub fn mark_account_backfill_failed(...)
 ```
 
-Ordering rule inside `claim_next_publish_job`:
+Ordering rule inside `claim_next_backfill_job`:
 
-1. claim `live` jobs first
-2. otherwise claim `backfill` jobs by `event_created_at ASC`
+1. claim only `backfill` jobs
+2. order them by `event_created_at ASC`
 
 Do not rely on `record_mappings` alone for dedupe. Queue-aware code must treat an already-enqueued `publish_jobs` row as sufficient evidence that a source event is already in flight.
 
@@ -176,6 +177,7 @@ Add tests that prove:
 - live ingest can classify an event as enqueueable without publishing inline
 - worker execution still performs the existing publish path
 - delete events can cancel a queued publish before any `record_mapping` exists
+- historical delete replay can cancel an older queued backlog create before the worker publishes it
 
 Run: `cargo test -p divine-atbridge publish_path_integration -- --nocapture`
 
@@ -218,6 +220,7 @@ git commit -m "refactor: split enqueue and publish execution"
 
 **Files:**
 - Create: `crates/divine-atbridge/src/backfill_planner.rs`
+- Modify: `crates/divine-atbridge/src/lib.rs`
 - Modify: `crates/divine-atbridge/src/nostr_consumer.rs`
 - Modify: `crates/divine-atbridge/src/runtime.rs`
 - Modify: `crates/divine-atbridge/src/config.rs`
@@ -228,7 +231,9 @@ git commit -m "refactor: split enqueue and publish execution"
 Add tests that expect:
 
 - an eligible ready+enabled account is discovered for backlog seeding
-- historical events for that author are enqueued as `backfill`
+- historical publish and delete events for that author are loaded and replayed in chronological order
+- historical publish events are enqueued as `backfill`
+- historical delete events cancel queued backlog work that has not published yet
 - the planner marks backlog complete on `EOSE`
 - repeated planner runs do not duplicate jobs
 
@@ -245,7 +250,7 @@ pub fn author_history_filter(author: String) -> NostrFilter
 pub async fn collect_history_until_eose(...)
 ```
 
-This flow should read stored historical events for a single author and stop once `EOSE` arrives.
+This flow should read stored historical events for a single author, include publish and delete kinds, stop once `EOSE` arrives, and hand the planner a set it can sort by `(created_at, id)` before enqueue/cancel decisions.
 
 - [ ] **Step 3: Implement the backlog planner**
 
@@ -254,7 +259,9 @@ In `crates/divine-atbridge/src/backfill_planner.rs`, implement:
 - load eligible accounts from the DB
 - mark backlog started
 - scan author history
+- sort the historical stream chronologically
 - enqueue eligible historical publish events as `backfill`
+- apply historical delete events by canceling not-yet-published queued jobs
 - mark backlog complete or failed
 
 - [ ] **Step 4: Wire planner configuration and runtime invocation**
@@ -268,7 +275,7 @@ Expected: PASS
 - [ ] **Step 5: Commit**
 
 ```bash
-git add crates/divine-atbridge/src/backfill_planner.rs crates/divine-atbridge/src/nostr_consumer.rs crates/divine-atbridge/src/runtime.rs crates/divine-atbridge/src/config.rs crates/divine-atbridge/tests/backfill_planner.rs
+git add crates/divine-atbridge/src/backfill_planner.rs crates/divine-atbridge/src/lib.rs crates/divine-atbridge/src/nostr_consumer.rs crates/divine-atbridge/src/runtime.rs crates/divine-atbridge/src/config.rs crates/divine-atbridge/tests/backfill_planner.rs
 git commit -m "feat: add oldest-first backlog planner"
 ```
 
@@ -288,7 +295,8 @@ git commit -m "feat: add oldest-first backlog planner"
 Add tests that prove:
 
 - the relay cursor advances after enqueue persistence, not after publish completion
-- live jobs publish ahead of queued backfill jobs
+- live jobs publish through the live lane without waiting on backlog
+- backlog jobs still make progress through the backlog lane
 - worker lease recovery retries abandoned jobs
 - end-to-end runtime still publishes and deletes successfully
 
@@ -303,11 +311,12 @@ Expected: FAIL because runtime still publishes inline.
 
 - [ ] **Step 2: Add a publish worker loop**
 
-In `crates/divine-atbridge/src/runtime.rs`, run three responsibilities:
+In `crates/divine-atbridge/src/runtime.rs`, run four responsibilities:
 
 - live relay ingest loop that only enqueues
 - backlog planner loop
-- publish worker loop that claims jobs and calls `execute_publish_job`
+- live worker loop that claims `live` jobs and calls `execute_publish_job`
+- backlog worker loop that claims `backfill` jobs oldest first and calls `execute_publish_job`
 
 Cursor rule:
 
