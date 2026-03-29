@@ -1,8 +1,9 @@
-use std::sync::Arc;
-
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
+use diesel::{Connection, PgConnection};
+use divine_bridge_db::{list_latest_appview_posts, list_trending_appview_posts};
 use serde::Serialize;
+use std::sync::Arc;
 
 const FEED_DID: &str = "did:plc:divine.feed";
 const LATEST_URI: &str = "at://did:plc:divine.feed/app.bsky.feed.generator/latest";
@@ -43,23 +44,38 @@ pub trait FeedStore: Send + Sync {
 
 pub type DynFeedStore = Arc<dyn FeedStore>;
 
-#[derive(Clone, Debug, Default)]
-pub struct DbFeedStore;
+pub struct DbFeedStore {
+    database_url: String,
+}
 
 impl DbFeedStore {
     pub fn from_env() -> Self {
-        Self
+        Self {
+            database_url: std::env::var("DATABASE_URL").expect("DATABASE_URL is required"),
+        }
+    }
+
+    fn connect(&self) -> Result<PgConnection> {
+        Ok(PgConnection::establish(&self.database_url)?)
     }
 }
 
 #[async_trait]
 impl FeedStore for DbFeedStore {
     async fn latest_posts(&self, limit: usize) -> Result<Vec<String>> {
-        Ok(latest_posts().into_iter().take(limit).collect())
+        let mut conn = self.connect()?;
+        Ok(list_latest_appview_posts(&mut conn, limit as i64)?
+            .into_iter()
+            .map(|post| post.uri)
+            .collect())
     }
 
     async fn trending_posts(&self, limit: usize) -> Result<Vec<String>> {
-        Ok(trending_posts().into_iter().take(limit).collect())
+        let mut conn = self.connect()?;
+        Ok(list_trending_appview_posts(&mut conn, limit as i64)?
+            .into_iter()
+            .map(|post| post.uri)
+            .collect())
     }
 }
 
@@ -96,19 +112,4 @@ pub async fn feed_skeleton(
         feed: items.into_iter().map(|post| FeedItem { post }).collect(),
         cursor: None,
     })
-}
-
-/// Returns the current latest feed URIs used by the local feed generator.
-fn latest_posts() -> Vec<String> {
-    vec![
-        "at://did:plc:ebt5msdpfavoklkap6gl54bm/app.bsky.feed.post/3mhjk5tbom655".to_string(),
-        "at://did:plc:ebt5msdpfavoklkap6gl54bm/app.bsky.feed.post/3mhjk3ct6xja5".to_string(),
-        "at://did:plc:w2bvwfebcrmc2pznxvz3lfdi/app.bsky.feed.post/3mhjn3iejoaaa".to_string(),
-        "at://did:plc:w2bvwfebcrmc2pznxvz3lfdi/app.bsky.feed.post/3mhjmzie5xmtk".to_string(),
-    ]
-}
-
-fn trending_posts() -> Vec<String> {
-    // Same posts for now; trending and latest share the same backing list.
-    latest_posts()
 }
