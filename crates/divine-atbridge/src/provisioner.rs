@@ -101,6 +101,10 @@ pub struct PlcService {
 #[async_trait]
 pub trait KeyStore: Send + Sync {
     async fn generate_keypair(&self, purpose: &str) -> Result<(String, KeyPair)>;
+
+    async fn load_keypair(&self, _key_ref: &str) -> Result<Option<KeyPair>> {
+        Ok(None)
+    }
 }
 
 /// Interacts with the PLC directory to create DIDs.

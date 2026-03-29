@@ -87,6 +87,31 @@ pub struct AccountLinkLifecycleRow {
 }
 
 // ---------------------------------------------------------------------------
+// provisioning_keys
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Queryable, Selectable, Identifiable)]
+#[diesel(table_name = provisioning_keys)]
+#[diesel(primary_key(key_ref))]
+pub struct ProvisioningKey {
+    pub key_ref: String,
+    pub key_purpose: String,
+    pub public_key_hex: String,
+    pub encrypted_secret: Vec<u8>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Insertable)]
+#[diesel(table_name = provisioning_keys)]
+pub struct NewProvisioningKey<'a> {
+    pub key_ref: &'a str,
+    pub key_purpose: &'a str,
+    pub public_key_hex: &'a str,
+    pub encrypted_secret: &'a [u8],
+}
+
+// ---------------------------------------------------------------------------
 // ingest_offsets
 // ---------------------------------------------------------------------------
 

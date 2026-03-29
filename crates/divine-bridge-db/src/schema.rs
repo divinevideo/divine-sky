@@ -17,6 +17,17 @@ diesel::table! {
 }
 
 diesel::table! {
+    provisioning_keys (key_ref) {
+        key_ref -> Text,
+        key_purpose -> Text,
+        public_key_hex -> Text,
+        encrypted_secret -> Binary,
+        created_at -> Timestamptz,
+        updated_at -> Timestamptz,
+    }
+}
+
+diesel::table! {
     ingest_offsets (source_name) {
         source_name -> Text,
         last_event_id -> Text,
@@ -184,6 +195,7 @@ diesel::joinable!(appview_posts -> appview_profiles (did));
 
 diesel::allow_tables_to_appear_in_same_query!(
     account_links,
+    provisioning_keys,
     ingest_offsets,
     asset_manifest,
     record_mappings,

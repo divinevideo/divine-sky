@@ -211,6 +211,33 @@ pub fn disable_account_link(
 }
 
 // ---------------------------------------------------------------------------
+// provisioning_keys queries
+// ---------------------------------------------------------------------------
+
+/// Look up a persisted provisioning key by its stable reference.
+pub fn get_provisioning_key(
+    conn: &mut PgConnection,
+    key_ref: &str,
+) -> Result<Option<ProvisioningKey>> {
+    let result = provisioning_keys::table
+        .find(key_ref)
+        .first::<ProvisioningKey>(conn)
+        .optional()?;
+    Ok(result)
+}
+
+/// Persist a new provisioning key envelope.
+pub fn insert_provisioning_key(
+    conn: &mut PgConnection,
+    key: &NewProvisioningKey<'_>,
+) -> Result<ProvisioningKey> {
+    let result = diesel::insert_into(provisioning_keys::table)
+        .values(key)
+        .get_result::<ProvisioningKey>(conn)?;
+    Ok(result)
+}
+
+// ---------------------------------------------------------------------------
 // ingest_offsets queries
 // ---------------------------------------------------------------------------
 
