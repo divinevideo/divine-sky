@@ -31,6 +31,8 @@ pub struct BridgeConfig {
     pub handle_domain: String,
     /// Shared bearer token for the internal provisioning API (ATPROTO_PROVISIONING_TOKEN).
     pub provisioning_bearer_token: String,
+    /// 32-byte hex key used to encrypt persisted provisioning secrets.
+    pub provisioning_key_encryption_key_hex: String,
 }
 
 impl BridgeConfig {
@@ -53,6 +55,26 @@ impl BridgeConfig {
             handle_domain: env::var("HANDLE_DOMAIN").context("HANDLE_DOMAIN must be set")?,
             provisioning_bearer_token: env::var("ATPROTO_PROVISIONING_TOKEN")
                 .context("ATPROTO_PROVISIONING_TOKEN must be set")?,
+            provisioning_key_encryption_key_hex: env::var(
+                "ATPROTO_PROVISIONING_KEY_ENCRYPTION_KEY_HEX",
+            )
+            .context("ATPROTO_PROVISIONING_KEY_ENCRYPTION_KEY_HEX must be set")?,
+        })
+    }
+
+    pub fn provisioning_key_encryption_key(&self) -> Result<[u8; 32]> {
+        let raw = hex::decode(
+            self.provisioning_key_encryption_key_hex
+                .trim()
+                .strip_prefix("0x")
+                .unwrap_or(self.provisioning_key_encryption_key_hex.trim()),
+        )
+        .context("ATPROTO_PROVISIONING_KEY_ENCRYPTION_KEY_HEX must be valid hex")?;
+
+        raw.try_into().map_err(|_| {
+            anyhow::anyhow!(
+                "ATPROTO_PROVISIONING_KEY_ENCRYPTION_KEY_HEX must decode to exactly 32 bytes"
+            )
         })
     }
 }
@@ -79,8 +101,63 @@ mod tests {
             plc_directory_url: "https://plc.directory".into(),
             handle_domain: "divine.video".into(),
             provisioning_bearer_token: "test-token".into(),
+            provisioning_key_encryption_key_hex:
+                "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff".into(),
         };
         assert_eq!(config.relay_url, "wss://relay.example.com");
         assert_eq!(config.s3_bucket, "test-bucket");
+    }
+
+    #[test]
+    fn provisioning_key_encryption_key_decodes_hex() {
+        let config = BridgeConfig {
+            relay_url: "wss://relay.example.com".into(),
+            pds_url: "https://pds.staging.dvines.org".into(),
+            pds_auth_token: "test-token".into(),
+            blossom_url: "https://blossom.example.com".into(),
+            database_url: "postgres://localhost/test".into(),
+            s3_endpoint: "https://s3.example.com".into(),
+            s3_bucket: "test-bucket".into(),
+            relay_source_name: "nostr-relay".into(),
+            health_bind_addr: "0.0.0.0:8080".into(),
+            plc_directory_url: "https://plc.directory".into(),
+            handle_domain: "divine.video".into(),
+            provisioning_bearer_token: "test-token".into(),
+            provisioning_key_encryption_key_hex:
+                "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff".into(),
+        };
+
+        assert_eq!(
+            config.provisioning_key_encryption_key().unwrap(),
+            [
+                0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb,
+                0xcc, 0xdd, 0xee, 0xff, 0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77,
+                0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff,
+            ]
+        );
+    }
+
+    #[test]
+    fn provisioning_key_encryption_key_rejects_wrong_length() {
+        let config = BridgeConfig {
+            relay_url: "wss://relay.example.com".into(),
+            pds_url: "https://pds.staging.dvines.org".into(),
+            pds_auth_token: "test-token".into(),
+            blossom_url: "https://blossom.example.com".into(),
+            database_url: "postgres://localhost/test".into(),
+            s3_endpoint: "https://s3.example.com".into(),
+            s3_bucket: "test-bucket".into(),
+            relay_source_name: "nostr-relay".into(),
+            health_bind_addr: "0.0.0.0:8080".into(),
+            plc_directory_url: "https://plc.directory".into(),
+            handle_domain: "divine.video".into(),
+            provisioning_bearer_token: "test-token".into(),
+            provisioning_key_encryption_key_hex: "deadbeef".into(),
+        };
+
+        assert!(
+            config.provisioning_key_encryption_key().is_err(),
+            "short keys must be rejected"
+        );
     }
 }

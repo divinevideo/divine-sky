@@ -1,17 +1,25 @@
 use anyhow::{bail, Context, Result};
+use aes_gcm::aead::Aead;
+use aes_gcm::{Aes256Gcm, KeyInit, Nonce};
 use async_trait::async_trait;
 use diesel::Connection;
 use diesel::PgConnection;
 use divine_bridge_db::{
     get_account_link_lifecycle, get_account_link_lifecycle_by_handle, mark_account_link_failed,
-    mark_account_link_ready, upsert_pending_account_link,
+    mark_account_link_ready, upsert_pending_account_link, get_provisioning_key,
+    insert_provisioning_key,
 };
+use divine_bridge_db::models::NewProvisioningKey;
+use secp256k1::rand::RngCore;
 use secp256k1::rand::rngs::OsRng;
-use secp256k1::Secp256k1;
+use secp256k1::{PublicKey, Secp256k1, SecretKey};
 
 use crate::provisioner::{
     AccountLinkRecord, AccountLinkStore, KeyPair, KeyStore, PendingAccountLink, ProvisioningState,
 };
+
+const PROVISIONING_KEY_ENVELOPE_VERSION: u8 = 1;
+const AES_GCM_NONCE_LEN: usize = 12;
 
 #[derive(Clone)]
 pub struct DbAccountLinkStore {
@@ -29,6 +37,109 @@ impl DbAccountLinkStore {
 }
 
 pub struct GeneratedKeyStore;
+
+#[derive(Clone)]
+pub struct DbProvisioningKeyStore {
+    database_url: String,
+    encryption_key: [u8; 32],
+}
+
+impl DbProvisioningKeyStore {
+    pub fn new(database_url: String, encryption_key: [u8; 32]) -> Self {
+        Self {
+            database_url,
+            encryption_key,
+        }
+    }
+
+    fn connect(&self) -> Result<PgConnection> {
+        PgConnection::establish(&self.database_url).context("failed to connect to PostgreSQL")
+    }
+
+    fn cipher(&self) -> Result<Aes256Gcm> {
+        Aes256Gcm::new_from_slice(&self.encryption_key)
+            .context("failed to initialise provisioning key cipher")
+    }
+
+    fn provisioning_aad(key_ref: &str, purpose: &str) -> Vec<u8> {
+        format!("{key_ref}:{purpose}").into_bytes()
+    }
+
+    fn encrypt_secret(
+        &self,
+        key_ref: &str,
+        purpose: &str,
+        secret_key: &SecretKey,
+    ) -> Result<Vec<u8>> {
+        let cipher = self.cipher()?;
+        let mut nonce = [0u8; AES_GCM_NONCE_LEN];
+        OsRng.fill_bytes(&mut nonce);
+
+        let ciphertext = cipher
+            .encrypt(
+                Nonce::from_slice(&nonce),
+                aes_gcm::aead::Payload {
+                    msg: &secret_key.secret_bytes(),
+                    aad: &Self::provisioning_aad(key_ref, purpose),
+                },
+            )
+            .map_err(|_| anyhow::anyhow!("encrypting provisioning secret"))?;
+
+        let mut envelope = Vec::with_capacity(1 + nonce.len() + ciphertext.len());
+        envelope.push(PROVISIONING_KEY_ENVELOPE_VERSION);
+        envelope.extend_from_slice(&nonce);
+        envelope.extend_from_slice(&ciphertext);
+        Ok(envelope)
+    }
+
+    fn decrypt_secret(&self, key_ref: &str, purpose: &str, envelope: &[u8]) -> Result<SecretKey> {
+        if envelope.len() <= 1 + AES_GCM_NONCE_LEN {
+            bail!("encrypted provisioning secret is truncated");
+        }
+        if envelope[0] != PROVISIONING_KEY_ENVELOPE_VERSION {
+            bail!(
+                "unsupported provisioning secret envelope version: {}",
+                envelope[0]
+            );
+        }
+
+        let nonce = &envelope[1..1 + AES_GCM_NONCE_LEN];
+        let ciphertext = &envelope[1 + AES_GCM_NONCE_LEN..];
+        let decrypted = self
+            .cipher()?
+            .decrypt(
+                Nonce::from_slice(nonce),
+                aes_gcm::aead::Payload {
+                    msg: ciphertext,
+                    aad: &Self::provisioning_aad(key_ref, purpose),
+                },
+            )
+            .map_err(|_| anyhow::anyhow!("decrypting provisioning secret"))?;
+
+        SecretKey::from_slice(&decrypted).context("stored provisioning secret is not a valid key")
+    }
+
+    fn keypair_from_row(
+        &self,
+        key_ref: &str,
+        purpose: &str,
+        public_key_hex: &str,
+        encrypted_secret: &[u8],
+    ) -> Result<KeyPair> {
+        let secret_key = self.decrypt_secret(key_ref, purpose, encrypted_secret)?;
+        let secp = Secp256k1::new();
+        let public_key = PublicKey::from_secret_key(&secp, &secret_key);
+        let derived_hex = hex::encode(public_key.serialize());
+        if derived_hex != public_key_hex {
+            bail!("stored provisioning key public key does not match decrypted secret");
+        }
+
+        Ok(KeyPair {
+            secret_key,
+            public_key,
+        })
+    }
+}
 
 fn map_state(raw: &str) -> Result<ProvisioningState> {
     match raw {
@@ -125,5 +236,50 @@ impl KeyStore for GeneratedKeyStore {
                 public_key,
             },
         ))
+    }
+}
+
+#[async_trait]
+impl KeyStore for DbProvisioningKeyStore {
+    async fn generate_keypair(&self, purpose: &str) -> Result<(String, KeyPair)> {
+        let secp = Secp256k1::new();
+        let mut rng = OsRng;
+        let (secret_key, public_key) = secp.generate_keypair(&mut rng);
+        let public_key_hex = hex::encode(public_key.serialize());
+        let key_ref = format!("{purpose}:{public_key_hex}");
+        let encrypted_secret = self.encrypt_secret(&key_ref, purpose, &secret_key)?;
+
+        let mut connection = self.connect()?;
+        insert_provisioning_key(
+            &mut connection,
+            &NewProvisioningKey {
+                key_ref: &key_ref,
+                key_purpose: purpose,
+                public_key_hex: &public_key_hex,
+                encrypted_secret: &encrypted_secret,
+            },
+        )?;
+
+        Ok((
+            key_ref,
+            KeyPair {
+                secret_key,
+                public_key,
+            },
+        ))
+    }
+
+    async fn load_keypair(&self, key_ref: &str) -> Result<Option<KeyPair>> {
+        let mut connection = self.connect()?;
+        let row = get_provisioning_key(&mut connection, key_ref)?;
+        row.map(|row| {
+            self.keypair_from_row(
+                &row.key_ref,
+                &row.key_purpose,
+                &row.public_key_hex,
+                &row.encrypted_secret,
+            )
+        })
+        .transpose()
     }
 }

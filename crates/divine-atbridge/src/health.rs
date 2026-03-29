@@ -18,7 +18,7 @@ use serde::{Deserialize, Serialize};
 use crate::config::BridgeConfig;
 use crate::pds_accounts::PdsAccountsClient;
 use crate::plc_directory::PlcDirectoryClient;
-use crate::provision_runtime::{DbAccountLinkStore, GeneratedKeyStore};
+use crate::provision_runtime::{DbAccountLinkStore, DbProvisioningKeyStore};
 use crate::provisioner::{
     AccountLinkStore, AccountProvisioner, KeyStore, PdsAccountCreator, PlcClient, ProvisionResult,
 };
@@ -241,20 +241,35 @@ pub fn app_with_runtime_state(runtime: RuntimeHealthState) -> Router {
     })
 }
 
-pub fn app_with_config(config: BridgeConfig) -> Result<Router> {
-    anyhow::ensure!(
-        !config.provisioning_bearer_token.trim().is_empty(),
-        "ATPROTO_PROVISIONING_TOKEN must not be empty"
-    );
-
-    let provisioner = AccountProvisioner {
-        key_store: GeneratedKeyStore,
+fn build_configured_provisioner(
+    config: &BridgeConfig,
+) -> Result<
+    AccountProvisioner<
+        DbProvisioningKeyStore,
+        PlcDirectoryClient,
+        PdsAccountsClient,
+        DbAccountLinkStore,
+    >,
+> {
+    Ok(AccountProvisioner {
+        key_store: DbProvisioningKeyStore::new(
+            config.database_url.clone(),
+            config.provisioning_key_encryption_key()?,
+        ),
         plc_client: PlcDirectoryClient::new(config.plc_directory_url.clone()),
         pds_creator: PdsAccountsClient::new(config.pds_url.clone(), config.pds_auth_token.clone()),
         link_store: DbAccountLinkStore::new(config.database_url.clone()),
         pds_endpoint: config.pds_url.clone(),
         handle_domain: config.handle_domain.clone(),
-    };
+    })
+}
+
+pub fn app_with_config(config: BridgeConfig) -> Result<Router> {
+    anyhow::ensure!(
+        !config.provisioning_bearer_token.trim().is_empty(),
+        "ATPROTO_PROVISIONING_TOKEN must not be empty"
+    );
+    let provisioner = build_configured_provisioner(&config)?;
 
     Ok(app_with_state(InternalApiState {
         runtime: RuntimeHealthState::default(),
@@ -274,17 +289,7 @@ pub async fn spawn(
     let app = app_with_state(InternalApiState {
         runtime,
         expected_bearer: Some(config.provisioning_bearer_token.clone()),
-        provisioner: Some(Arc::new(AccountProvisioner {
-            key_store: GeneratedKeyStore,
-            plc_client: PlcDirectoryClient::new(config.plc_directory_url.clone()),
-            pds_creator: PdsAccountsClient::new(
-                config.pds_url.clone(),
-                config.pds_auth_token.clone(),
-            ),
-            link_store: DbAccountLinkStore::new(config.database_url.clone()),
-            pds_endpoint: config.pds_url.clone(),
-            handle_domain: config.handle_domain.clone(),
-        })),
+        provisioner: Some(Arc::new(build_configured_provisioner(&config)?)),
     });
     let listener = tokio::net::TcpListener::bind(addr)
         .await

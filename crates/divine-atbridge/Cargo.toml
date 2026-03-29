@@ -12,6 +12,7 @@ divine-bridge-db = { path = "../divine-bridge-db" }
 divine-bridge-types = { path = "../divine-bridge-types" }
 divine-video-worker = { path = "../divine-video-worker" }
 anyhow = { workspace = true }
+aes-gcm = "0.10"
 axum = "0.7"
 diesel = { workspace = true }
 serde = { workspace = true }
