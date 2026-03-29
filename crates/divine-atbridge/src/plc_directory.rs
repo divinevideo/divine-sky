@@ -37,6 +37,10 @@ impl PlcDirectoryClient {
     fn endpoint(&self) -> String {
         format!("{}/", self.base_url.trim_end_matches('/'))
     }
+
+    fn did_endpoint(&self, did: &str) -> String {
+        format!("{}/{}", self.base_url.trim_end_matches('/'), did)
+    }
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -99,6 +103,48 @@ impl PlcClient for PlcDirectoryClient {
         }
 
         Err(last_error.unwrap_or_else(|| anyhow::anyhow!("PLC directory create failed")))
+    }
+}
+
+impl PlcDirectoryClient {
+    pub async fn update_did(&self, did: &str, operation: &PlcOperation) -> Result<()> {
+        let mut last_error: Option<anyhow::Error> = None;
+
+        for attempt in 0..self.max_attempts {
+            let response = match self
+                .client
+                .post(self.did_endpoint(did))
+                .json(operation)
+                .send()
+                .await
+            {
+                Ok(response) => response,
+                Err(err) => {
+                    if should_retry_request_error(&err) && attempt + 1 < self.max_attempts {
+                        tokio::time::sleep(retry_delay(attempt)).await;
+                        continue;
+                    }
+                    return Err(err).context("sending PLC directory update request");
+                }
+            };
+
+            let status = response.status();
+            if status.is_success() {
+                return Ok(());
+            }
+
+            let body = response.text().await.unwrap_or_default();
+            let message = parse_error_message(&body);
+            let err = anyhow::anyhow!("PLC directory update failed ({}): {message}", status);
+            if status.is_server_error() && attempt + 1 < self.max_attempts {
+                last_error = Some(err);
+                tokio::time::sleep(retry_delay(attempt)).await;
+                continue;
+            }
+            return Err(err);
+        }
+
+        Err(last_error.unwrap_or_else(|| anyhow::anyhow!("PLC directory update failed")))
     }
 }
 
@@ -216,5 +262,50 @@ mod tests {
         let did = client.create_did(&op).await.unwrap();
         mock.assert_async().await;
         assert_eq!(did, expected);
+    }
+
+    #[tokio::test]
+    async fn update_did_retries_server_errors() {
+        let mut server = mockito::Server::new_async().await;
+        let _first = server
+            .mock("POST", "/did:plc:alice123")
+            .with_status(503)
+            .with_body("temporary")
+            .expect(1)
+            .create_async()
+            .await;
+        let second = server
+            .mock("POST", "/did:plc:alice123")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body("{}")
+            .expect(1)
+            .create_async()
+            .await;
+
+        let client = PlcDirectoryClient::with_max_attempts(server.url(), 2);
+        client.update_did("did:plc:alice123", &operation()).await.unwrap();
+        second.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn update_did_returns_client_errors_without_retry() {
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("POST", "/did:plc:alice123")
+            .with_status(400)
+            .with_body("{\"message\":\"invalid signature\"}")
+            .expect(1)
+            .create_async()
+            .await;
+
+        let client = PlcDirectoryClient::with_max_attempts(server.url(), 3);
+        let err = client
+            .update_did("did:plc:alice123", &operation())
+            .await
+            .expect_err("4xx errors should not retry");
+
+        mock.assert_async().await;
+        assert!(err.to_string().contains("invalid signature"));
     }
 }

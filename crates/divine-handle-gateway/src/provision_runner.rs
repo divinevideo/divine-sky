@@ -171,7 +171,8 @@ impl ProvisionRunner {
                     .did
                     .as_deref()
                     .context("ready lifecycle row missing did")?;
-                self.sync_ready_state(&row.nostr_pubkey, &row.handle, did).await
+                self.sync_ready_state(&row.nostr_pubkey, &row.handle, did)
+                    .await
             }
             "failed" => {
                 let error = row
@@ -197,7 +198,12 @@ impl ProvisionRunner {
         }
     }
 
-    async fn sync_ready_state(&self, nostr_pubkey: &str, handle: &str, did: &str) -> Result<()> {
+    pub async fn sync_ready_state(
+        &self,
+        nostr_pubkey: &str,
+        handle: &str,
+        did: &str,
+    ) -> Result<()> {
         self.keycast_client
             .sync_ready(nostr_pubkey, did)
             .await
@@ -209,12 +215,7 @@ impl ProvisionRunner {
         Ok(())
     }
 
-    async fn sync_failed_state(
-        &self,
-        nostr_pubkey: &str,
-        handle: &str,
-        error: &str,
-    ) -> Result<()> {
+    async fn sync_failed_state(&self, nostr_pubkey: &str, handle: &str, error: &str) -> Result<()> {
         self.keycast_client
             .sync_failed(nostr_pubkey, error)
             .await
