@@ -23,7 +23,7 @@ use nostr_consumer::{
     parse_relay_message, NostrConsumer, NostrFilter, RelayConnection, RelayMessage,
 };
 use pipeline::{
-    AccountStore, BlobFetcher, BlobUploader, BridgePipeline, PdsPublisher, ProcessResult,
+    AccountStore, BlobFetcher, BlobUploader, BridgePipeline, PdsPublisher, QueueDecision,
     RecordStore,
 };
 
@@ -57,12 +57,25 @@ where
         match parse_relay_message(&raw) {
             Ok(RelayMessage::Event { event, .. }) => {
                 let created_at = event.created_at;
-                match pipeline.process_event(&event).await {
-                    ProcessResult::Error { message } => {
-                        tracing::error!(error = %message, event_id = %event.id, "bridge pipeline rejected relay event");
+                let result = match pipeline.prepare_publish_job(&event).await {
+                    Ok(QueueDecision::Enqueue(job)) => {
+                        pipeline.execute_publish_job(&job).await.map(|_| ())
                     }
-                    _ => {
+                    Ok(QueueDecision::Cancel { .. }) => Ok(()),
+                    Ok(QueueDecision::Skip { .. }) => Ok(()),
+                    Err(error) => Err(error),
+                };
+
+                match result {
+                    Ok(()) => {
                         consumer.last_seen_timestamp = Some(created_at);
+                    }
+                    Err(error) => {
+                        tracing::error!(
+                            error = %error,
+                            event_id = %event.id,
+                            "bridge pipeline rejected relay event"
+                        );
                     }
                 }
             }
