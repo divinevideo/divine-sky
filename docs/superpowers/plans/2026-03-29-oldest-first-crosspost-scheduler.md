@@ -187,7 +187,7 @@ Add tests that prove:
 - historical delete replay can cancel an older queued backlog create before the worker publishes it
 - worker execution uses `event_payload` from the queue instead of requiring a relay re-fetch
 
-Run: `cargo test -p divine-atbridge publish_path_integration -- --nocapture`
+Run: `cargo test -p divine-atbridge --test publish_path_integration -- --nocapture`
 
 Expected: FAIL because the pipeline still publishes inline.
 
