@@ -139,10 +139,39 @@ pub trait BlobFetcher: Send + Sync {
     }
 }
 
-/// Upload a blob to a PDS.
+/// Upload a blob to a PDS (or video transcoding service).
 #[async_trait]
 pub trait BlobUploader: Send + Sync {
     async fn upload_blob(&self, data: &[u8], mime_type: &str) -> Result<BlobRef>;
+
+    /// Upload a blob on behalf of a specific user DID.
+    ///
+    /// Implementations that need the user DID (e.g. video service) override
+    /// this; the default delegates to [`upload_blob`](Self::upload_blob).
+    async fn upload_blob_for_user(
+        &self,
+        data: &[u8],
+        mime_type: &str,
+        _user_did: &str,
+    ) -> Result<BlobRef> {
+        self.upload_blob(data, mime_type).await
+    }
+}
+
+#[async_trait]
+impl BlobUploader for Box<dyn BlobUploader> {
+    async fn upload_blob(&self, data: &[u8], mime_type: &str) -> Result<BlobRef> {
+        (**self).upload_blob(data, mime_type).await
+    }
+
+    async fn upload_blob_for_user(
+        &self,
+        data: &[u8],
+        mime_type: &str,
+        user_did: &str,
+    ) -> Result<BlobRef> {
+        (**self).upload_blob_for_user(data, mime_type, user_did).await
+    }
 }
 
 /// Publish / delete records on a PDS.
@@ -439,10 +468,10 @@ where
         let prepared_video = prepare_publishable_video(&fetched.data, &fetched.mime_type)
             .context("failed to prepare publishable video")?;
 
-        // Upload blob to PDS
+        // Upload blob to PDS (or video service when enabled)
         let blob_ref = self
             .blob_uploader
-            .upload_blob(&prepared_video.data, &prepared_video.mime_type)
+            .upload_blob_for_user(&prepared_video.data, &prepared_video.mime_type, &account.did)
             .await
             .context("failed to upload blob to PDS")?;
 

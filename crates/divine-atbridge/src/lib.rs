@@ -16,6 +16,7 @@ pub mod runtime;
 pub mod signature;
 pub mod text_builder;
 pub mod translator;
+pub mod video_service;
 
 use anyhow::{Context, Result};
 use nostr_consumer::{

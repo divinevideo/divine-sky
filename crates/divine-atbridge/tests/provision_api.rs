@@ -2,9 +2,7 @@ use axum::body::{to_bytes, Body};
 use axum::http::{Request, StatusCode};
 use diesel::Connection;
 use diesel::PgConnection;
-use diesel::QueryableByName;
 use diesel::RunQueryDsl;
-use diesel::sql_types::{Binary, Text};
 use divine_atbridge::config::BridgeConfig;
 use divine_atbridge::health::app_with_config;
 use divine_bridge_db::{get_account_link_lifecycle, upsert_pending_account_link};
@@ -12,20 +10,6 @@ use serde_json::{json, Value};
 use tower::util::ServiceExt;
 
 const AUTH_HEADER: &str = "Bearer test-provisioning-token";
-const TEST_KEY_HEX: &str =
-    "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff";
-
-#[derive(Debug, QueryableByName)]
-struct StoredProvisioningKey {
-    #[diesel(sql_type = Text)]
-    key_ref: String,
-    #[diesel(sql_type = Text)]
-    key_purpose: String,
-    #[diesel(sql_type = Text)]
-    public_key_hex: String,
-    #[diesel(sql_type = Binary)]
-    encrypted_secret: Vec<u8>,
-}
 
 fn test_database_url() -> String {
     std::env::var("TEST_DATABASE_URL")
@@ -47,19 +31,11 @@ fn reset_database(database_url: &str) {
         PgConnection::establish(database_url).expect("test database should be reachable");
     execute_batch(
         &mut conn,
-        include_str!("../../../migrations/004_provisioning_keys/down.sql"),
-    );
-    execute_batch(
-        &mut conn,
         include_str!("../../../migrations/001_bridge_tables/down.sql"),
     );
     execute_batch(
         &mut conn,
         include_str!("../../../migrations/001_bridge_tables/up.sql"),
-    );
-    execute_batch(
-        &mut conn,
-        include_str!("../../../migrations/004_provisioning_keys/up.sql"),
     );
 }
 
@@ -93,7 +69,7 @@ async fn configured_internal_api_provisions_pending_link() {
 
     let pds_mock = pds_server
         .mock("POST", "/xrpc/com.atproto.server.createAccount")
-        .match_header("authorization", "Basic YWRtaW46YWRtaW4tdG9rZW4=")
+        .match_header("authorization", "Bearer admin-token")
         .with_status(200)
         .with_body("{}")
         .create_async()
@@ -112,7 +88,10 @@ async fn configured_internal_api_provisions_pending_link() {
         plc_directory_url: plc_server.url(),
         handle_domain: "divine.video".into(),
         provisioning_bearer_token: "test-provisioning-token".into(),
-        provisioning_key_encryption_key_hex: TEST_KEY_HEX.into(),
+        video_service_url: "https://video.bsky.app".into(),
+        video_service_enabled: false,
+        video_service_poll_timeout_secs: 120,
+        video_service_poll_interval_ms: 5000,
     })
     .expect("configured app should build");
 
@@ -153,37 +132,6 @@ async fn configured_internal_api_provisions_pending_link() {
         .expect("row should exist");
     assert_eq!(stored.did.as_deref(), Some("did:plc:alice123"));
     assert_eq!(stored.provisioning_state, "ready");
-
-    let persisted_keys = diesel::sql_query(
-        "SELECT key_ref, key_purpose, public_key_hex, encrypted_secret
-         FROM provisioning_keys
-         ORDER BY key_purpose ASC, key_ref ASC",
-    )
-    .load::<StoredProvisioningKey>(&mut conn)
-    .expect("provisioning keys should load");
-    assert_eq!(persisted_keys.len(), 2, "provisioning should persist signing and rotation keys");
-    assert_eq!(
-        persisted_keys
-            .iter()
-            .map(|row| row.key_purpose.as_str())
-            .collect::<Vec<_>>(),
-        vec!["plc-rotation-key", "signing-key"]
-    );
-    for row in persisted_keys {
-        assert!(
-            !row.key_ref.is_empty(),
-            "persisted provisioning key ref should not be empty"
-        );
-        assert_eq!(
-            row.public_key_hex.len(),
-            66,
-            "compressed secp256k1 public keys should be stored as 33-byte hex"
-        );
-        assert!(
-            row.encrypted_secret.len() > 32,
-            "encrypted secret should include nonce and authentication tag"
-        );
-    }
 }
 
 #[test]
@@ -201,7 +149,10 @@ fn configured_internal_api_requires_provisioning_token() {
         plc_directory_url: "https://plc.directory".into(),
         handle_domain: "divine.video".into(),
         provisioning_bearer_token: String::new(),
-        provisioning_key_encryption_key_hex: TEST_KEY_HEX.into(),
+        video_service_url: "https://video.bsky.app".into(),
+        video_service_enabled: false,
+        video_service_poll_timeout_secs: 120,
+        video_service_poll_interval_ms: 5000,
     });
 
     assert!(

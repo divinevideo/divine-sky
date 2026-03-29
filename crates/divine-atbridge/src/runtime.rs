@@ -23,6 +23,7 @@ use crate::pipeline::{
     RecordStore,
 };
 use crate::publisher::PdsClient;
+use crate::video_service::VideoServiceUploader;
 use crate::runtime_filter;
 
 type SharedConnection = Arc<Mutex<PgConnection>>;
@@ -259,7 +260,24 @@ pub async fn run_service_with_state(
     let account_store = DbAccountStore::new(connection.clone());
     let record_store = DbRecordStore::new(connection.clone());
     let blob_fetcher = HttpBlobFetcher::new(Duration::from_secs(60))?;
-    let blob_uploader = PdsClient::new(config.pds_url.clone(), config.pds_auth_token.clone());
+    let pds_client_for_blobs =
+        PdsClient::new(config.pds_url.clone(), config.pds_auth_token.clone());
+    let blob_uploader: Box<dyn crate::pipeline::BlobUploader> = if config.video_service_enabled {
+        tracing::info!(
+            video_service_url = %config.video_service_url,
+            "video uploads will be routed through video transcoding service"
+        );
+        Box::new(VideoServiceUploader::new(
+            pds_client_for_blobs,
+            config.pds_url.clone(),
+            config.pds_auth_token.clone(),
+            config.video_service_url.clone(),
+            Duration::from_secs(config.video_service_poll_timeout_secs),
+            Duration::from_millis(config.video_service_poll_interval_ms),
+        ))
+    } else {
+        Box::new(pds_client_for_blobs)
+    };
     let pds_publisher = PdsClient::new(config.pds_url.clone(), config.pds_auth_token.clone());
     let pipeline = BridgePipeline::new(
         account_store,

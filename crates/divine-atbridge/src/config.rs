@@ -34,6 +34,14 @@ pub struct BridgeConfig {
     pub handle_domain: String,
     /// Shared bearer token for the internal provisioning API (ATPROTO_PROVISIONING_TOKEN).
     pub provisioning_bearer_token: String,
+    /// Base URL for the Bluesky video transcoding service (VIDEO_SERVICE_URL).
+    pub video_service_url: String,
+    /// Whether to route video uploads through the video service (VIDEO_SERVICE_ENABLED).
+    pub video_service_enabled: bool,
+    /// Timeout in seconds for polling a video transcoding job (VIDEO_SERVICE_POLL_TIMEOUT_SECS).
+    pub video_service_poll_timeout_secs: u64,
+    /// Interval in milliseconds between poll requests (VIDEO_SERVICE_POLL_INTERVAL_MS).
+    pub video_service_poll_interval_ms: u64,
 }
 
 impl BridgeConfig {
@@ -56,6 +64,19 @@ impl BridgeConfig {
             handle_domain: env::var("HANDLE_DOMAIN").context("HANDLE_DOMAIN must be set")?,
             provisioning_bearer_token: env::var("ATPROTO_PROVISIONING_TOKEN")
                 .context("ATPROTO_PROVISIONING_TOKEN must be set")?,
+            video_service_url: env::var("VIDEO_SERVICE_URL")
+                .unwrap_or_else(|_| "https://video.bsky.app".to_string()),
+            video_service_enabled: env::var("VIDEO_SERVICE_ENABLED")
+                .map(|v| v == "true")
+                .unwrap_or(false),
+            video_service_poll_timeout_secs: env::var("VIDEO_SERVICE_POLL_TIMEOUT_SECS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(120),
+            video_service_poll_interval_ms: env::var("VIDEO_SERVICE_POLL_INTERVAL_MS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(5000),
         })
     }
 
@@ -98,6 +119,10 @@ mod tests {
             plc_directory_url: "https://plc.directory".into(),
             handle_domain: "divine.video".into(),
             provisioning_bearer_token: "test-token".into(),
+            video_service_url: "https://video.bsky.app".into(),
+            video_service_enabled: false,
+            video_service_poll_timeout_secs: 120,
+            video_service_poll_interval_ms: 5000,
         };
         assert_eq!(config.relay_url, "wss://relay.example.com");
         assert_eq!(config.s3_bucket, "test-bucket");
@@ -118,6 +143,10 @@ mod tests {
             plc_directory_url: "https://plc.directory".into(),
             handle_domain: "divine.video".into(),
             provisioning_bearer_token: "test-token".into(),
+            video_service_url: "https://video.bsky.app".into(),
+            video_service_enabled: false,
+            video_service_poll_timeout_secs: 120,
+            video_service_poll_interval_ms: 5000,
         };
 
         assert_eq!(config.provisioning_pds_url(), "https://pds.divine.video");
@@ -138,6 +167,10 @@ mod tests {
             plc_directory_url: "https://plc.directory".into(),
             handle_domain: "divine.video".into(),
             provisioning_bearer_token: "test-token".into(),
+            video_service_url: "https://video.bsky.app".into(),
+            video_service_enabled: false,
+            video_service_poll_timeout_secs: 120,
+            video_service_poll_interval_ms: 5000,
         };
 
         assert_eq!(config.provisioning_pds_url(), "http://pds:2583");
