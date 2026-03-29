@@ -82,15 +82,22 @@ For a localnet run instead of staging:
      - `status = active`
      - `atproto_did = did:plc:...`
      - `atproto_state = ready`
-11. Verify `divine-router` serves `https://username.divine.video/.well-known/atproto-did` and returns the bare DID.
-12. Publish a Nostr video for the opted-in user.
-13. Verify the mirrored ATProto post exists after the user is `ready`.
-14. Return to `settings/security` and click `Disable Bluesky account`.
-15. Verify the card reaches `disabled`.
+<<<<<<< HEAD
+10. Verify `divine-router` serves `https://username.divine.video/.well-known/atproto-did` and returns the bare DID.
+11. If the user is newly migrated, inspect `account_links.publish_backfill_state`.
+    - expected: `not_started -> in_progress -> completed`
+12. Publish an older historical post and a new live post for the opted-in user.
+13. Verify the live post is queued and published through `publish_jobs.job_source = 'live'`.
+14. Verify any seeded backlog rows use `publish_jobs.job_source = 'backfill'` and drain oldest first by `event_created_at`.
+15. Verify the live post is allowed to publish without waiting for remaining backlog rows.
+16. If the user history includes a later delete for an older post, verify the affected backlog job lands in `state = 'skipped'` instead of publishing.
+17. Disable ATProto.
+18. Verify keycast status reaches `disabled`.
+19. Verify future mirrored posts stop and `divine-router` returns `404` for `/.well-known/atproto-did`.
+20. Return to `settings/security` and verify the `Bluesky Account` card reflects the disabled state.
    - expected UI: public DID resolution and future cross-posting are disabled
    - expected status: `enabled = false`
    - expected status: `state = disabled`
-16. Verify future mirrored posts stop and `divine-router` returns `404` for `/.well-known/atproto-did`.
 
 ## Failure Checks
 
@@ -100,4 +107,6 @@ For a localnet run instead of staging:
 - The PDS canary must pass before the user-facing opt-in flow is considered healthy.
 - The production login contract must pass before production opt-in checks are treated as valid.
 - The bridge must not publish while `crosspost_enabled = false`, even if a DID already exists.
+- Live queue success must advance the relay cursor after enqueue, not after PDS completion.
+- Backfill failure must surface as `account_links.publish_backfill_state = 'failed'` with `publish_backfill_error` populated.
 - Client feature flags must be required to expose the ATProto controls on mobile and web.

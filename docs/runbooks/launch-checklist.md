@@ -11,6 +11,7 @@
 ## Preflight
 
 - Confirm `cargo fmt --check`, `cargo clippy --workspace --all-targets -- -D warnings`, and `bash scripts/test-workspace.sh` pass on the release candidate.
+- If `cargo check --workspace` is still failing because of the unrelated `divine-feedgen` baseline, record that separately and do not treat it as a bridge-scheduler regression.
 - Verify keycast can claim usernames without enabling ATProto by default.
 - Verify a verified cookie-auth user can open `settings/security` and see the `Bluesky Account` card without unlocking private-key export first.
 - Verify keycast `/api/user/atproto/enable`, `/status`, and `/disable` work for an authenticated user.
@@ -26,6 +27,9 @@
 - Verify `divine-router` serves `/.well-known/atproto-did` only for active + ready usernames and returns `404` otherwise.
 - Verify `divine-handle-gateway` does not present itself as a public `/.well-known/atproto-did` host.
 - Confirm `pds.divine.video` healthchecks, MinIO buckets, and relay connectivity are green before enabling traffic.
+- Verify relay cursor advancement happens after queue persistence, not after publish completion.
+- Verify backfill jobs drain oldest first by `event_created_at`.
+- Verify live jobs can still publish while backlog rows remain queued.
 
 ## Rollout Controls
 
@@ -35,13 +39,16 @@
 - Enable BGS crawl only after relay replay offsets and PDS write auth are verified in staging.
 - Review rate limits for relay intake, Blossom fetches, and PDS XRPC writes before widening the cohort.
 - Start with an internal cohort, then a small creator cohort, then broader opt-in traffic.
+- Confirm operators understand the ordering guarantee: migrated backlog drains oldest first, but live jobs may overtake backlog for the same user.
 
 ## Safety
 
 - Ensure alerting exists for relay disconnect loops, PDS write failures, and asset-manifest persistence failures.
+- Ensure alerting exists for expired publish-job leases and `publish_backfill_state = failed`.
 - Keep a rollback path that disables new opt-ins and stops the bridge without deleting existing AT records.
 - Confirm disable flow clears public `atproto_did` resolution and prevents new mirrored posts.
 - Route DMCA and takedown intake into the moderation queue before enabling public creator onboarding.
+- Confirm delete events can cancel queued backlog work before publish, so skipped jobs during replay are expected when history contains later deletes.
 
 ## Rollback Gates
 
@@ -57,6 +64,10 @@
 - Confirm support staff have the disable/export runbook and a tested contact path for account recovery issues.
 - Confirm support staff understand the state model: claimed username does not imply ATProto ready.
 - Confirm support staff know that `ready` in `login.divine.video` means both public DID resolution and future cross-post eligibility are active.
+- Check for stuck leased jobs before widening traffic:
+  `SELECT nostr_event_id, job_source, lease_owner, lease_expires_at FROM publish_jobs WHERE state = 'in_progress' ORDER BY lease_expires_at ASC NULLS FIRST;`
+- Check for users with failed backlog planning before widening traffic:
+  `SELECT nostr_pubkey, did, publish_backfill_error FROM account_links WHERE publish_backfill_state = 'failed' ORDER BY updated_at DESC;`
 - Confirm the canonical architecture boundary is still intact:
   - keycast owns consent/lifecycle
   - divine-handle-gateway syncs ready/failed/disabled transitions back into keycast
