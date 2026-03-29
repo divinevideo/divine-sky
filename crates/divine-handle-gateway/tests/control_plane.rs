@@ -40,10 +40,13 @@ fn reset_database(database_url: &str) {
         PgConnection::establish(database_url).expect("test database should be reachable");
     execute_batch(
         &mut conn,
-        "DROP SCHEMA IF EXISTS public CASCADE;
-         CREATE SCHEMA public;",
+        include_str!("../../../migrations/001_bridge_tables/down.sql"),
     );
     execute_batch(&mut conn, include_str!("../../../migrations/001_bridge_tables/up.sql"));
+    execute_batch(
+        &mut conn,
+        include_str!("../../../migrations/004_publish_job_scheduler/up.sql"),
+    );
 }
 
 fn build_app(database_url: String, name_server_url: String) -> axum::Router {

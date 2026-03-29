@@ -37,10 +37,13 @@ fn reset_database(database_url: &str) {
         PgConnection::establish(database_url).expect("test database should be reachable");
     execute_batch(
         &mut conn,
-        "DROP SCHEMA IF EXISTS public CASCADE;
-         CREATE SCHEMA public;",
+        include_str!("../../../migrations/001_bridge_tables/down.sql"),
     );
     execute_batch(&mut conn, include_str!("../../../migrations/001_bridge_tables/up.sql"));
+    execute_batch(
+        &mut conn,
+        include_str!("../../../migrations/004_publish_job_scheduler/up.sql"),
+    );
 }
 
 fn insert_account_link_row(database_url: &str, values_sql: &str) {
