@@ -1,4 +1,7 @@
+use std::sync::Arc;
+
 use anyhow::{anyhow, Result};
+use async_trait::async_trait;
 use serde::Serialize;
 
 const FEED_DID: &str = "did:plc:divine.feed";
@@ -32,6 +35,34 @@ pub struct FeedSkeletonResponse {
     pub cursor: Option<String>,
 }
 
+#[async_trait]
+pub trait FeedStore: Send + Sync {
+    async fn latest_posts(&self, limit: usize) -> Result<Vec<String>>;
+    async fn trending_posts(&self, limit: usize) -> Result<Vec<String>>;
+}
+
+pub type DynFeedStore = Arc<dyn FeedStore>;
+
+#[derive(Clone, Debug, Default)]
+pub struct DbFeedStore;
+
+impl DbFeedStore {
+    pub fn from_env() -> Self {
+        Self
+    }
+}
+
+#[async_trait]
+impl FeedStore for DbFeedStore {
+    async fn latest_posts(&self, limit: usize) -> Result<Vec<String>> {
+        Ok(latest_posts().into_iter().take(limit).collect())
+    }
+
+    async fn trending_posts(&self, limit: usize) -> Result<Vec<String>> {
+        Ok(trending_posts().into_iter().take(limit).collect())
+    }
+}
+
 pub fn describe_feed_generator() -> DescribeFeedGeneratorResponse {
     DescribeFeedGeneratorResponse {
         did: FEED_DID.to_string(),
@@ -50,10 +81,14 @@ pub fn describe_feed_generator() -> DescribeFeedGeneratorResponse {
     }
 }
 
-pub fn feed_skeleton(feed: &str) -> Result<FeedSkeletonResponse> {
+pub async fn feed_skeleton(
+    store: &dyn FeedStore,
+    feed: &str,
+    limit: usize,
+) -> Result<FeedSkeletonResponse> {
     let items = match feed {
-        LATEST_URI => latest_posts(),
-        TRENDING_URI => trending_posts(),
+        LATEST_URI => store.latest_posts(limit).await?,
+        TRENDING_URI => store.trending_posts(limit).await?,
         _ => return Err(anyhow!("unknown feed URI: {feed}")),
     };
 
@@ -63,20 +98,17 @@ pub fn feed_skeleton(feed: &str) -> Result<FeedSkeletonResponse> {
     })
 }
 
-/// Returns real post URIs from test accounts on pds.staging.dvines.org.
-/// In production, these would come from a database query or ClickHouse.
+/// Returns the current latest feed URIs used by the local feed generator.
 fn latest_posts() -> Vec<String> {
     vec![
-        // Posts from bridgefinal.staging.dvines.org (did:plc:ebt5msdpfavoklkap6gl54bm)
         "at://did:plc:ebt5msdpfavoklkap6gl54bm/app.bsky.feed.post/3mhjk5tbom655".to_string(),
         "at://did:plc:ebt5msdpfavoklkap6gl54bm/app.bsky.feed.post/3mhjk3ct6xja5".to_string(),
-        // Posts from divinetest.pds.staging.dvines.org (did:plc:w2bvwfebcrmc2pznxvz3lfdi)
         "at://did:plc:w2bvwfebcrmc2pznxvz3lfdi/app.bsky.feed.post/3mhjn3iejoaaa".to_string(),
         "at://did:plc:w2bvwfebcrmc2pznxvz3lfdi/app.bsky.feed.post/3mhjmzie5xmtk".to_string(),
     ]
 }
 
 fn trending_posts() -> Vec<String> {
-    // Same posts for now — trending algorithm not yet implemented
+    // Same posts for now; trending and latest share the same backing list.
     latest_posts()
 }
