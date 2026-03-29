@@ -2,6 +2,9 @@ use anyhow::{anyhow, Context, Result};
 use reqwest::Client;
 use serde::Serialize;
 
+const DIVINE_ATPROTO_PDS_HOST: &str = "pds.divine.video";
+const DIVINE_ATPROTO_AUTHORIZATION_SERVER_HOST: &str = "entryway.divine.video";
+
 #[derive(Clone)]
 pub struct NameServerClient {
     client: Client,
@@ -14,6 +17,8 @@ struct AtprotoSyncRequest<'a> {
     name: &'a str,
     atproto_did: Option<&'a str>,
     atproto_state: &'a str,
+    atproto_pds_host: &'a str,
+    atproto_authorization_server_host: &'a str,
 }
 
 impl NameServerClient {
@@ -41,6 +46,8 @@ impl NameServerClient {
             name,
             atproto_did: did,
             atproto_state: state,
+            atproto_pds_host: DIVINE_ATPROTO_PDS_HOST,
+            atproto_authorization_server_host: DIVINE_ATPROTO_AUTHORIZATION_SERVER_HOST,
         };
 
         self.client

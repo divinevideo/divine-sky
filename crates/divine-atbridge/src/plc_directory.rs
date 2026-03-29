@@ -37,6 +37,10 @@ impl PlcDirectoryClient {
     fn endpoint(&self) -> String {
         format!("{}/", self.base_url.trim_end_matches('/'))
     }
+
+    fn did_endpoint(&self, did: &str) -> String {
+        format!("{}/{}", self.base_url.trim_end_matches('/'), did)
+    }
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -99,6 +103,48 @@ impl PlcClient for PlcDirectoryClient {
         }
 
         Err(last_error.unwrap_or_else(|| anyhow::anyhow!("PLC directory create failed")))
+    }
+}
+
+impl PlcDirectoryClient {
+    pub async fn update_did(&self, did: &str, operation: &PlcOperation) -> Result<()> {
+        let mut last_error: Option<anyhow::Error> = None;
+
+        for attempt in 0..self.max_attempts {
+            let response = match self
+                .client
+                .post(self.did_endpoint(did))
+                .json(operation)
+                .send()
+                .await
+            {
+                Ok(response) => response,
+                Err(err) => {
+                    if should_retry_request_error(&err) && attempt + 1 < self.max_attempts {
+                        tokio::time::sleep(retry_delay(attempt)).await;
+                        continue;
+                    }
+                    return Err(err).context("sending PLC directory update request");
+                }
+            };
+
+            let status = response.status();
+            if status.is_success() {
+                return Ok(());
+            }
+
+            let body = response.text().await.unwrap_or_default();
+            let message = parse_error_message(&body);
+            let err = anyhow::anyhow!("PLC directory update failed ({}): {message}", status);
+            if status.is_server_error() && attempt + 1 < self.max_attempts {
+                last_error = Some(err);
+                tokio::time::sleep(retry_delay(attempt)).await;
+                continue;
+            }
+            return Err(err);
+        }
+
+        Err(last_error.unwrap_or_else(|| anyhow::anyhow!("PLC directory update failed")))
     }
 }
 

@@ -5,6 +5,7 @@ pub mod deletion;
 pub mod health;
 pub mod nostr_consumer;
 pub mod pds_accounts;
+pub mod pds_host_backfill;
 pub mod pipeline;
 pub mod plc_directory;
 pub mod profile_sync;
