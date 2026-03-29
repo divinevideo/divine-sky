@@ -62,7 +62,9 @@ pub fn get_account_link_lifecycle(
 ) -> Result<Option<AccountLinkLifecycleRow>> {
     let result = sql_query(
         "SELECT nostr_pubkey, did, handle, crosspost_enabled, signing_key_id, \
-         plc_rotation_key_ref, provisioning_state, provisioning_error, disabled_at, \
+         plc_rotation_key_ref, provisioning_state, provisioning_error, \
+         publish_backfill_state, publish_backfill_started_at, \
+         publish_backfill_completed_at, publish_backfill_error, disabled_at, \
          created_at, updated_at \
          FROM account_links WHERE nostr_pubkey = $1",
     )
@@ -79,7 +81,9 @@ pub fn get_account_link_lifecycle_by_handle(
 ) -> Result<Option<AccountLinkLifecycleRow>> {
     let result = sql_query(
         "SELECT nostr_pubkey, did, handle, crosspost_enabled, signing_key_id, \
-         plc_rotation_key_ref, provisioning_state, provisioning_error, disabled_at, \
+         plc_rotation_key_ref, provisioning_state, provisioning_error, \
+         publish_backfill_state, publish_backfill_started_at, \
+         publish_backfill_completed_at, publish_backfill_error, disabled_at, \
          created_at, updated_at \
          FROM account_links WHERE handle = $1",
     )
@@ -95,7 +99,9 @@ pub fn list_account_link_lifecycle_for_reconciliation(
 ) -> Result<Vec<AccountLinkLifecycleRow>> {
     let rows = sql_query(
         "SELECT nostr_pubkey, did, handle, crosspost_enabled, signing_key_id, \
-         plc_rotation_key_ref, provisioning_state, provisioning_error, disabled_at, \
+         plc_rotation_key_ref, provisioning_state, provisioning_error, \
+         publish_backfill_state, publish_backfill_started_at, \
+         publish_backfill_completed_at, publish_backfill_error, disabled_at, \
          created_at, updated_at \
          FROM account_links
          WHERE provisioning_state IN ('ready', 'failed', 'disabled')
@@ -129,7 +135,9 @@ pub fn upsert_pending_account_link(
              disabled_at = NULL,
              updated_at = NOW()
          RETURNING nostr_pubkey, did, handle, crosspost_enabled, signing_key_id,
-                   plc_rotation_key_ref, provisioning_state, provisioning_error, disabled_at,
+                   plc_rotation_key_ref, provisioning_state, provisioning_error,
+                   publish_backfill_state, publish_backfill_started_at,
+                   publish_backfill_completed_at, publish_backfill_error, disabled_at,
                    created_at, updated_at",
     )
     .bind::<Text, _>(nostr_pubkey)
@@ -155,7 +163,9 @@ pub fn mark_account_link_ready(
              updated_at = NOW()
          WHERE nostr_pubkey = $1
          RETURNING nostr_pubkey, did, handle, crosspost_enabled, signing_key_id,
-                   plc_rotation_key_ref, provisioning_state, provisioning_error, disabled_at,
+                   plc_rotation_key_ref, provisioning_state, provisioning_error,
+                   publish_backfill_state, publish_backfill_started_at,
+                   publish_backfill_completed_at, publish_backfill_error, disabled_at,
                    created_at, updated_at",
     )
     .bind::<Text, _>(nostr_pubkey)
@@ -179,7 +189,9 @@ pub fn mark_account_link_failed(
              updated_at = NOW()
          WHERE nostr_pubkey = $1
          RETURNING nostr_pubkey, did, handle, crosspost_enabled, signing_key_id,
-                   plc_rotation_key_ref, provisioning_state, provisioning_error, disabled_at,
+                   plc_rotation_key_ref, provisioning_state, provisioning_error,
+                   publish_backfill_state, publish_backfill_started_at,
+                   publish_backfill_completed_at, publish_backfill_error, disabled_at,
                    created_at, updated_at",
     )
     .bind::<Text, _>(nostr_pubkey)
@@ -202,7 +214,9 @@ pub fn disable_account_link(
              updated_at = NOW()
          WHERE nostr_pubkey = $1
          RETURNING nostr_pubkey, did, handle, crosspost_enabled, signing_key_id,
-                   plc_rotation_key_ref, provisioning_state, provisioning_error, disabled_at,
+                   plc_rotation_key_ref, provisioning_state, provisioning_error,
+                   publish_backfill_state, publish_backfill_started_at,
+                   publish_backfill_completed_at, publish_backfill_error, disabled_at,
                    created_at, updated_at",
     )
     .bind::<Text, _>(nostr_pubkey)

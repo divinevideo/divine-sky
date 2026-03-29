@@ -8,4 +8,5 @@ diesel = { workspace = true }
 chrono = { workspace = true }
 serde = { workspace = true }
 anyhow = { workspace = true }
+serde_json = { workspace = true }
 divine-bridge-types = { path = "../divine-bridge-types" }
