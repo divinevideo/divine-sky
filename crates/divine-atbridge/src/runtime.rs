@@ -9,15 +9,19 @@ use divine_bridge_db::models::{
     AccountLinkLifecycleRow, NewAssetManifestEntry, NewRecordMapping, UpsertIngestOffset,
 };
 use divine_bridge_db::{
-    get_account_link_lifecycle, get_ingest_offset, get_record_mapping, insert_asset,
-    insert_record_mapping, update_record_mapping_status as update_record_mapping_status_query,
-    upsert_ingest_offset,
+    get_account_link_lifecycle, get_ingest_offset, get_publish_job, get_record_mapping,
+    insert_asset, insert_record_mapping,
+    update_record_mapping_status as update_record_mapping_status_query, upsert_ingest_offset,
 };
 use divine_bridge_types::RecordStatus;
 
+use crate::backfill_planner::{BackfillPlanner, BackfillRelayConnector};
 use crate::config::BridgeConfig;
+use crate::config::{DEFAULT_BACKFILL_BATCH_SIZE, DEFAULT_BACKFILL_PLANNER_INTERVAL_SECS};
 use crate::health::RuntimeHealthState;
-use crate::nostr_consumer::{parse_relay_message, NostrConsumer, RelayConnection, RelayMessage};
+use crate::nostr_consumer::{
+    parse_relay_message, NostrConsumer, RelayConnection, RelayMessage, WebSocketRelayConnection,
+};
 use crate::pipeline::{
     AccountLink, AccountStore, AssetManifestRecord, BridgePipeline, HttpBlobFetcher, RecordMapping,
     RecordStore,
@@ -26,7 +30,7 @@ use crate::publisher::PdsClient;
 use crate::video_service::VideoServiceUploader;
 use crate::runtime_filter;
 
-type SharedConnection = Arc<Mutex<PgConnection>>;
+pub type SharedConnection = Arc<Mutex<PgConnection>>;
 
 #[derive(Clone)]
 pub struct DbAccountStore {
@@ -34,7 +38,7 @@ pub struct DbAccountStore {
 }
 
 impl DbAccountStore {
-    fn new(connection: SharedConnection) -> Self {
+    pub fn new(connection: SharedConnection) -> Self {
         Self { connection }
     }
 }
@@ -68,7 +72,7 @@ pub struct DbRecordStore {
 }
 
 impl DbRecordStore {
-    fn new(connection: SharedConnection) -> Self {
+    pub fn new(connection: SharedConnection) -> Self {
         Self { connection }
     }
 }
@@ -77,7 +81,8 @@ impl DbRecordStore {
 impl RecordStore for DbRecordStore {
     async fn is_event_processed(&self, event_id: &str) -> Result<bool> {
         let mut connection = self.connection.lock().unwrap();
-        Ok(get_record_mapping(&mut connection, event_id)?.is_some())
+        Ok(get_record_mapping(&mut connection, event_id)?.is_some()
+            || get_publish_job(&mut connection, event_id)?.is_some())
     }
 
     async fn save_record_mapping(&self, mapping: RecordMapping) -> Result<()> {
@@ -189,6 +194,18 @@ enum RelayReadOutcome {
     Reconnect,
 }
 
+#[derive(Clone, Copy, Debug, Default)]
+struct RuntimeBackfillRelayConnector;
+
+#[async_trait::async_trait]
+impl BackfillRelayConnector for RuntimeBackfillRelayConnector {
+    type Connection = WebSocketRelayConnection;
+
+    async fn connect(&self, relay_url: &str) -> Result<Self::Connection> {
+        WebSocketRelayConnection::connect(relay_url).await
+    }
+}
+
 async fn establish_relay_session<C>(
     relay_result: Result<C>,
     req: String,
@@ -279,13 +296,31 @@ pub async fn run_service_with_state(
         Box::new(pds_client_for_blobs)
     };
     let pds_publisher = PdsClient::new(config.pds_url.clone(), config.pds_auth_token.clone());
-    let pipeline = BridgePipeline::new(
+    let pipeline = Arc::new(BridgePipeline::new(
         account_store,
         record_store,
         blob_fetcher,
         blob_uploader,
         pds_publisher,
+    ));
+    let backfill_planner = BackfillPlanner::new(
+        config.relay_url.clone(),
+        connection.clone(),
+        pipeline.clone(),
+        RuntimeBackfillRelayConnector,
+        DEFAULT_BACKFILL_BATCH_SIZE,
     );
+
+    tokio::spawn(async move {
+        let mut ticker =
+            tokio::time::interval(Duration::from_secs(DEFAULT_BACKFILL_PLANNER_INTERVAL_SECS));
+        loop {
+            ticker.tick().await;
+            if let Err(error) = backfill_planner.run_once().await {
+                tracing::warn!(error = %error, "backfill planner run failed");
+            }
+        }
+    });
 
     loop {
         let mut consumer = NostrConsumer::new(config.relay_url.clone());

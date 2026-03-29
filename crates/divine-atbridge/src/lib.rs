@@ -1,5 +1,6 @@
 //! Divine ATBridge library surface.
 
+pub mod backfill_planner;
 pub mod config;
 pub mod deletion;
 pub mod health;
@@ -61,7 +62,10 @@ where
                     Ok(QueueDecision::Enqueue(job)) => {
                         pipeline.execute_publish_job(&job).await.map(|_| ())
                     }
-                    Ok(QueueDecision::Cancel { .. }) => Ok(()),
+                    Ok(QueueDecision::Cancel { tombstone_job, .. }) => pipeline
+                        .execute_publish_job(&tombstone_job)
+                        .await
+                        .map(|_| ()),
                     Ok(QueueDecision::Skip { .. }) => Ok(()),
                     Err(error) => Err(error),
                 };
