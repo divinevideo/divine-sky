@@ -28,6 +28,7 @@
 Add tests that expect:
 
 - `publish_jobs` rows to store `nostr_pubkey`, `event_created_at`, `job_source`, lease fields, and completion fields
+- `publish_jobs` rows to store the original `event_payload` required for worker execution
 - `account_links` rows to store `publish_backfill_state`, `publish_backfill_started_at`, `publish_backfill_completed_at`, and `publish_backfill_error`
 
 Suggested new test file:
@@ -48,6 +49,7 @@ In `migrations/004_publish_job_scheduler/up.sql`, add:
 ALTER TABLE publish_jobs
   ADD COLUMN nostr_pubkey TEXT,
   ADD COLUMN event_created_at TIMESTAMPTZ,
+  ADD COLUMN event_payload JSONB,
   ADD COLUMN job_source TEXT NOT NULL DEFAULT 'live',
   ADD COLUMN lease_owner TEXT,
   ADD COLUMN lease_expires_at TIMESTAMPTZ,
@@ -62,7 +64,8 @@ ALTER TABLE account_links
 
 Add indexes for:
 
-- pending/claimable jobs by `job_source` plus `event_created_at`
+- claimable live jobs
+- claimable backfill jobs by `event_created_at`
 - expired leases
 - eligible backlog scan on `account_links`
 
@@ -109,6 +112,8 @@ git commit -m "feat: add publish scheduler schema"
 Cover:
 
 - enqueue is idempotent on `nostr_event_id`
+- enqueue preserves `event_payload`
+- delete tombstones block later enqueue attempts for the same event id
 - live-lane claims only `live` jobs
 - backlog-lane claims only `backfill` jobs oldest first by `event_created_at`
 - expired leases become claimable again
@@ -140,6 +145,8 @@ Ordering rule inside `claim_next_backfill_job`:
 
 1. claim only `backfill` jobs
 2. order them by `event_created_at ASC`
+
+`cancel_publish_job(...)` must upsert a tombstone row in `skipped` state when a delete arrives before any publish job exists. `enqueue_publish_job(...)` must not overwrite `published` or `skipped` rows for the same `nostr_event_id`.
 
 Do not rely on `record_mappings` alone for dedupe. Queue-aware code must treat an already-enqueued `publish_jobs` row as sufficient evidence that a source event is already in flight.
 
@@ -178,6 +185,7 @@ Add tests that prove:
 - worker execution still performs the existing publish path
 - delete events can cancel a queued publish before any `record_mapping` exists
 - historical delete replay can cancel an older queued backlog create before the worker publishes it
+- worker execution uses `event_payload` from the queue instead of requiring a relay re-fetch
 
 Run: `cargo test -p divine-atbridge publish_path_integration -- --nocapture`
 

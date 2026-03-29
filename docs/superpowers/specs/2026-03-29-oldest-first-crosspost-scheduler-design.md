@@ -80,12 +80,14 @@ Add the metadata needed to drive ordering and worker ownership:
 
 - `nostr_pubkey`
 - `event_created_at`
+- `event_payload`
 - `job_source` with `live` and `backfill`
 - `lease_owner`
 - `lease_expires_at`
 - `completed_at`
 
 Keep `nostr_event_id` as the primary key so duplicate enqueue attempts collapse onto one durable job per source event.
+Persisting `event_payload` in the queue is required. The worker cannot safely reconstruct the original Nostr event from `nostr_event_id` alone after relay ingest has moved on.
 
 ### 2. Add durable account backfill state
 
@@ -149,7 +151,8 @@ Delete handling has two branches:
 
 - if the target event already has a `record_mapping`, use the existing ATProto delete path
 - if the target event only has a queued publish job, mark that job `skipped` or canceled so the create never publishes later
-- if the delete is observed during historical backlog replay, apply the same cancellation rule before the backlog worker ever sees that create
+- if the target event has no queued row yet, create a tombstone `publish_jobs` row in `skipped` state so later live or backlog enqueue attempts cannot resurrect it
+- if the delete is observed during historical backlog replay, apply the same cancellation or tombstone rule before the backlog worker ever sees that create
 
 The system should not emit an ATProto delete for a post that never created an ATProto record.
 
@@ -158,6 +161,7 @@ The system should not emit an ATProto delete for a post that never created an AT
 - Relay cursor durability moves from "publish succeeded" to "enqueue persisted."
 - Claimed jobs whose lease expires return to the queue for retry.
 - Backfill planner crashes are safe because re-seeding is idempotent.
+- Tombstone rows created by deletes must win over later enqueue attempts for the same `nostr_event_id`.
 - Worker failures increment `attempt`, preserve the last error, and leave the job retryable.
 - Account backlog state moves to `failed` only when the planner itself fails, not when a single publish job fails.
 
@@ -166,9 +170,10 @@ The system should not emit an ATProto delete for a post that never created an AT
 Add coverage for:
 
 - queue ordering and lease/claim behavior
+- queue payload durability and tombstone semantics
 - relay cursor advancement after enqueue, not after publish
 - backfill planner seeding a user oldest first
-- live jobs overtaking backfill jobs
+- live and backlog lanes progressing without starvation
 - delete events canceling queued jobs before publish
 - lifecycle-row fixtures and DB reset helpers after the schema expansion
 - end-to-end runtime behavior with live and backfill work interleaving safely
