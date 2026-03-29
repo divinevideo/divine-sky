@@ -2,7 +2,9 @@
 
 Use this checklist to validate the end-to-end ATProto opt-in flow across `rsky-pds`, `keycast`, `divine-sky`, `divine-name-server`, Fastly KV, and `divine-router`.
 
-The production login contract is now separate from the lifecycle smoke:
+## Production Login Contract
+
+The production login contract is separate from the lifecycle smoke:
 
 - `username.divine.video` remains the public handle host
 - `login.divine.video` remains the human console
@@ -10,6 +12,29 @@ The production login contract is now separate from the lifecycle smoke:
 - `entryway.divine.video` is the ATProto Authorization Server
 
 Use `scripts/smoke-divine-atproto-login.sh` to validate the handle, DID, PDS, and entryway chain before running the opt-in lifecycle checks below.
+
+1. Run the production login-chain smoke first:
+   ```bash
+   bash scripts/smoke-divine-atproto-login.sh
+   ```
+2. Verify `curl -fsS https://pds.divine.video/xrpc/com.atproto.server.describeServer` returns JSON.
+3. Verify `curl -fsS https://entryway.divine.video/.well-known/oauth-authorization-server` returns JSON.
+4. If you are testing a lab environment instead of production, use the localnet helper and the `divine.test` suffix.
+
+### Staging Or Localnet PDS Canary
+
+For a staging or localnet PDS canary:
+```bash
+PDS_URL=https://pds.staging.dvines.org \
+PDS_ADMIN_PASSWORD=... \
+CANARY_HANDLE=atproto-canary-$(date +%s).staging.dvines.org \
+CANARY_DID=did:plc:... \
+bash scripts/staging-pds-did-smoke.sh
+```
+5. Verify `curl -fsS https://pds.staging.dvines.org/xrpc/_health` returns `200`.
+6. Verify `curl -fsS https://login.staging.dvines.org/api/user/atproto/status` is reachable.
+
+## Opt-In Lifecycle
 
 Use the fast local stack in `config/docker-compose.yml` for bridge-only checks. Use the full `deploy/localnet/` lab when you need PLC, `divine.test` handle resolution, or a provisioning path that looks more like the real network surface.
 
@@ -20,27 +45,6 @@ The user-facing opt-in path still depends on sibling repos:
 - `../divine-router` for read-only `/.well-known/atproto-did`
 
 `divine.test` is the local lab handle suffix. Public staging and production handles stay on `divine.video`.
-
-## Preflight
-
-1. Run the production login-chain smoke first:
-   ```bash
-   bash scripts/smoke-divine-atproto-login.sh
-   ```
-2. Verify `curl -fsS https://pds.divine.video/xrpc/com.atproto.server.describeServer` returns JSON.
-3. Verify `curl -fsS https://entryway.divine.video/.well-known/oauth-authorization-server` returns JSON.
-4. If you are testing a lab environment instead of production, use the localnet helper and the `divine.test` suffix.
-
-For a staging or localnet PDS canary:
-   ```bash
-   PDS_URL=https://pds.staging.dvines.org \
-   PDS_ADMIN_PASSWORD=... \
-   CANARY_HANDLE=atproto-canary-$(date +%s).staging.dvines.org \
-   CANARY_DID=did:plc:... \
-   bash scripts/staging-pds-did-smoke.sh
-   ```
-5. Verify `curl -fsS https://pds.staging.dvines.org/xrpc/_health` returns `200`.
-6. Verify `curl -fsS https://login.staging.dvines.org/api/user/atproto/status` is reachable.
 
 For a localnet run instead of staging:
 

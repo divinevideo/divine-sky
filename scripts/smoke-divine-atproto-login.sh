@@ -11,8 +11,7 @@ require_cmd() {
 }
 
 require_cmd curl
-require_cmd grep
-require_cmd sed
+require_cmd python3
 
 HANDLE="${HANDLE:-rabble.divine.video}"
 HANDLE_RESOLVE_URL="https://public.api.bsky.app/xrpc/com.atproto.identity.resolveHandle?handle=${HANDLE}"
@@ -34,94 +33,176 @@ fetch() {
   fi
 }
 
-extract_json_string() {
-  local key="$1"
-  local file="$2"
-  sed -n "s/.*\"${key}\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\".*/\1/p" "$file" | head -n1
+json_path() {
+  local file="$1"
+  local path="$2"
+
+  python3 - "$file" "$path" <<'PY'
+import json
+import sys
+
+file = sys.argv[1]
+path = sys.argv[2].split('.')
+
+with open(file, 'r', encoding='utf-8') as fh:
+    value = json.load(fh)
+
+for key in path:
+    if isinstance(value, list):
+        if not key.isdigit():
+            sys.exit(1)
+        index = int(key)
+        if index >= len(value):
+            sys.exit(1)
+        value = value[index]
+        continue
+
+    if not isinstance(value, dict) or key not in value:
+        sys.exit(1)
+    value = value[key]
+
+if isinstance(value, (dict, list)):
+    print(json.dumps(value))
+else:
+    print(value)
+PY
 }
 
-assert_json_response() {
-  local url="$1"
-  local body="$2"
-  local headers="$3"
-  local description="$4"
+assert_json() {
+  local file="$1"
+  local description="$2"
 
-  if ! grep -qi '^content-type:.*application/.*json' "$headers"; then
-    fail "$description did not return JSON: $url"
-  fi
+  python3 - "$file" "$description" <<'PY'
+import json
+import sys
 
-  if grep -qi '<!doctype html>' "$body" || grep -qi '<html' "$body"; then
-    fail "$description returned HTML"
-  fi
+file, description = sys.argv[1:3]
+with open(file, 'r', encoding='utf-8') as fh:
+    try:
+        json.load(fh)
+    except Exception as exc:
+        sys.stderr.write(f"FAIL: {description} did not return valid JSON: {exc}\n")
+        sys.exit(1)
+PY
 }
 
-assert_regex() {
-  local pattern="$1"
-  local file="$2"
+assert_eq() {
+  local expected="$1"
+  local actual="$2"
   local description="$3"
 
-  if ! grep -Eq "$pattern" "$file"; then
-    fail "$description missing expected value matching: $pattern"
+  if [ "$actual" != "$expected" ]; then
+    fail "$description expected $expected but got $actual"
   fi
 }
 
-handle_body="$tmpdir/handle.json"
-handle_headers="$tmpdir/handle.headers"
-fetch "$HANDLE_RESOLVE_URL" "$handle_body" "$handle_headers"
-assert_json_response "$HANDLE_RESOLVE_URL" "$handle_body" "$handle_headers" "handle resolution"
+assert_array_contains() {
+  local file="$1"
+  local path="$2"
+  local expected="$3"
+  local description="$4"
 
-resolved_did="$(extract_json_string did "$handle_body")"
-if [ -z "$resolved_did" ]; then
-  fail "could not parse did from handle resolution response"
-fi
+  python3 - "$file" "$path" "$expected" "$description" <<'PY'
+import json
+import sys
 
-subdomain_body="$tmpdir/subdomain.did"
-subdomain_headers="$tmpdir/subdomain.headers"
-fetch "$SUBDOMAIN_DID_URL" "$subdomain_body" "$subdomain_headers"
-if ! grep -qi '^content-type:.*text/plain' "$subdomain_headers"; then
-  fail "subdomain DID resolution did not return text/plain"
-fi
+file, path, expected, description = sys.argv[1:5]
+parts = path.split('.')
 
-subdomain_did="$(tr -d '\r\n' < "$subdomain_body")"
-if [ -z "$subdomain_did" ]; then
-  fail "subdomain DID resolution returned an empty body"
-fi
+with open(file, 'r', encoding='utf-8') as fh:
+    value = json.load(fh)
 
-if [ "$resolved_did" != "$subdomain_did" ]; then
-  fail "handle resolution and subdomain DID resolution disagree: $resolved_did vs $subdomain_did"
-fi
+for key in parts:
+    if isinstance(value, list):
+        if not key.isdigit():
+            sys.stderr.write(f"FAIL: {description} missing expected field: {path}\n")
+            sys.exit(1)
+        index = int(key)
+        if index >= len(value):
+            sys.stderr.write(f"FAIL: {description} missing expected field: {path}\n")
+            sys.exit(1)
+        value = value[index]
+        continue
 
-PLCDOC_URL="https://plc.directory/${resolved_did}"
-plc_body="$tmpdir/plc.json"
-plc_headers="$tmpdir/plc.headers"
-fetch "$PLCDOC_URL" "$plc_body" "$plc_headers"
-assert_json_response "$PLCDOC_URL" "$plc_body" "$plc_headers" "PLC DID document"
+    if not isinstance(value, dict) or key not in value:
+        sys.stderr.write(f"FAIL: {description} missing expected field: {path}\n")
+        sys.exit(1)
+    value = value[key]
 
-assert_regex "\"id\"[[:space:]]*:[[:space:]]*\"${resolved_did}\"" "$plc_body" "PLC DID document"
-assert_regex "\"serviceEndpoint\"[[:space:]]*:[[:space:]]*\"https://pds\\.divine\\.video\"" "$plc_body" "PLC DID document"
-if grep -qF 'pds.staging.dvines.org' "$plc_body"; then
-  fail "PLC DID document still points at staging"
-fi
+if not isinstance(value, list) or expected not in value:
+    sys.stderr.write(f"FAIL: {description} missing expected value: {expected}\n")
+    sys.exit(1)
+PY
+}
 
-pds_describe_body="$tmpdir/pds-describe.json"
-pds_describe_headers="$tmpdir/pds-describe.headers"
-fetch "https://pds.divine.video/xrpc/com.atproto.server.describeServer" "$pds_describe_body" "$pds_describe_headers"
-assert_json_response "https://pds.divine.video/xrpc/com.atproto.server.describeServer" "$pds_describe_body" "$pds_describe_headers" "pds.divine.video describeServer"
-assert_regex "\"did\"[[:space:]]*:[[:space:]]*\"did:web:pds\\.divine\\.video\"" "$pds_describe_body" "pds.divine.video describeServer"
+assert_json_string() {
+  local file="$1"
+  local path="$2"
+  local expected="$3"
+  local description="$4"
 
-pds_protected_body="$tmpdir/pds-protected.json"
-pds_protected_headers="$tmpdir/pds-protected.headers"
-fetch "https://pds.divine.video/.well-known/oauth-protected-resource" "$pds_protected_body" "$pds_protected_headers"
-assert_json_response "https://pds.divine.video/.well-known/oauth-protected-resource" "$pds_protected_body" "$pds_protected_headers" "pds.divine.video protected-resource metadata"
-assert_regex "\"authorization_servers\"" "$pds_protected_body" "pds.divine.video protected-resource metadata"
-assert_regex "https://entryway\\.divine\\.video" "$pds_protected_body" "pds.divine.video protected-resource metadata"
+  actual="$(json_path "$file" "$path")" || fail "$description missing expected field: $path"
+  assert_eq "$expected" "$actual" "$description"
+}
 
-entryway_authz_body="$tmpdir/entryway-authz.json"
-entryway_authz_headers="$tmpdir/entryway-authz.headers"
-fetch "https://entryway.divine.video/.well-known/oauth-authorization-server" "$entryway_authz_body" "$entryway_authz_headers"
-assert_json_response "https://entryway.divine.video/.well-known/oauth-authorization-server" "$entryway_authz_body" "$entryway_authz_headers" "entryway.divine.video authorization-server metadata"
-assert_regex "\"issuer\"[[:space:]]*:[[:space:]]*\"https://entryway\\.divine\\.video\"" "$entryway_authz_body" "entryway.divine.video authorization-server metadata"
-assert_regex "\"authorization_endpoint\"" "$entryway_authz_body" "entryway.divine.video authorization-server metadata"
-assert_regex "\"pushed_authorization_request_endpoint\"" "$entryway_authz_body" "entryway.divine.video authorization-server metadata"
+assert_no_staging() {
+  local file="$1"
+  local description="$2"
+
+  python3 - "$file" "$description" <<'PY'
+import sys
+
+file, description = sys.argv[1:3]
+with open(file, 'r', encoding='utf-8') as fh:
+    body = fh.read()
+
+if 'pds.staging.dvines.org' in body:
+    sys.exit(0)
+
+sys.stderr.write(f"FAIL: {description} still points at staging\n")
+sys.exit(1)
+PY
+}
+
+HANDLE_BODY="$tmpdir/handle.json"
+HANDLE_HEADERS="$tmpdir/handle.headers"
+fetch "$HANDLE_RESOLVE_URL" "$HANDLE_BODY" "$HANDLE_HEADERS"
+assert_json "$HANDLE_BODY" "handle resolution"
+
+resolved_did="$(json_path "$HANDLE_BODY" did)" || fail "could not parse did from handle resolution response"
+
+SUBDOMAIN_BODY="$tmpdir/subdomain.did"
+SUBDOMAIN_HEADERS="$tmpdir/subdomain.headers"
+fetch "$SUBDOMAIN_DID_URL" "$SUBDOMAIN_BODY" "$SUBDOMAIN_HEADERS"
+subdomain_did="$(tr -d '\r\n' < "$SUBDOMAIN_BODY")"
+assert_eq "$resolved_did" "$subdomain_did" "subdomain DID resolution"
+
+PLC_BODY="$tmpdir/plc.json"
+PLC_HEADERS="$tmpdir/plc.headers"
+fetch "https://plc.directory/${resolved_did}" "$PLC_BODY" "$PLC_HEADERS"
+assert_json "$PLC_BODY" "PLC DID document"
+assert_json_string "$PLC_BODY" id "$resolved_did" "PLC DID document"
+assert_json_string "$PLC_BODY" service.0.serviceEndpoint "https://pds.divine.video" "PLC DID document"
+assert_no_staging "$PLC_BODY" "PLC DID document"
+
+PDS_DESCRIBE_BODY="$tmpdir/pds-describe.json"
+PDS_DESCRIBE_HEADERS="$tmpdir/pds-describe.headers"
+fetch "https://pds.divine.video/xrpc/com.atproto.server.describeServer" "$PDS_DESCRIBE_BODY" "$PDS_DESCRIBE_HEADERS"
+assert_json "$PDS_DESCRIBE_BODY" "pds.divine.video describeServer"
+assert_json_string "$PDS_DESCRIBE_BODY" did "did:web:pds.divine.video" "pds.divine.video describeServer"
+
+PDS_PROTECTED_BODY="$tmpdir/pds-protected.json"
+PDS_PROTECTED_HEADERS="$tmpdir/pds-protected.headers"
+fetch "https://pds.divine.video/.well-known/oauth-protected-resource" "$PDS_PROTECTED_BODY" "$PDS_PROTECTED_HEADERS"
+assert_json "$PDS_PROTECTED_BODY" "pds.divine.video protected-resource metadata"
+assert_array_contains "$PDS_PROTECTED_BODY" authorization_servers "https://entryway.divine.video" "pds.divine.video protected-resource metadata"
+
+ENTRYWAY_AUTHZ_BODY="$tmpdir/entryway-authz.json"
+ENTRYWAY_AUTHZ_HEADERS="$tmpdir/entryway-authz.headers"
+fetch "https://entryway.divine.video/.well-known/oauth-authorization-server" "$ENTRYWAY_AUTHZ_BODY" "$ENTRYWAY_AUTHZ_HEADERS"
+assert_json "$ENTRYWAY_AUTHZ_BODY" "entryway.divine.video authorization-server metadata"
+assert_json_string "$ENTRYWAY_AUTHZ_BODY" issuer "https://entryway.divine.video" "entryway.divine.video authorization-server metadata"
+assert_json_string "$ENTRYWAY_AUTHZ_BODY" authorization_endpoint "https://entryway.divine.video/api/oauth/authorize" "entryway.divine.video authorization-server metadata"
+assert_json_string "$ENTRYWAY_AUTHZ_BODY" pushed_authorization_request_endpoint "https://entryway.divine.video/api/oauth/par" "entryway.divine.video authorization-server metadata"
 
 printf 'PASS: Divine ATProto login contract is healthy for %s\n' "$HANDLE"
