@@ -7,7 +7,7 @@ use async_trait::async_trait;
 use divine_atbridge::nostr_consumer::{NostrConsumer, RelayConnection};
 use divine_atbridge::pipeline::{
     AccountLink, AccountStore, AssetManifestRecord, BridgePipeline, HttpBlobFetcher, ProcessResult,
-    RecordMapping, RecordStore,
+    QueueDecision, RecordMapping, RecordStore,
 };
 use divine_atbridge::publisher::PdsClient;
 use divine_atbridge::run_bridge_session;
@@ -146,6 +146,135 @@ impl RecordStore for TrackingRecordStore {
             .push((event_id.to_string(), cid.map(str::to_string), status));
         Ok(())
     }
+}
+
+#[tokio::test]
+async fn publish_path_integration_prepares_enqueue_without_inline_publish() {
+    let source_bytes = b"publish-path-video";
+    let source_sha256 = hex::encode(Sha256::digest(source_bytes));
+    let event = make_video_event("https://blossom.invalid/video.mp4", &source_sha256);
+
+    let pipeline = BridgePipeline::new(
+        StaticAccountStore {
+            link: AccountLink {
+                nostr_pubkey: event.pubkey.clone(),
+                did: "did:plc:integration".to_string(),
+                opted_in: true,
+            },
+        },
+        TrackingRecordStore::default(),
+        HttpBlobFetcher::new(Duration::from_secs(5)).unwrap(),
+        PdsClient::new("http://127.0.0.1:9", "integration-token"),
+        PdsClient::new("http://127.0.0.1:9", "integration-token"),
+    );
+
+    let decision = pipeline
+        .prepare_publish_job(&event)
+        .await
+        .expect("prepare should classify enqueue without publishing");
+
+    let envelope = match decision {
+        QueueDecision::Enqueue(envelope) => envelope,
+        other => panic!("expected enqueue decision, got {other:?}"),
+    };
+
+    assert_eq!(envelope.nostr_event_id, event.id);
+    assert_eq!(envelope.nostr_pubkey, event.pubkey);
+    assert_eq!(envelope.event_created_at, event.created_at);
+    assert_eq!(envelope.event_payload["id"], event.id);
+    assert!(pipeline.record_store.mappings.lock().unwrap().is_empty());
+    assert!(pipeline.record_store.manifests.lock().unwrap().is_empty());
+    assert!(pipeline.record_store.statuses.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn publish_path_integration_execute_publish_job_uses_envelope_payload() {
+    let mut blossom_server = mockito::Server::new_async().await;
+    let video_bytes = b"publish-path-video".to_vec();
+    let source_sha256 = hex::encode(Sha256::digest(&video_bytes));
+    let blossom_path = "/blob/envelope-video.mp4";
+
+    let blossom_mock = blossom_server
+        .mock("GET", blossom_path)
+        .with_status(200)
+        .with_header("content-type", "video/mp4")
+        .with_body(video_bytes.clone())
+        .create_async()
+        .await;
+
+    let mut pds_server = mockito::Server::new_async().await;
+    let upload_mock = pds_server
+        .mock("POST", "/xrpc/com.atproto.repo.uploadBlob")
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(
+            serde_json::json!({
+                "blob": {
+                    "$type": "blob",
+                    "ref": {"$link": "bafyreiblobenvelope"},
+                    "mimeType": "video/mp4",
+                    "size": video_bytes.len()
+                }
+            })
+            .to_string(),
+        )
+        .create_async()
+        .await;
+
+    let create_mock = pds_server
+        .mock("POST", "/xrpc/com.atproto.repo.createRecord")
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(
+            serde_json::json!({
+                "uri": "at://did:plc:integration/app.bsky.feed.post/3envelope",
+                "cid": "bafyrecordenvelope",
+                "validationStatus": "valid"
+            })
+            .to_string(),
+        )
+        .create_async()
+        .await;
+
+    let event = make_video_event(
+        &format!("{}{}", blossom_server.url(), blossom_path),
+        &source_sha256,
+    );
+
+    let pipeline = BridgePipeline::new(
+        StaticAccountStore {
+            link: AccountLink {
+                nostr_pubkey: event.pubkey.clone(),
+                did: "did:plc:integration".to_string(),
+                opted_in: true,
+            },
+        },
+        TrackingRecordStore::default(),
+        HttpBlobFetcher::new(Duration::from_secs(5)).unwrap(),
+        PdsClient::new(pds_server.url(), "integration-token"),
+        PdsClient::new(pds_server.url(), "integration-token"),
+    );
+
+    let envelope = match pipeline.prepare_publish_job(&event).await.unwrap() {
+        QueueDecision::Enqueue(envelope) => envelope,
+        other => panic!("expected enqueue decision, got {other:?}"),
+    };
+
+    let result = pipeline
+        .execute_publish_job(&envelope)
+        .await
+        .expect("worker should publish from envelope payload");
+
+    match result {
+        ProcessResult::Published { at_uri, .. } => {
+            assert!(at_uri.contains("did:plc:integration"), "got: {at_uri}");
+        }
+        other => panic!("expected published result, got {other:?}"),
+    }
+
+    blossom_mock.assert_async().await;
+    upload_mock.assert_async().await;
+    create_mock.assert_async().await;
 }
 
 #[tokio::test]

@@ -2,18 +2,29 @@
 //!
 //! All query functions live here and are re-exported from the crate root.
 
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use chrono::{DateTime, Utc};
 use diesel::prelude::*;
 use diesel::sql_query;
-use diesel::sql_types::{Nullable, Text};
+use diesel::sql_types::{Int8, Nullable, Text, Timestamptz};
 use diesel::PgConnection;
 use diesel::PgTextExpressionMethods;
 
-use divine_bridge_types::PublishState;
+use divine_bridge_types::{PublishJobSource, PublishState};
 
 use crate::models::*;
 use crate::schema::*;
+
+const ACCOUNT_LINK_LIFECYCLE_COLUMNS: &str = "nostr_pubkey, did, handle, crosspost_enabled, \
+    signing_key_id, plc_rotation_key_ref, provisioning_state, provisioning_error, \
+    publish_backfill_state, publish_backfill_started_at, publish_backfill_completed_at, \
+    publish_backfill_error, disabled_at, created_at, updated_at";
+
+#[derive(Debug, QueryableByName)]
+struct PublishJobIdRow {
+    #[diesel(sql_type = Text)]
+    nostr_event_id: String,
+}
 
 // ---------------------------------------------------------------------------
 // account_links queries
@@ -62,7 +73,9 @@ pub fn get_account_link_lifecycle(
 ) -> Result<Option<AccountLinkLifecycleRow>> {
     let result = sql_query(
         "SELECT nostr_pubkey, did, handle, crosspost_enabled, signing_key_id, \
-         plc_rotation_key_ref, provisioning_state, provisioning_error, disabled_at, \
+         plc_rotation_key_ref, provisioning_state, provisioning_error, \
+         publish_backfill_state, publish_backfill_started_at, \
+         publish_backfill_completed_at, publish_backfill_error, disabled_at, \
          created_at, updated_at \
          FROM account_links WHERE nostr_pubkey = $1",
     )
@@ -79,7 +92,9 @@ pub fn get_account_link_lifecycle_by_handle(
 ) -> Result<Option<AccountLinkLifecycleRow>> {
     let result = sql_query(
         "SELECT nostr_pubkey, did, handle, crosspost_enabled, signing_key_id, \
-         plc_rotation_key_ref, provisioning_state, provisioning_error, disabled_at, \
+         plc_rotation_key_ref, provisioning_state, provisioning_error, \
+         publish_backfill_state, publish_backfill_started_at, \
+         publish_backfill_completed_at, publish_backfill_error, disabled_at, \
          created_at, updated_at \
          FROM account_links WHERE handle = $1",
     )
@@ -95,7 +110,9 @@ pub fn list_account_link_lifecycle_for_reconciliation(
 ) -> Result<Vec<AccountLinkLifecycleRow>> {
     let rows = sql_query(
         "SELECT nostr_pubkey, did, handle, crosspost_enabled, signing_key_id, \
-         plc_rotation_key_ref, provisioning_state, provisioning_error, disabled_at, \
+         plc_rotation_key_ref, provisioning_state, provisioning_error, \
+         publish_backfill_state, publish_backfill_started_at, \
+         publish_backfill_completed_at, publish_backfill_error, disabled_at, \
          created_at, updated_at \
          FROM account_links
          WHERE provisioning_state IN ('ready', 'failed', 'disabled')
@@ -129,7 +146,9 @@ pub fn upsert_pending_account_link(
              disabled_at = NULL,
              updated_at = NOW()
          RETURNING nostr_pubkey, did, handle, crosspost_enabled, signing_key_id,
-                   plc_rotation_key_ref, provisioning_state, provisioning_error, disabled_at,
+                   plc_rotation_key_ref, provisioning_state, provisioning_error,
+                   publish_backfill_state, publish_backfill_started_at,
+                   publish_backfill_completed_at, publish_backfill_error, disabled_at,
                    created_at, updated_at",
     )
     .bind::<Text, _>(nostr_pubkey)
@@ -155,7 +174,9 @@ pub fn mark_account_link_ready(
              updated_at = NOW()
          WHERE nostr_pubkey = $1
          RETURNING nostr_pubkey, did, handle, crosspost_enabled, signing_key_id,
-                   plc_rotation_key_ref, provisioning_state, provisioning_error, disabled_at,
+                   plc_rotation_key_ref, provisioning_state, provisioning_error,
+                   publish_backfill_state, publish_backfill_started_at,
+                   publish_backfill_completed_at, publish_backfill_error, disabled_at,
                    created_at, updated_at",
     )
     .bind::<Text, _>(nostr_pubkey)
@@ -179,7 +200,9 @@ pub fn mark_account_link_failed(
              updated_at = NOW()
          WHERE nostr_pubkey = $1
          RETURNING nostr_pubkey, did, handle, crosspost_enabled, signing_key_id,
-                   plc_rotation_key_ref, provisioning_state, provisioning_error, disabled_at,
+                   plc_rotation_key_ref, provisioning_state, provisioning_error,
+                   publish_backfill_state, publish_backfill_started_at,
+                   publish_backfill_completed_at, publish_backfill_error, disabled_at,
                    created_at, updated_at",
     )
     .bind::<Text, _>(nostr_pubkey)
@@ -202,12 +225,98 @@ pub fn disable_account_link(
              updated_at = NOW()
          WHERE nostr_pubkey = $1
          RETURNING nostr_pubkey, did, handle, crosspost_enabled, signing_key_id,
-                   plc_rotation_key_ref, provisioning_state, provisioning_error, disabled_at,
+                   plc_rotation_key_ref, provisioning_state, provisioning_error,
+                   publish_backfill_state, publish_backfill_started_at,
+                   publish_backfill_completed_at, publish_backfill_error, disabled_at,
                    created_at, updated_at",
     )
     .bind::<Text, _>(nostr_pubkey)
     .get_result::<AccountLinkLifecycleRow>(conn)?;
     Ok(result)
+}
+
+/// Load eligible accounts that still need backlog seeding.
+pub fn list_accounts_requiring_backfill(
+    conn: &mut PgConnection,
+    limit: i64,
+) -> Result<Vec<AccountLinkLifecycleRow>> {
+    let query = format!(
+        "SELECT {ACCOUNT_LINK_LIFECYCLE_COLUMNS}
+         FROM account_links
+         WHERE crosspost_enabled = TRUE
+           AND provisioning_state = 'ready'
+           AND disabled_at IS NULL
+           AND publish_backfill_state IN ('not_started', 'failed')
+         ORDER BY created_at ASC
+         LIMIT $1"
+    );
+    let rows = sql_query(query)
+        .bind::<Int8, _>(limit)
+        .load::<AccountLinkLifecycleRow>(conn)?;
+    Ok(rows)
+}
+
+/// Mark an account backlog as in progress.
+pub fn mark_account_backfill_started(
+    conn: &mut PgConnection,
+    nostr_pubkey: &str,
+) -> Result<AccountLinkLifecycleRow> {
+    let query = format!(
+        "UPDATE account_links
+         SET publish_backfill_state = 'in_progress',
+             publish_backfill_started_at = NOW(),
+             publish_backfill_completed_at = NULL,
+             publish_backfill_error = NULL,
+             updated_at = NOW()
+         WHERE nostr_pubkey = $1
+         RETURNING {ACCOUNT_LINK_LIFECYCLE_COLUMNS}"
+    );
+    let row = sql_query(query)
+        .bind::<Text, _>(nostr_pubkey)
+        .get_result::<AccountLinkLifecycleRow>(conn)?;
+    Ok(row)
+}
+
+/// Mark an account backlog as completed.
+pub fn mark_account_backfill_completed(
+    conn: &mut PgConnection,
+    nostr_pubkey: &str,
+) -> Result<AccountLinkLifecycleRow> {
+    let query = format!(
+        "UPDATE account_links
+         SET publish_backfill_state = 'completed',
+             publish_backfill_completed_at = NOW(),
+             publish_backfill_error = NULL,
+             updated_at = NOW()
+         WHERE nostr_pubkey = $1
+         RETURNING {ACCOUNT_LINK_LIFECYCLE_COLUMNS}"
+    );
+    let row = sql_query(query)
+        .bind::<Text, _>(nostr_pubkey)
+        .get_result::<AccountLinkLifecycleRow>(conn)?;
+    Ok(row)
+}
+
+/// Mark an account backlog as failed.
+pub fn mark_account_backfill_failed(
+    conn: &mut PgConnection,
+    nostr_pubkey: &str,
+    error: &str,
+) -> Result<AccountLinkLifecycleRow> {
+    let query = format!(
+        "UPDATE account_links
+         SET publish_backfill_state = 'failed',
+             publish_backfill_completed_at = NULL,
+             publish_backfill_error = $2,
+             updated_at = NOW()
+         WHERE nostr_pubkey = $1
+         RETURNING {ACCOUNT_LINK_LIFECYCLE_COLUMNS}"
+    );
+    let row = sql_query(query)
+        .bind::<Text, _>(nostr_pubkey)
+        .bind::<Text, _>(error)
+        .get_result::<AccountLinkLifecycleRow>(conn)?;
+    Ok(row)
 }
 
 // ---------------------------------------------------------------------------
@@ -408,6 +517,203 @@ pub fn get_publish_job(
     Ok(result)
 }
 
+/// Idempotently enqueue a publish job keyed by source Nostr event ID.
+///
+/// If a job already exists (including published/skipped terminal rows), that
+/// existing row is returned unchanged.
+pub fn enqueue_publish_job(conn: &mut PgConnection, job: &NewPublishJob) -> Result<PublishJob> {
+    diesel::insert_into(publish_jobs::table)
+        .values(job)
+        .on_conflict(publish_jobs::nostr_event_id)
+        .do_nothing()
+        .execute(conn)?;
+
+    get_publish_job(conn, job.nostr_event_id)?.ok_or_else(|| {
+        anyhow!(
+            "publish job missing after enqueue for {}",
+            job.nostr_event_id
+        )
+    })
+}
+
+fn claim_next_job(
+    conn: &mut PgConnection,
+    source: PublishJobSource,
+    lease_owner: &str,
+    lease_expires_at: DateTime<Utc>,
+) -> Result<Option<PublishJob>> {
+    let order_by = match source {
+        PublishJobSource::Live => "created_at ASC, nostr_event_id ASC",
+        PublishJobSource::Backfill => "event_created_at ASC, created_at ASC, nostr_event_id ASC",
+    };
+    let query = format!(
+        "WITH candidate AS (
+            SELECT nostr_event_id
+            FROM publish_jobs
+            WHERE job_source = $1
+              AND (
+                state IN ('pending', 'failed')
+                OR (state = 'in_progress' AND lease_expires_at IS NOT NULL AND lease_expires_at <= NOW())
+              )
+            ORDER BY {order_by}
+            LIMIT 1
+            FOR UPDATE SKIP LOCKED
+         )
+         UPDATE publish_jobs
+         SET state = 'in_progress',
+             attempt = attempt + 1,
+             error = NULL,
+             lease_owner = $2,
+             lease_expires_at = $3,
+             completed_at = NULL,
+             updated_at = NOW()
+         FROM candidate
+         WHERE publish_jobs.nostr_event_id = candidate.nostr_event_id
+         RETURNING publish_jobs.nostr_event_id"
+    );
+
+    let claimed = sql_query(query)
+        .bind::<Text, _>(source.as_str())
+        .bind::<Text, _>(lease_owner)
+        .bind::<Timestamptz, _>(lease_expires_at)
+        .get_result::<PublishJobIdRow>(conn)
+        .optional()?;
+
+    if let Some(claimed) = claimed {
+        return get_publish_job(conn, &claimed.nostr_event_id);
+    }
+
+    Ok(None)
+}
+
+/// Claim the next live-lane publish job.
+pub fn claim_next_live_job(
+    conn: &mut PgConnection,
+    lease_owner: &str,
+    lease_expires_at: DateTime<Utc>,
+) -> Result<Option<PublishJob>> {
+    claim_next_job(conn, PublishJobSource::Live, lease_owner, lease_expires_at)
+}
+
+/// Claim the next backlog-lane publish job ordered oldest-first.
+pub fn claim_next_backfill_job(
+    conn: &mut PgConnection,
+    lease_owner: &str,
+    lease_expires_at: DateTime<Utc>,
+) -> Result<Option<PublishJob>> {
+    claim_next_job(
+        conn,
+        PublishJobSource::Backfill,
+        lease_owner,
+        lease_expires_at,
+    )
+}
+
+/// Mark a publish job as completed/published.
+pub fn mark_publish_job_completed(
+    conn: &mut PgConnection,
+    nostr_event_id: &str,
+) -> Result<PublishJob> {
+    let now = Utc::now();
+    let result = diesel::update(publish_jobs::table.find(nostr_event_id))
+        .set((
+            publish_jobs::state.eq(PublishState::Published.as_str()),
+            publish_jobs::error.eq(None::<String>),
+            publish_jobs::lease_owner.eq(None::<String>),
+            publish_jobs::lease_expires_at.eq(None::<DateTime<Utc>>),
+            publish_jobs::completed_at.eq(Some(now)),
+            publish_jobs::updated_at.eq(now),
+        ))
+        .get_result::<PublishJob>(conn)?;
+    Ok(result)
+}
+
+/// Mark a publish job as failed and release any lease.
+pub fn mark_publish_job_failed(
+    conn: &mut PgConnection,
+    nostr_event_id: &str,
+    error_msg: &str,
+) -> Result<PublishJob> {
+    let now = Utc::now();
+    let result = diesel::update(publish_jobs::table.find(nostr_event_id))
+        .set((
+            publish_jobs::state.eq(PublishState::Failed.as_str()),
+            publish_jobs::attempt.eq(publish_jobs::attempt + 1),
+            publish_jobs::error.eq(Some(error_msg.to_string())),
+            publish_jobs::lease_owner.eq(None::<String>),
+            publish_jobs::lease_expires_at.eq(None::<DateTime<Utc>>),
+            publish_jobs::completed_at.eq(None::<DateTime<Utc>>),
+            publish_jobs::updated_at.eq(now),
+        ))
+        .get_result::<PublishJob>(conn)?;
+    Ok(result)
+}
+
+fn mark_publish_job_skipped(
+    conn: &mut PgConnection,
+    nostr_event_id: &str,
+    error_msg: Option<&str>,
+) -> Result<PublishJob> {
+    let now = Utc::now();
+    let result = diesel::update(publish_jobs::table.find(nostr_event_id))
+        .set((
+            publish_jobs::state.eq(PublishState::Skipped.as_str()),
+            publish_jobs::error.eq(error_msg.map(str::to_string)),
+            publish_jobs::lease_owner.eq(None::<String>),
+            publish_jobs::lease_expires_at.eq(None::<DateTime<Utc>>),
+            publish_jobs::completed_at.eq(Some(now)),
+            publish_jobs::updated_at.eq(now),
+        ))
+        .get_result::<PublishJob>(conn)?;
+    Ok(result)
+}
+
+/// Cancel a publish job due to a delete signal.
+///
+/// If the row does not yet exist, inserts a tombstone row in `skipped` state.
+/// Existing `published` and `skipped` rows are left untouched.
+pub fn cancel_publish_job(
+    conn: &mut PgConnection,
+    tombstone_job: &NewPublishJob,
+    error_msg: Option<&str>,
+) -> Result<PublishJob> {
+    let nostr_event_id = tombstone_job.nostr_event_id;
+    if let Some(existing) = get_publish_job(conn, nostr_event_id)? {
+        if existing.state == PublishState::Published.as_str()
+            || existing.state == PublishState::Skipped.as_str()
+        {
+            return Ok(existing);
+        }
+        return mark_publish_job_skipped(conn, nostr_event_id, error_msg);
+    }
+
+    let tombstone = NewPublishJob {
+        nostr_event_id,
+        nostr_pubkey: tombstone_job.nostr_pubkey,
+        event_created_at: tombstone_job.event_created_at,
+        event_payload: tombstone_job.event_payload.clone(),
+        job_source: tombstone_job.job_source,
+        state: PublishState::Skipped.as_str(),
+    };
+    diesel::insert_into(publish_jobs::table)
+        .values(&tombstone)
+        .on_conflict(publish_jobs::nostr_event_id)
+        .do_nothing()
+        .execute(conn)?;
+
+    let existing = get_publish_job(conn, nostr_event_id)?
+        .ok_or_else(|| anyhow!("publish job missing after cancel for {nostr_event_id}"))?;
+    if existing.state == PublishState::Published.as_str()
+        || existing.state == PublishState::Skipped.as_str()
+    {
+        if existing.state == PublishState::Skipped.as_str() && existing.completed_at.is_some() {
+            return Ok(existing);
+        }
+    }
+
+    mark_publish_job_skipped(conn, nostr_event_id, error_msg)
+}
+
 /// Get pending publish jobs, ordered by creation time.
 pub fn get_pending_jobs(conn: &mut PgConnection, limit: i64) -> Result<Vec<PublishJob>> {
     let results = publish_jobs::table
@@ -418,15 +724,12 @@ pub fn get_pending_jobs(conn: &mut PgConnection, limit: i64) -> Result<Vec<Publi
     Ok(results)
 }
 
-/// Insert a new publish job.
+/// Insert a new publish job (legacy helper).
 pub fn insert_publish_job(conn: &mut PgConnection, job: &NewPublishJob) -> Result<PublishJob> {
-    let result = diesel::insert_into(publish_jobs::table)
-        .values(job)
-        .get_result::<PublishJob>(conn)?;
-    Ok(result)
+    enqueue_publish_job(conn, job)
 }
 
-/// Update a publish job's state and attempt count.
+/// Update a publish job's state and attempt count (legacy helper).
 pub fn update_publish_job_state(
     conn: &mut PgConnection,
     nostr_event_id: &str,

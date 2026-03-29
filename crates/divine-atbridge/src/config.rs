@@ -6,6 +6,8 @@ use anyhow::{Context, Result};
 
 const PRODUCTION_DIVINE_HANDLE_DOMAIN: &str = "divine.video";
 const PRODUCTION_DIVINE_PDS_URL: &str = "https://pds.divine.video";
+pub const DEFAULT_BACKFILL_BATCH_SIZE: i64 = 25;
+pub const DEFAULT_BACKFILL_PLANNER_INTERVAL_SECS: u64 = 30;
 
 /// Configuration for the ATBridge service.
 #[derive(Debug, Clone)]
