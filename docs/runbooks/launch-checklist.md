@@ -3,15 +3,18 @@
 ## Deploy Contract
 
 - Confirm `divine-iac-coreconfig` is the source of truth for staging and production manifests, secrets, and routes.
+- Confirm ArgoCD covers the GKE services (`keycast`, `rsky-pds`, `divine-atbridge`, `divine-handle-gateway`) but not the Cloudflare Worker or Fastly edge.
 - Confirm the `sky` namespace exists for `divine-sky` workloads.
 - Confirm `divine-atbridge` and `divine-handle-gateway` are internal-only services.
 - Confirm `divine-feedgen` and `divine-labeler` are the only public services.
 - Confirm public hostnames are `feed.staging.dvines.org`, `feed.divine.video`, `labeler.staging.dvines.org`, and `labeler.divine.video`.
+- Confirm the live ATProto contract is `login.divine.video` for the human console, `entryway.divine.video` for the Authorization Server, and `pds.divine.video` for the PDS.
 
 ## Preflight
 
 - Confirm `cargo fmt --check`, `cargo clippy --workspace --all-targets -- -D warnings`, and `bash scripts/test-workspace.sh` pass on the release candidate.
 - If `cargo check --workspace` is still failing because of the unrelated `divine-feedgen` baseline, record that separately and do not treat it as a bridge-scheduler regression.
+- Confirm the rollout order is: host contract, PDS protected-resource metadata, keycast GitOps/runtime wiring, immutable image pinning, then public-edge deploys.
 - Verify keycast can claim usernames without enabling ATProto by default.
 - Verify a verified cookie-auth user can open `settings/security` and see the `Bluesky Account` card without unlocking private-key export first.
 - Verify keycast `/api/user/atproto/enable`, `/status`, and `/disable` work for an authenticated user.
@@ -68,6 +71,7 @@
   `SELECT nostr_event_id, job_source, lease_owner, lease_expires_at FROM publish_jobs WHERE state = 'in_progress' ORDER BY lease_expires_at ASC NULLS FIRST;`
 - Check for users with failed backlog planning before widening traffic:
   `SELECT nostr_pubkey, did, publish_backfill_error FROM account_links WHERE publish_backfill_state = 'failed' ORDER BY updated_at DESC;`
+- Confirm the Cloudflare Worker (`divine-name-server`) and Fastly service (`divine-router`) are deployed separately from ArgoCD-managed GKE workloads before a production cutover.
 - Confirm the canonical architecture boundary is still intact:
   - keycast owns consent/lifecycle
   - divine-handle-gateway syncs ready/failed/disabled transitions back into keycast
