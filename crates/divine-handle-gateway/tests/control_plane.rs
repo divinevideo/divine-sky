@@ -158,6 +158,52 @@ async fn control_plane_opt_in_creates_pending_status() {
 
 #[tokio::test]
 #[serial]
+async fn control_plane_opt_in_respects_crosspost_enabled_false() {
+    let database_url = test_database_url();
+    reset_database(&database_url);
+
+    let mut name_server = mockito::Server::new_async().await;
+    let _sync_stub = name_server
+        .mock("POST", "/api/internal/username/set-atproto")
+        .with_status(200)
+        .create_async()
+        .await;
+    let _keycast_sync_stub = name_server
+        .mock("POST", "/api/internal/atproto/state")
+        .with_status(200)
+        .create_async()
+        .await;
+
+    let app = build_app(database_url, name_server.url());
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/account-links/opt-in")
+                .header("content-type", "application/json")
+                .header("authorization", AUTH_HEADER)
+                .body(Body::from(
+                    json!({
+                        "nostr_pubkey": "npub1nopost",
+                        "handle": "nopost.divine.video",
+                        "crosspost_enabled": false
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+    let payload = response_json(response).await;
+    assert_eq!(payload["provisioning_state"], "pending");
+    assert_eq!(payload["crosspost_enabled"], false);
+}
+
+#[tokio::test]
+#[serial]
 async fn control_plane_status_and_export_reflect_provisioned_link() {
     let database_url = test_database_url();
     reset_database(&database_url);
