@@ -2,6 +2,8 @@
 
 Use this checklist to validate the end-to-end ATProto opt-in flow across `rsky-pds`, `keycast`, `divine-sky`, `divine-name-server`, Fastly KV, and `divine-router`.
 
+The GKE workloads are delivered through `divine-iac-coreconfig` and ArgoCD. The public edge services (`divine-name-server` on Cloudflare Workers and `divine-router` on Fastly Compute@Edge) are deployed separately and must be live before treating the smoke as production-valid.
+
 ## Production Login Contract
 
 The production login contract is separate from the lifecycle smoke:
@@ -12,6 +14,7 @@ The production login contract is separate from the lifecycle smoke:
 - `entryway.divine.video` is the ATProto Authorization Server
 
 Do not use `login.divine.video` as a protocol origin in production checks; the public discovery chain should go handle -> DID -> PDS -> entryway.
+If any step in the edge chain is not live, the smoke is staging-only and should not be used to widen rollout.
 
 Use `scripts/smoke-divine-atproto-login.sh` to validate the handle, DID, PDS, and entryway chain before running the opt-in lifecycle checks below.
 
@@ -110,3 +113,4 @@ For a localnet run instead of staging:
 - Live queue success must advance the relay cursor after enqueue, not after PDS completion.
 - Backfill failure must surface as `account_links.publish_backfill_state = 'failed'` with `publish_backfill_error` populated.
 - Client feature flags must be required to expose the ATProto controls on mobile and web.
+- The smoke order must be: login-chain smoke, opt-in lifecycle smoke, then any rollout widening.

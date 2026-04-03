@@ -1,5 +1,9 @@
 # login.divine.video ATProto Auth Server Design
 
+> **Superseded by:** [entryway.divine.video ATProto Login Boundary Design](/Users/rabble/code/divine/divine-sky/docs/superpowers/specs/2026-04-03-entryway-divine-video-atproto-login-boundary-design.md)
+>
+> This document reflects the earlier assumption that `login.divine.video` would be the public ATProto Authorization Server. The current boundary is `login.divine.video` for the Keycast human console and `entryway.divine.video` for the public ATProto Authorization Server.
+
 ## Goal
 
 Make `login.divine.video` a valid ATProto Authorization Server so other Bluesky-compatible clients can use it for account authentication.
