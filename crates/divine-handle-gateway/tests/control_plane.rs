@@ -412,3 +412,178 @@ async fn control_plane_disable_does_not_expose_public_well_known_resolution() {
 
     assert_eq!(well_known_disabled.status(), StatusCode::NOT_FOUND);
 }
+
+#[tokio::test]
+#[serial]
+async fn control_plane_enable_re_enables_disabled_account() {
+    let database_url = test_database_url();
+    reset_database(&database_url);
+
+    let mut name_server = mockito::Server::new_async().await;
+    let _sync_stub = name_server
+        .mock("POST", "/api/internal/username/set-atproto")
+        .with_status(200)
+        .expect_at_least(1)
+        .create_async()
+        .await;
+    let _keycast_sync_stub = name_server
+        .mock("POST", "/api/internal/atproto/state")
+        .with_status(200)
+        .expect_at_least(1)
+        .create_async()
+        .await;
+
+    let app = build_app(database_url, name_server.url());
+
+    // 1. Provision an account
+    let _ = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/account-links/provision")
+                .header("content-type", "application/json")
+                .header("authorization", AUTH_HEADER)
+                .body(Body::from(
+                    json!({
+                        "nostr_pubkey": "npub1enable",
+                        "handle": "enabletest.divine.video",
+                        "did": "did:plc:enable123"
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    // 2. Disable it
+    let _ = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/account-links/npub1enable/disable")
+                .header("authorization", AUTH_HEADER)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    // 3. Re-enable it
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/account-links/npub1enable/enable")
+                .header("authorization", AUTH_HEADER)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let payload = response_json(response).await;
+    assert_eq!(payload["crosspost_enabled"], true);
+    assert_eq!(payload["provisioning_state"], "ready");
+    assert!(payload["disabled_at"].is_null());
+}
+
+#[tokio::test]
+#[serial]
+async fn control_plane_enable_returns_404_for_unknown_pubkey() {
+    let database_url = test_database_url();
+    reset_database(&database_url);
+
+    let mut name_server = mockito::Server::new_async().await;
+    let _sync_stub = name_server
+        .mock("POST", "/api/internal/username/set-atproto")
+        .with_status(200)
+        .create_async()
+        .await;
+    let _keycast_sync_stub = name_server
+        .mock("POST", "/api/internal/atproto/state")
+        .with_status(200)
+        .create_async()
+        .await;
+
+    let app = build_app(database_url, name_server.url());
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/account-links/nonexistent/enable")
+                .header("authorization", AUTH_HEADER)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+#[serial]
+async fn control_plane_enable_is_idempotent() {
+    let database_url = test_database_url();
+    reset_database(&database_url);
+
+    let mut name_server = mockito::Server::new_async().await;
+    let _sync_stub = name_server
+        .mock("POST", "/api/internal/username/set-atproto")
+        .with_status(200)
+        .expect_at_least(1)
+        .create_async()
+        .await;
+    let _keycast_sync_stub = name_server
+        .mock("POST", "/api/internal/atproto/state")
+        .with_status(200)
+        .expect_at_least(1)
+        .create_async()
+        .await;
+
+    let app = build_app(database_url, name_server.url());
+
+    // Provision an account (already crosspost_enabled = true)
+    let _ = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/account-links/provision")
+                .header("content-type", "application/json")
+                .header("authorization", AUTH_HEADER)
+                .body(Body::from(
+                    json!({
+                        "nostr_pubkey": "npub1idem",
+                        "handle": "idemtest.divine.video",
+                        "did": "did:plc:idem123"
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    // Enable when already enabled — should return 200 (idempotent)
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/account-links/npub1idem/enable")
+                .header("authorization", AUTH_HEADER)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let payload = response_json(response).await;
+    assert_eq!(payload["crosspost_enabled"], true);
+}
