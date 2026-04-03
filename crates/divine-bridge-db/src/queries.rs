@@ -210,6 +210,33 @@ pub fn disable_account_link(
     Ok(result)
 }
 
+/// Re-enable a previously disabled account-link record.
+///
+/// Restores `provisioning_state` to `ready` if the account has a DID
+/// (was previously provisioned), or `pending` if not.
+pub fn enable_account_link(
+    conn: &mut PgConnection,
+    nostr_pubkey: &str,
+) -> Result<AccountLinkLifecycleRow> {
+    let result = sql_query(
+        "UPDATE account_links
+         SET crosspost_enabled = TRUE,
+             provisioning_state = CASE
+                 WHEN did IS NOT NULL THEN 'ready'
+                 ELSE 'pending'
+             END,
+             disabled_at = NULL,
+             updated_at = NOW()
+         WHERE nostr_pubkey = $1
+         RETURNING nostr_pubkey, did, handle, crosspost_enabled, signing_key_id,
+                   plc_rotation_key_ref, provisioning_state, provisioning_error, disabled_at,
+                   created_at, updated_at",
+    )
+    .bind::<Text, _>(nostr_pubkey)
+    .get_result::<AccountLinkLifecycleRow>(conn)?;
+    Ok(result)
+}
+
 // ---------------------------------------------------------------------------
 // provisioning_keys queries
 // ---------------------------------------------------------------------------
