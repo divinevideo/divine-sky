@@ -587,3 +587,85 @@ async fn control_plane_enable_is_idempotent() {
     let payload = response_json(response).await;
     assert_eq!(payload["crosspost_enabled"], true);
 }
+
+#[tokio::test]
+#[serial]
+async fn control_plane_enable_returns_bad_gateway_on_sync_failure() {
+    let database_url = test_database_url();
+    reset_database(&database_url);
+
+    let mut name_server = mockito::Server::new_async().await;
+    // Success stubs for provision and disable steps
+    let _sync_stub = name_server
+        .mock("POST", "/api/internal/username/set-atproto")
+        .with_status(200)
+        .expect_at_least(1)
+        .create_async()
+        .await;
+    let _keycast_sync_stub = name_server
+        .mock("POST", "/api/internal/atproto/state")
+        .with_status(200)
+        .expect_at_least(1)
+        .create_async()
+        .await;
+
+    let app = build_app(database_url, name_server.url());
+
+    // 1. Provision an account
+    let _ = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/account-links/provision")
+                .header("content-type", "application/json")
+                .header("authorization", AUTH_HEADER)
+                .body(Body::from(
+                    json!({
+                        "nostr_pubkey": "npub1syncfail",
+                        "handle": "syncfail.divine.video",
+                        "did": "did:plc:syncfail123"
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    // 2. Disable it
+    let _ = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/account-links/npub1syncfail/disable")
+                .header("authorization", AUTH_HEADER)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    // 3. Replace sync mocks with failing ones for the enable call
+    let _failing_keycast = name_server
+        .mock("POST", "/api/internal/atproto/state")
+        .with_status(500)
+        .create_async()
+        .await;
+
+    // 4. Attempt to enable — sync should fail, returning BAD_GATEWAY
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/account-links/npub1syncfail/enable")
+                .header("authorization", AUTH_HEADER)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+}
