@@ -137,8 +137,9 @@ impl AppState {
         &self,
         nostr_pubkey: String,
         handle: String,
+        crosspost_enabled: bool,
     ) -> anyhow::Result<AccountLinkRecord> {
-        self.store.upsert_pending_opt_in(&nostr_pubkey, &handle)
+        self.store.upsert_pending_opt_in(&nostr_pubkey, &handle, crosspost_enabled)
     }
 
     pub(crate) fn enqueue_provisioning(&self, nostr_pubkey: &str, handle: &str) {
@@ -159,7 +160,7 @@ impl AppState {
             .flatten()
             .is_none()
         {
-            let _ = self.store.upsert_pending_opt_in(&nostr_pubkey, &handle);
+            let _ = self.store.upsert_pending_opt_in(&nostr_pubkey, &handle, true);
         }
         self.store
             .mark_ready(&nostr_pubkey, &did)

@@ -31,6 +31,7 @@ impl DbStore {
         &self,
         nostr_pubkey: &str,
         handle: &str,
+        crosspost_enabled: bool,
     ) -> Result<AccountLinkRecord> {
         let signing_key_id = format!("pending-signing:{nostr_pubkey}");
         let plc_rotation_key_ref = format!("pending-rotation:{nostr_pubkey}");
@@ -41,7 +42,7 @@ impl DbStore {
             handle,
             &signing_key_id,
             &plc_rotation_key_ref,
-            true,
+            crosspost_enabled,
         )?;
         Ok(AccountLinkRecord::from(row))
     }
