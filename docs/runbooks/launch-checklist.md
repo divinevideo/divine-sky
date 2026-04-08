@@ -3,7 +3,7 @@
 ## Deploy Contract
 
 - Confirm `divine-iac-coreconfig` is the source of truth for staging and production manifests, secrets, and routes.
-- Confirm ArgoCD covers the GKE services (`keycast`, `rsky-pds`, `divine-atbridge`, `divine-handle-gateway`) but not the Cloudflare Worker or Fastly edge.
+- Confirm ArgoCD covers the GKE services (`keycast`, `rsky-pds`, `divine-atbridge`, `divine-handle-gateway`, `divine-feedgen`, `divine-labeler`) but not the Cloudflare Worker or Fastly edge.
 - Confirm the `sky` namespace exists for `divine-sky` workloads.
 - Confirm `divine-atbridge` and `divine-handle-gateway` are internal-only services.
 - Confirm `divine-feedgen` and `divine-labeler` are the only public services.
