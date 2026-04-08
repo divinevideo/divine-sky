@@ -85,19 +85,18 @@ For a localnet run instead of staging:
      - `status = active`
      - `atproto_did = did:plc:...`
      - `atproto_state = ready`
-<<<<<<< HEAD
-10. Verify `divine-router` serves `https://username.divine.video/.well-known/atproto-did` and returns the bare DID.
-11. If the user is newly migrated, inspect `account_links.publish_backfill_state`.
+11. Verify `divine-router` serves `https://username.divine.video/.well-known/atproto-did` and returns the bare DID.
+12. If the user is newly migrated, inspect `account_links.publish_backfill_state`.
     - expected: `not_started -> in_progress -> completed`
-12. Publish an older historical post and a new live post for the opted-in user.
-13. Verify the live post is queued and published through `publish_jobs.job_source = 'live'`.
-14. Verify any seeded backlog rows use `publish_jobs.job_source = 'backfill'` and drain oldest first by `event_created_at`.
-15. Verify the live post is allowed to publish without waiting for remaining backlog rows.
-16. If the user history includes a later delete for an older post, verify the affected backlog job lands in `state = 'skipped'` instead of publishing.
-17. Disable ATProto.
-18. Verify keycast status reaches `disabled`.
-19. Verify future mirrored posts stop and `divine-router` returns `404` for `/.well-known/atproto-did`.
-20. Return to `settings/security` and verify the `Bluesky Account` card reflects the disabled state.
+13. Publish an older historical post and a new live post for the opted-in user.
+14. Verify the live post is queued and published through `publish_jobs.job_source = 'live'`.
+15. Verify any seeded backlog rows use `publish_jobs.job_source = 'backfill'` and drain oldest first by `event_created_at`.
+16. Verify the live post is allowed to publish without waiting for remaining backlog rows.
+17. If the user history includes a later delete for an older post, verify the affected backlog job lands in `state = 'skipped'` instead of publishing.
+18. Disable ATProto.
+19. Verify keycast status reaches `disabled`.
+20. Verify future mirrored posts stop and `divine-router` returns `404` for `/.well-known/atproto-did`.
+21. Return to `settings/security` and verify the `Bluesky Account` card reflects the disabled state.
    - expected UI: public DID resolution and future cross-posting are disabled
    - expected status: `enabled = false`
    - expected status: `state = disabled`
