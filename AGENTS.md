@@ -18,7 +18,13 @@ Prefer behavior-focused Rust test names such as `translates_nip71_video_to_bsky_
 
 ## Commit & Pull Request Guidelines
 
-This branch has no commit history yet, so there is no repository-specific commit convention to copy. Start with Conventional Commit prefixes such as `feat:`, `fix:`, and `docs:` in the imperative mood. Pull requests should summarize scope, list any new commands or config files, link the relevant section of `pompt_plan.md`, and include logs or screenshots when behavior changes.
+Use Conventional Commit PR titles in the form `type(scope): summary` or `type: summary`, and set the correct title when opening the PR instead of relying on a later edit. If the title changes after opening, verify that the semantic PR title check reruns successfully. Pull requests should summarize scope, list any new commands or config files, link the relevant section of `pompt_plan.md`, and include logs or screenshots when behavior changes.
+
+Keep PRs tightly scoped. Do not mix unrelated cleanup, formatting churn, or speculative refactors into the same change. Temporary or transitional code must include `TODO(#issue):` with the tracking issue for removal.
+
+## Sensitive Information
+
+Do not publish private credentials, internal-only environment details, or sensitive user data. Public issues, PRs, branch names, screenshots, and descriptions must not mention corporate partners, customers, brands, campaign names, or other sensitive external identities unless a maintainer explicitly approves it. Use generic descriptors instead.
 
 ## Agent-Specific Notes
 

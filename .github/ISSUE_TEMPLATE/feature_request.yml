@@ -1,0 +1,16 @@
+name: Feature Request
+description: Propose an enhancement
+title: "feat: "
+labels: [enhancement]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use generic descriptors instead of partner, customer, or brand names in public issue titles, bodies, and screenshots unless a maintainer explicitly approves naming them.
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: Describe the requested capability.
+    validations:
+      required: true

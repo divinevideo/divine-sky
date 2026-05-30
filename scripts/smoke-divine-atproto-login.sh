@@ -1,6 +1,17 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+show_help() {
+  cat <<'EOF'
+Usage: smoke-divine-atproto-login.sh [--help]
+
+Validates the public Divine ATProto login contract for the configured handle.
+
+Environment:
+  HANDLE   Handle to probe. Defaults to rabble.divine.video.
+EOF
+}
+
 fail() {
   printf 'FAIL: %s\n' "$1" >&2
   exit 1
@@ -9,6 +20,18 @@ fail() {
 require_cmd() {
   command -v "$1" >/dev/null 2>&1 || fail "missing required command: $1"
 }
+
+case "${1:-}" in
+  -h|--help)
+    show_help
+    exit 0
+    ;;
+  "")
+    ;;
+  *)
+    fail "unknown argument: $1"
+    ;;
+esac
 
 require_cmd curl
 require_cmd python3

@@ -136,7 +136,9 @@ export PKG_CONFIG_PATH="/opt/homebrew/opt/libpq/lib/pkgconfig:${PKG_CONFIG_PATH:
 
 ## Expected Result
 
-`cargo check --workspace`, the focused crate tests, and `cargo test --workspace` should all pass from the repository root.
+On a clean workspace baseline, `cargo check --workspace`, the focused crate tests, and `cargo test --workspace` should all pass from the repository root.
+
+If `cargo check --workspace` still fails on your branch, treat unrelated baseline failures separately from bridge-runtime verification. As of March 29, 2026, the known baseline break is still `divine-feedgen` missing `skeleton::FeedStore` / `DbFeedStore`; the publish-scheduler work is verified with targeted crate checks instead.
 
 For the ATProto path specifically:
 
@@ -144,6 +146,34 @@ For the ATProto path specifically:
 - `divine-handle-gateway` should persist pending/ready/failed/disabled lifecycle state in PostgreSQL
 - `divine-handle-gateway` should sync final lifecycle state back into keycast via `/api/internal/atproto/state`
 - `divine-atbridge` should only publish when `crosspost_enabled && provisioning_state == "ready"`
+- `divine-atbridge` should enqueue live work before advancing the relay cursor
+- migrated-user backlog should publish oldest-first inside the `backfill` lane, while live jobs may still overtake that backlog
+
+## Publish Scheduler
+
+ATProto publishing is now queue-backed:
+
+- live relay events enqueue durable `publish_jobs` rows before the relay cursor advances
+- historical user backlog is planned separately and enqueued as `backfill`
+- backfill jobs for a user drain oldest first by `event_created_at`
+- live jobs do not wait for backlog; new posts may appear on ATProto before older backlog items for that user
+- delete events can cancel queued backlog work before a worker publishes it
+
+Use these checks when validating the runtime:
+
+```sql
+-- Stuck or abandoned leased jobs
+SELECT nostr_event_id, job_source, state, lease_owner, lease_expires_at, updated_at
+FROM publish_jobs
+WHERE state = 'in_progress'
+ORDER BY lease_expires_at ASC NULLS FIRST, updated_at ASC;
+
+-- Users whose backlog planning failed
+SELECT nostr_pubkey, did, publish_backfill_state, publish_backfill_error, publish_backfill_started_at
+FROM account_links
+WHERE publish_backfill_state = 'failed'
+ORDER BY updated_at DESC;
+```
 
 ## Operator Bootstrap
 

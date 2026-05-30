@@ -1,17 +1,17 @@
-use std::collections::{HashMap, VecDeque};
 use std::fs;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
-use anyhow::Result;
-use async_trait::async_trait;
-use divine_atbridge::nostr_consumer::{NostrConsumer, RelayConnection};
-use divine_atbridge::pipeline::{
-    AccountLink, AccountStore, AssetManifestRecord, BridgePipeline, HttpBlobFetcher, RecordMapping,
-    RecordStore,
-};
+use diesel::Connection;
+use diesel::PgConnection;
+use diesel::RunQueryDsl;
+use divine_atbridge::pipeline::{BridgePipeline, HttpBlobFetcher};
 use divine_atbridge::publisher::PdsClient;
-use divine_atbridge::run_bridge_session;
+use divine_atbridge::runtime::{
+    enqueue_live_event, run_publish_worker_once, DbAccountStore, DbRecordStore, SharedConnection,
+    WorkerRunResult,
+};
+use divine_bridge_db::{get_ingest_offset, get_publish_job, get_record_mapping};
 use divine_bridge_types::{NostrEvent, RecordStatus};
 use secp256k1::rand::rngs::OsRng;
 use secp256k1::{Keypair, Secp256k1};
@@ -97,102 +97,64 @@ fn make_profile_event(
     )
 }
 
-struct MockConnection {
-    outgoing: Vec<String>,
-    incoming: VecDeque<String>,
+fn test_database_url() -> String {
+    std::env::var("TEST_DATABASE_URL")
+        .unwrap_or_else(|_| "postgres://divine:divine_dev@[::1]:5432/divine_bridge".to_string())
 }
 
-impl MockConnection {
-    fn new(messages: Vec<String>) -> Self {
-        Self {
-            outgoing: Vec::new(),
-            incoming: VecDeque::from(messages),
-        }
-    }
-}
-
-#[async_trait]
-impl RelayConnection for MockConnection {
-    async fn send(&mut self, msg: String) -> Result<()> {
-        self.outgoing.push(msg);
-        Ok(())
-    }
-
-    async fn recv(&mut self) -> Result<Option<String>> {
-        Ok(self.incoming.pop_front())
-    }
-
-    async fn close(&mut self) -> Result<()> {
-        Ok(())
+fn execute_batch(conn: &mut PgConnection, sql: &str) {
+    for statement in sql
+        .split(';')
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+    {
+        diesel::sql_query(statement).execute(conn).unwrap();
     }
 }
 
-struct StaticAccountStore {
-    link: AccountLink,
+fn reset_database(database_url: &str) {
+    let mut conn =
+        PgConnection::establish(database_url).expect("test database should be reachable");
+    execute_batch(
+        &mut conn,
+        include_str!("../../../migrations/001_bridge_tables/down.sql"),
+    );
+    execute_batch(
+        &mut conn,
+        include_str!("../../../migrations/001_bridge_tables/up.sql"),
+    );
+    execute_batch(
+        &mut conn,
+        include_str!("../../../migrations/004_publish_job_scheduler/up.sql"),
+    );
 }
 
-#[async_trait]
-impl AccountStore for StaticAccountStore {
-    async fn get_account_link(&self, nostr_pubkey: &str) -> Result<Option<AccountLink>> {
-        if nostr_pubkey == self.link.nostr_pubkey {
-            Ok(Some(self.link.clone()))
-        } else {
-            Ok(None)
-        }
-    }
+fn test_db_lock() -> &'static Mutex<()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
 }
 
-#[derive(Default)]
-struct StatefulRecordStore {
-    mappings: Mutex<HashMap<String, RecordMapping>>,
-    manifests: Mutex<Vec<AssetManifestRecord>>,
-    statuses: Mutex<Vec<(String, Option<String>, RecordStatus)>>,
-    deleted: Mutex<Vec<String>>,
+fn shared_connection(database_url: &str) -> SharedConnection {
+    Arc::new(Mutex::new(
+        PgConnection::establish(database_url).expect("test database should be reachable"),
+    ))
 }
 
-#[async_trait]
-impl RecordStore for StatefulRecordStore {
-    async fn is_event_processed(&self, event_id: &str) -> Result<bool> {
-        Ok(self.mappings.lock().unwrap().contains_key(event_id))
-    }
-
-    async fn save_record_mapping(&self, mapping: RecordMapping) -> Result<()> {
-        self.mappings
-            .lock()
-            .unwrap()
-            .insert(mapping.nostr_event_id.clone(), mapping);
-        Ok(())
-    }
-
-    async fn get_mapping_by_nostr_id(&self, event_id: &str) -> Result<Option<RecordMapping>> {
-        Ok(self.mappings.lock().unwrap().get(event_id).cloned())
-    }
-
-    async fn mark_deleted(&self, event_id: &str) -> Result<()> {
-        self.deleted.lock().unwrap().push(event_id.to_string());
-        if let Some(mapping) = self.mappings.lock().unwrap().get_mut(event_id) {
-            mapping.deleted = true;
-        }
-        Ok(())
-    }
-
-    async fn save_asset_manifest(&self, entry: AssetManifestRecord) -> Result<()> {
-        self.manifests.lock().unwrap().push(entry);
-        Ok(())
-    }
-
-    async fn update_record_mapping_status(
-        &self,
-        event_id: &str,
-        cid: Option<&str>,
-        status: RecordStatus,
-    ) -> Result<()> {
-        self.statuses
-            .lock()
-            .unwrap()
-            .push((event_id.to_string(), cid.map(str::to_string), status));
-        Ok(())
-    }
+fn insert_ready_account(conn: &mut PgConnection, nostr_pubkey: &str, did: &str, handle: &str) {
+    diesel::sql_query(format!(
+        "INSERT INTO account_links (
+            nostr_pubkey, did, handle, crosspost_enabled, signing_key_id,
+            plc_rotation_key_ref, provisioning_state, provisioning_error,
+            publish_backfill_state, publish_backfill_started_at,
+            publish_backfill_completed_at, publish_backfill_error,
+            disabled_at
+        ) VALUES (
+            '{nostr_pubkey}', '{did}', '{handle}', TRUE, 'signing-{nostr_pubkey}',
+            'rotation-{nostr_pubkey}', 'ready', NULL, 'not_started', NULL, NULL, NULL, NULL
+        )"
+    ))
+    .execute(conn)
+    .expect("account should insert");
 }
 
 #[test]
@@ -297,7 +259,12 @@ fn e2e_local_stack_defines_required_services_and_healthchecks() {
 }
 
 #[tokio::test]
-async fn e2e_local_stack_covers_publish_delete_replay_and_profile_sync() {
+async fn e2e_local_stack_scheduler_publishes_profiles_posts_and_deletes() {
+    let _guard = test_db_lock().lock().unwrap();
+    let database_url = test_database_url();
+    reset_database(&database_url);
+    let connection = shared_connection(&database_url);
+
     let secp = Secp256k1::new();
     let keypair = Keypair::new(&secp, &mut OsRng);
     let mut blossom_server = mockito::Server::new_async().await;
@@ -406,57 +373,104 @@ async fn e2e_local_stack_covers_publish_delete_replay_and_profile_sync() {
         &format!("{}/profile/banner.png", blossom_server.url()),
     );
     let delete_event = make_delete_event(&keypair, 1_700_000_102, &publish_event.id);
-
-    let frames = vec![
-        serde_json::json!(["EVENT", "sub-1", publish_event.clone()]).to_string(),
-        serde_json::json!(["EVENT", "sub-1", profile_event.clone()]).to_string(),
-        serde_json::json!(["EVENT", "sub-1", delete_event.clone()]).to_string(),
-    ];
+    {
+        let mut conn = connection.lock().unwrap();
+        insert_ready_account(
+            &mut conn,
+            &publish_event.pubkey,
+            "did:plc:e2e",
+            "e2e.divine.video",
+        );
+    }
 
     let pipeline = BridgePipeline::new(
-        StaticAccountStore {
-            link: AccountLink {
-                nostr_pubkey: publish_event.pubkey.clone(),
-                did: "did:plc:e2e".to_string(),
-                opted_in: true,
-            },
-        },
-        StatefulRecordStore::default(),
+        DbAccountStore::new(connection.clone()),
+        DbRecordStore::new(connection.clone()),
         HttpBlobFetcher::new(Duration::from_secs(5)).unwrap(),
         PdsClient::new(pds_server.url(), "e2e-token"),
         PdsClient::new(pds_server.url(), "e2e-token"),
     );
 
-    let mut consumer = NostrConsumer::new("wss://relay.example".to_string());
-    let mut connection = MockConnection::new(frames);
-    run_bridge_session(&mut consumer, &mut connection, &pipeline)
+    enqueue_live_event(&connection, "runtime-e2e", &pipeline, &publish_event)
         .await
-        .unwrap();
+        .expect("publish event should enqueue");
+    let publish_result = run_publish_worker_once(
+        &connection,
+        &pipeline,
+        divine_bridge_types::PublishJobSource::Live,
+        "runtime-live-worker",
+    )
+    .await
+    .expect("publish worker should complete");
+    assert!(matches!(
+        publish_result,
+        WorkerRunResult::Completed { ref nostr_event_id } if nostr_event_id == &publish_event.id
+    ));
 
-    let published_statuses = pipeline.record_store.statuses.lock().unwrap().clone();
-    assert!(published_statuses.iter().any(|(event_id, cid, status)| {
-        event_id == &publish_event.id
-            && cid.as_deref() == Some("bafyrecorde2evideo")
-            && *status == RecordStatus::Published
-    }));
-    assert!(published_statuses.iter().any(|(event_id, cid, status)| {
-        event_id == &profile_event.id
-            && cid.as_deref() == Some("bafyrecordprofile")
-            && *status == RecordStatus::Published
-    }));
-
-    assert_eq!(
-        pipeline.record_store.deleted.lock().unwrap().as_slice(),
-        std::slice::from_ref(&publish_event.id)
-    );
-    assert_eq!(consumer.last_seen_timestamp, Some(delete_event.created_at));
-
-    let mut replay_connection = MockConnection::new(vec![]);
-    run_bridge_session(&mut consumer, &mut replay_connection, &pipeline)
+    enqueue_live_event(&connection, "runtime-e2e", &pipeline, &profile_event)
         .await
-        .unwrap();
-    let req: serde_json::Value = serde_json::from_str(&replay_connection.outgoing[0]).unwrap();
-    assert_eq!(req[2]["since"], delete_event.created_at);
+        .expect("profile event should enqueue");
+    let profile_result = run_publish_worker_once(
+        &connection,
+        &pipeline,
+        divine_bridge_types::PublishJobSource::Live,
+        "runtime-live-worker",
+    )
+    .await
+    .expect("profile worker should complete");
+    assert!(matches!(
+        profile_result,
+        WorkerRunResult::Completed { ref nostr_event_id } if nostr_event_id == &profile_event.id
+    ));
+
+    enqueue_live_event(&connection, "runtime-e2e", &pipeline, &delete_event)
+        .await
+        .expect("delete event should enqueue/cancel");
+    let delete_job = {
+        let mut conn = connection.lock().unwrap();
+        get_publish_job(&mut conn, &delete_event.id)
+            .expect("delete job lookup should succeed")
+            .expect("delete execution job should be queued")
+    };
+    assert_eq!(delete_job.state, "pending");
+
+    let delete_result = run_publish_worker_once(
+        &connection,
+        &pipeline,
+        divine_bridge_types::PublishJobSource::Live,
+        "runtime-live-worker",
+    )
+    .await
+    .expect("delete worker should complete");
+    assert!(matches!(
+        delete_result,
+        WorkerRunResult::Completed { ref nostr_event_id } if nostr_event_id == &delete_event.id
+    ));
+
+    let mut conn = connection.lock().unwrap();
+    let published_mapping = get_record_mapping(&mut conn, &publish_event.id)
+        .expect("publish mapping lookup should succeed")
+        .expect("publish mapping should exist");
+    assert_eq!(published_mapping.status, RecordStatus::Deleted.as_str());
+
+    let publish_job = get_publish_job(&mut conn, &publish_event.id)
+        .expect("publish job lookup should succeed")
+        .expect("publish job should exist");
+    let profile_job = get_publish_job(&mut conn, &profile_event.id)
+        .expect("profile job lookup should succeed")
+        .expect("profile job should exist");
+    let delete_job = get_publish_job(&mut conn, &delete_event.id)
+        .expect("delete job lookup should succeed")
+        .expect("delete job should exist");
+    assert_eq!(publish_job.state, "published");
+    assert_eq!(profile_job.state, "published");
+    assert_eq!(delete_job.state, "published");
+
+    let cursor = get_ingest_offset(&mut conn, "runtime-e2e")
+        .expect("cursor lookup should succeed")
+        .expect("cursor should exist");
+    assert_eq!(cursor.last_event_id, delete_event.id);
+    assert_eq!(cursor.last_created_at.timestamp(), delete_event.created_at);
 
     video_create.assert_async().await;
     profile_put.assert_async().await;

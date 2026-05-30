@@ -36,6 +36,14 @@ impl NostrFilter {
     }
 }
 
+pub fn author_history_filter(author: String) -> NostrFilter {
+    NostrFilter {
+        kinds: vec![0, 5, 34235, 34236],
+        authors: Some(vec![author]),
+        since: None,
+    }
+}
+
 /// Messages the relay can send us.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RelayMessage {
@@ -101,6 +109,47 @@ pub fn parse_relay_message(raw: &str) -> Result<RelayMessage> {
         }
         _ => Ok(RelayMessage::Unknown(raw.to_string())),
     }
+}
+
+pub async fn collect_history_until_eose<C>(
+    conn: &mut C,
+    subscription_id: &str,
+    filter: &NostrFilter,
+) -> Result<Vec<NostrEvent>>
+where
+    C: RelayConnection + ?Sized,
+{
+    let req = serde_json::to_string(&serde_json::json!(["REQ", subscription_id, filter]))
+        .expect("history REQ serialization cannot fail");
+    conn.send(req)
+        .await
+        .context("failed to send history subscription")?;
+
+    let mut events = Vec::new();
+    while let Some(raw) = conn.recv().await.context("failed to read relay frame")? {
+        match parse_relay_message(&raw) {
+            Ok(RelayMessage::Event {
+                subscription_id: sub_id,
+                event,
+            }) if sub_id == subscription_id => events.push(event),
+            Ok(RelayMessage::Eose {
+                subscription_id: sub_id,
+            }) if sub_id == subscription_id => return Ok(events),
+            Ok(RelayMessage::Notice(message)) => {
+                tracing::warn!("relay NOTICE: {message}");
+            }
+            Ok(RelayMessage::Unknown(_))
+            | Ok(RelayMessage::Event { .. })
+            | Ok(RelayMessage::Eose { .. }) => {}
+            Err(error) => {
+                tracing::warn!("failed to parse relay message: {error}");
+            }
+        }
+    }
+
+    Err(anyhow!(
+        "relay history subscription {subscription_id} ended before EOSE"
+    ))
 }
 
 // ---------------------------------------------------------------------------

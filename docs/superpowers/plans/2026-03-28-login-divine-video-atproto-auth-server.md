@@ -1,5 +1,9 @@
 # login.divine.video ATProto Auth Server Implementation Plan
 
+> **Superseded by:** [entryway.divine.video Phase 2 Normalization Plan](/Users/rabble/code/divine/divine-sky/docs/superpowers/plans/2026-04-03-entryway-divine-video-phase2-normalization.md)
+>
+> This plan reflects the earlier `login.divine.video` auth-server assumption. Execute the entryway-normalized plan instead: `login.divine.video` is the Keycast human console, and `entryway.divine.video` is the public ATProto Authorization Server.
+
 > **For agentic workers:** REQUIRED: Use superpowers:subagent-driven-development (if subagents available) or superpowers:executing-plans to implement this plan. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Make `login.divine.video` an ATProto Authorization Server that external Bluesky-compatible clients can use for account authentication against DiVine-hosted ATProto accounts.

@@ -82,6 +82,14 @@ When a link reaches `ready`, the bridge runtime consumes the shared lifecycle st
 - `provisioning_state == "ready"`
 - `disabled_at IS NULL`
 
+Once a user is publishable, `divine-atbridge` uses a durable scheduler:
+
+- live relay events enqueue queue-backed jobs before the relay cursor advances
+- migrated history is planned separately as `backfill`
+- backlog publishes oldest first within that backfill lane
+- new live posts may overtake backlog posts for the same user
+- later delete events can cancel queued backlog work before it reaches ATProto
+
 Disabling must:
 
 - stop future mirroring

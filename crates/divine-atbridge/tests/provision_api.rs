@@ -37,6 +37,10 @@ fn reset_database(database_url: &str) {
         &mut conn,
         include_str!("../../../migrations/001_bridge_tables/up.sql"),
     );
+    execute_batch(
+        &mut conn,
+        include_str!("../../../migrations/004_publish_job_scheduler/up.sql"),
+    );
 }
 
 #[tokio::test]
@@ -69,7 +73,7 @@ async fn configured_internal_api_provisions_pending_link() {
 
     let pds_mock = pds_server
         .mock("POST", "/xrpc/com.atproto.server.createAccount")
-        .match_header("authorization", "Bearer admin-token")
+        .match_header("authorization", "Basic YWRtaW46YWRtaW4tdG9rZW4=")
         .with_status(200)
         .with_body("{}")
         .create_async()

@@ -536,6 +536,7 @@ dependencies = [
  "downcast-rs",
  "itoa",
  "pq-sys",
+ "serde_json",
 ]
 
 [[package]]
@@ -661,6 +662,7 @@ dependencies = [
  "diesel",
  "divine-bridge-types",
  "serde",
+ "serde_json",
 ]
 
 [[package]]

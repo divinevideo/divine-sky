@@ -80,6 +80,34 @@ pub enum ProcessResult {
     Error { message: String },
 }
 
+/// Queue-ready payload for a publish or tombstone job.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PublishJobEnvelope {
+    pub nostr_event_id: String,
+    pub nostr_pubkey: String,
+    pub event_created_at: i64,
+    pub event_payload: serde_json::Value,
+}
+
+/// Prepare-phase decision for a relay event.
+#[derive(Debug, Clone, PartialEq)]
+pub enum QueueDecision {
+    Enqueue(PublishJobEnvelope),
+    Cancel {
+        target_nostr_event_id: String,
+        tombstone_job: PublishJobEnvelope,
+    },
+    Skip {
+        reason: String,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DedupeMode {
+    QueueAware,
+    PublishedOnly,
+}
+
 // ---------------------------------------------------------------------------
 // Traits
 // ---------------------------------------------------------------------------
@@ -335,6 +363,18 @@ fn parse_rkey_from_at_uri(at_uri: &str) -> Result<String> {
         .context("published AT-URI is missing an rkey segment")
 }
 
+fn build_publish_job_envelope(
+    event: &NostrEvent,
+    nostr_event_id: String,
+) -> Result<PublishJobEnvelope> {
+    Ok(PublishJobEnvelope {
+        nostr_event_id,
+        nostr_pubkey: event.pubkey.clone(),
+        event_created_at: event.created_at,
+        event_payload: serde_json::to_value(event).context("failed to serialize event payload")?,
+    })
+}
+
 // ---------------------------------------------------------------------------
 // Pipeline
 // ---------------------------------------------------------------------------
@@ -372,9 +412,99 @@ where
         }
     }
 
+    /// Classify a relay event into a queue decision without performing publish side effects.
+    pub async fn prepare_publish_job(&self, event: &NostrEvent) -> Result<QueueDecision> {
+        // 1. Verify Nostr signature
+        match verify_nostr_event(event) {
+            Ok(true) => {}
+            Ok(false) => {
+                return Ok(QueueDecision::Skip {
+                    reason: "invalid signature".to_string(),
+                });
+            }
+            Err(e) => {
+                return Ok(QueueDecision::Skip {
+                    reason: format!("signature verification error: {e}"),
+                });
+            }
+        }
+
+        // 2. Check if user is linked and opted in
+        let account = self
+            .account_store
+            .get_account_link(&event.pubkey)
+            .await
+            .context("failed to look up account link")?;
+
+        match account {
+            Some(a) if a.opted_in => a,
+            Some(_) => {
+                return Ok(QueueDecision::Skip {
+                    reason: "user has not opted in".to_string(),
+                });
+            }
+            None => {
+                return Ok(QueueDecision::Skip {
+                    reason: "unknown pubkey — no account link".to_string(),
+                });
+            }
+        };
+
+        // 3. Handle deletion events as queue cancellation intents.
+        if event.kind == 5 {
+            let target_id = match get_deleted_event_id(event) {
+                Some(id) => id.to_string(),
+                None => {
+                    return Ok(QueueDecision::Skip {
+                        reason: "deletion event has no 'e' tag".to_string(),
+                    });
+                }
+            };
+            return Ok(QueueDecision::Cancel {
+                target_nostr_event_id: target_id.clone(),
+                tombstone_job: build_publish_job_envelope(event, target_id)?,
+            });
+        }
+
+        // 4. Check idempotency before enqueueing.
+        if self
+            .record_store
+            .is_event_processed(&event.id)
+            .await
+            .context("failed to check idempotency")?
+        {
+            return Ok(QueueDecision::Skip {
+                reason: "event already processed".to_string(),
+            });
+        }
+
+        // 5. Enqueue supported kinds.
+        if event.kind == 0 || event.kind == 34235 || event.kind == 34236 {
+            return Ok(QueueDecision::Enqueue(build_publish_job_envelope(
+                event,
+                event.id.clone(),
+            )?));
+        }
+
+        Ok(QueueDecision::Skip {
+            reason: format!("unsupported event kind: {}", event.kind),
+        })
+    }
+
+    /// Execute a queued publish job using only the persisted event payload.
+    pub async fn execute_publish_job(&self, job: &PublishJobEnvelope) -> Result<ProcessResult> {
+        let event: NostrEvent = serde_json::from_value(job.event_payload.clone())
+            .context("failed to deserialize queued event payload")?;
+        self.process_event_inner(&event, DedupeMode::PublishedOnly)
+            .await
+    }
+
     /// Process a single Nostr event through the full bridge pipeline.
     pub async fn process_event(&self, event: &NostrEvent) -> ProcessResult {
-        match self.process_event_inner(event).await {
+        match self
+            .process_event_inner(event, DedupeMode::QueueAware)
+            .await
+        {
             Ok(result) => result,
             Err(e) => ProcessResult::Error {
                 message: format!("{e:#}"),
@@ -382,7 +512,11 @@ where
         }
     }
 
-    async fn process_event_inner(&self, event: &NostrEvent) -> Result<ProcessResult> {
+    async fn process_event_inner(
+        &self,
+        event: &NostrEvent,
+        dedupe_mode: DedupeMode,
+    ) -> Result<ProcessResult> {
         // 1. Verify Nostr signature
         match verify_nostr_event(event) {
             Ok(true) => {}
@@ -425,12 +559,20 @@ where
         }
 
         // 4. Check idempotency
-        if self
-            .record_store
-            .is_event_processed(&event.id)
-            .await
-            .context("failed to check idempotency")?
-        {
+        let already_processed = match dedupe_mode {
+            DedupeMode::QueueAware => self
+                .record_store
+                .is_event_processed(&event.id)
+                .await
+                .context("failed to check idempotency")?,
+            DedupeMode::PublishedOnly => self
+                .record_store
+                .get_mapping_by_nostr_id(&event.id)
+                .await
+                .context("failed to look up record mapping")?
+                .is_some(),
+        };
+        if already_processed {
             return Ok(ProcessResult::Skipped {
                 reason: "event already processed".to_string(),
             });

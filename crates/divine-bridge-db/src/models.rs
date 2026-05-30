@@ -3,6 +3,7 @@
 use chrono::{DateTime, Utc};
 use diesel::prelude::*;
 use diesel::sql_types::{Bool, Int4, Int8, Nullable, Text, Timestamptz};
+use serde_json::Value;
 
 use crate::schema::*;
 
@@ -22,6 +23,10 @@ pub struct AccountLink {
     pub plc_rotation_key_ref: String,
     pub provisioning_state: String,
     pub provisioning_error: Option<String>,
+    pub publish_backfill_state: String,
+    pub publish_backfill_started_at: Option<DateTime<Utc>>,
+    pub publish_backfill_completed_at: Option<DateTime<Utc>>,
+    pub publish_backfill_error: Option<String>,
     pub disabled_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
@@ -78,6 +83,14 @@ pub struct AccountLinkLifecycleRow {
     pub provisioning_state: String,
     #[diesel(sql_type = Nullable<Text>)]
     pub provisioning_error: Option<String>,
+    #[diesel(sql_type = Text)]
+    pub publish_backfill_state: String,
+    #[diesel(sql_type = Nullable<Timestamptz>)]
+    pub publish_backfill_started_at: Option<DateTime<Utc>>,
+    #[diesel(sql_type = Nullable<Timestamptz>)]
+    pub publish_backfill_completed_at: Option<DateTime<Utc>>,
+    #[diesel(sql_type = Nullable<Text>)]
+    pub publish_backfill_error: Option<String>,
     #[diesel(sql_type = Nullable<Timestamptz>)]
     pub disabled_at: Option<DateTime<Utc>>,
     #[diesel(sql_type = Timestamptz)]
@@ -228,9 +241,16 @@ pub struct NewModerationAction<'a> {
 #[diesel(primary_key(nostr_event_id))]
 pub struct PublishJob {
     pub nostr_event_id: String,
+    pub nostr_pubkey: String,
+    pub event_created_at: DateTime<Utc>,
+    pub event_payload: Value,
+    pub job_source: String,
     pub attempt: i32,
     pub state: String,
     pub error: Option<String>,
+    pub lease_owner: Option<String>,
+    pub lease_expires_at: Option<DateTime<Utc>>,
+    pub completed_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -239,6 +259,10 @@ pub struct PublishJob {
 #[diesel(table_name = publish_jobs)]
 pub struct NewPublishJob<'a> {
     pub nostr_event_id: &'a str,
+    pub nostr_pubkey: &'a str,
+    pub event_created_at: DateTime<Utc>,
+    pub event_payload: Value,
+    pub job_source: &'a str,
     pub state: &'a str,
 }
 
