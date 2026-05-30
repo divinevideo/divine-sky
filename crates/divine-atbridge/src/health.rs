@@ -13,6 +13,10 @@ use axum::response::IntoResponse;
 use axum::response::Response;
 use axum::routing::{get, post};
 use axum::{Json, Router};
+use diesel::prelude::*;
+use diesel::sql_query;
+use diesel::sql_types::Int8;
+use diesel::PgConnection;
 use serde::{Deserialize, Serialize};
 
 use crate::config::BridgeConfig;
@@ -25,6 +29,10 @@ use crate::provisioner::{
 
 const DEGRADED_FAILURE_THRESHOLD: u32 = 3;
 
+/// How often the watchdog polls the database for stuck-lease and failed-backfill
+/// counts. Kept conservative so the extra query is negligible load.
+pub const DEFAULT_WATCHDOG_INTERVAL_SECS: u64 = 30;
+
 #[derive(Clone, Default)]
 pub struct RuntimeHealthState {
     inner: Arc<Mutex<RuntimeHealthInner>>,
@@ -35,6 +43,19 @@ struct RuntimeHealthInner {
     consecutive_readiness_failures: u32,
     degraded: bool,
     last_error: Option<String>,
+    watchdog: WatchdogMetrics,
+}
+
+/// Point-in-time watchdog gauges surfaced on `/metrics`.
+///
+/// `expired_leases` counts publish jobs stuck `in_progress` past their lease
+/// (a worker likely crashed mid-publish); `failed_backfills` counts account
+/// links whose history backfill terminated in the `failed` state. Both should
+/// normally read zero, so a non-zero value is an alerting signal.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
+pub struct WatchdogMetrics {
+    pub expired_leases: i64,
+    pub failed_backfills: i64,
 }
 
 impl RuntimeHealthState {
@@ -66,6 +87,16 @@ impl RuntimeHealthState {
         !self.inner.lock().unwrap().degraded
     }
 
+    /// Replace the latest watchdog gauge readings.
+    pub fn record_watchdog(&self, metrics: WatchdogMetrics) {
+        self.inner.lock().unwrap().watchdog = metrics;
+    }
+
+    /// Read the most recent watchdog gauge readings.
+    pub fn watchdog_metrics(&self) -> WatchdogMetrics {
+        self.inner.lock().unwrap().watchdog
+    }
+
     pub fn next_retry_delay(&self) -> Duration {
         let failures = self.inner.lock().unwrap().consecutive_readiness_failures;
         let exponent = failures.min(5);
@@ -81,6 +112,97 @@ impl RuntimeHealthState {
             inner.degraded = true;
         }
     }
+}
+
+#[derive(QueryableByName)]
+struct CountRow {
+    #[diesel(sql_type = Int8)]
+    count: i64,
+}
+
+/// Query the two watchdog gauges in a single round trip per metric.
+///
+/// The lease predicate (state = 'in_progress' AND lease_expires_at IS NOT NULL
+/// AND lease_expires_at < NOW()) carries the same NULL guard as `claim_next_job`
+/// in `divine-bridge-db`, so the count reflects jobs whose lease has lapsed and
+/// a worker would reclaim.
+fn count_watchdog_metrics(conn: &mut PgConnection) -> Result<WatchdogMetrics> {
+    let expired_leases = sql_query(
+        "SELECT COUNT(*) AS count FROM publish_jobs \
+         WHERE state = 'in_progress' \
+           AND lease_expires_at IS NOT NULL \
+           AND lease_expires_at < NOW()",
+    )
+    .get_result::<CountRow>(conn)
+    .context("failed to count expired publish-job leases")?
+    .count;
+
+    let failed_backfills = sql_query(
+        "SELECT COUNT(*) AS count FROM account_links \
+         WHERE publish_backfill_state = 'failed'",
+    )
+    .get_result::<CountRow>(conn)
+    .context("failed to count failed backfills")?
+    .count;
+
+    Ok(WatchdogMetrics {
+        expired_leases,
+        failed_backfills,
+    })
+}
+
+/// Run a single watchdog poll: count stuck leases and failed backfills, store
+/// them on the shared health state, and emit a structured log line.
+///
+/// The synchronous Diesel query is offloaded to a blocking thread so it never
+/// stalls the async runtime. Exposed publicly so the runtime (or tests) can
+/// drive it on a custom cadence.
+pub async fn run_watchdog_once(database_url: String, runtime: RuntimeHealthState) -> Result<()> {
+    let metrics = tokio::task::spawn_blocking(move || -> Result<WatchdogMetrics> {
+        let mut conn = PgConnection::establish(&database_url)
+            .with_context(|| "failed to open watchdog database connection")?;
+        count_watchdog_metrics(&mut conn)
+    })
+    .await
+    .context("watchdog blocking task panicked")??;
+
+    runtime.record_watchdog(metrics);
+
+    if metrics.expired_leases > 0 || metrics.failed_backfills > 0 {
+        tracing::warn!(
+            expired_leases = metrics.expired_leases,
+            failed_backfills = metrics.failed_backfills,
+            "AT bridge watchdog detected stuck publish leases or failed backfills"
+        );
+    } else {
+        tracing::debug!(
+            expired_leases = metrics.expired_leases,
+            failed_backfills = metrics.failed_backfills,
+            "AT bridge watchdog metrics nominal"
+        );
+    }
+
+    Ok(())
+}
+
+/// Spawn a detached task that polls the watchdog metrics on a fixed interval.
+///
+/// Failures (e.g. a transient database outage) are logged and retried on the
+/// next tick rather than terminating the task.
+pub fn spawn_watchdog(
+    database_url: String,
+    runtime: RuntimeHealthState,
+    interval: Duration,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(interval);
+        loop {
+            ticker.tick().await;
+            if let Err(error) = run_watchdog_once(database_url.clone(), runtime.clone()).await {
+                tracing::warn!(error = %error, "AT bridge watchdog poll failed");
+            }
+        }
+    })
 }
 
 #[async_trait]
@@ -168,6 +290,12 @@ async fn health_ready(State(state): State<InternalApiState>) -> StatusCode {
     }
 }
 
+/// Expose the latest watchdog gauges. Reads cached values populated by the
+/// watchdog ticker — never runs a database query inside the request handler.
+async fn metrics(State(state): State<InternalApiState>) -> Json<WatchdogMetrics> {
+    Json(state.runtime.watchdog_metrics())
+}
+
 async fn provision(
     State(state): State<InternalApiState>,
     Json(payload): Json<ProvisionRequest>,
@@ -225,6 +353,7 @@ fn app_with_state(state: InternalApiState) -> Router {
     Router::new()
         .route("/health", get(health))
         .route("/health/ready", get(health_ready))
+        .route("/metrics", get(metrics))
         .merge(protected)
         .with_state(state)
 }
@@ -276,6 +405,13 @@ pub async fn spawn(
         .health_bind_addr
         .parse()
         .context("HEALTH_BIND_ADDR must be a valid socket address")?;
+
+    spawn_watchdog(
+        config.database_url.clone(),
+        runtime.clone(),
+        Duration::from_secs(DEFAULT_WATCHDOG_INTERVAL_SECS),
+    );
+
     let app = app_with_state(InternalApiState {
         runtime,
         expected_bearer: Some(config.provisioning_bearer_token.clone()),
