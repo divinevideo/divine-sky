@@ -96,6 +96,8 @@ async fn configured_internal_api_provisions_pending_link() {
         video_service_enabled: false,
         video_service_poll_timeout_secs: 120,
         video_service_poll_interval_ms: 5000,
+        watchdog_enabled: false,
+        watchdog_interval_secs: 30,
     })
     .expect("configured app should build");
 
@@ -157,6 +159,8 @@ fn configured_internal_api_requires_provisioning_token() {
         video_service_enabled: false,
         video_service_poll_timeout_secs: 120,
         video_service_poll_interval_ms: 5000,
+        watchdog_enabled: false,
+        watchdog_interval_secs: 30,
     });
 
     assert!(

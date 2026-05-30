@@ -29,10 +29,6 @@ use crate::provisioner::{
 
 const DEGRADED_FAILURE_THRESHOLD: u32 = 3;
 
-/// How often the watchdog polls the database for stuck-lease and failed-backfill
-/// counts. Kept conservative so the extra query is negligible load.
-pub const DEFAULT_WATCHDOG_INTERVAL_SECS: u64 = 30;
-
 #[derive(Clone, Default)]
 pub struct RuntimeHealthState {
     inner: Arc<Mutex<RuntimeHealthInner>>,
@@ -406,11 +402,13 @@ pub async fn spawn(
         .parse()
         .context("HEALTH_BIND_ADDR must be a valid socket address")?;
 
-    spawn_watchdog(
-        config.database_url.clone(),
-        runtime.clone(),
-        Duration::from_secs(DEFAULT_WATCHDOG_INTERVAL_SECS),
-    );
+    if config.watchdog_enabled {
+        spawn_watchdog(
+            config.database_url.clone(),
+            runtime.clone(),
+            Duration::from_secs(config.watchdog_interval_secs),
+        );
+    }
 
     let app = app_with_state(InternalApiState {
         runtime,
