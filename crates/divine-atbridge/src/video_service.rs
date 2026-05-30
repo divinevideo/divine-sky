@@ -208,7 +208,7 @@ impl VideoServiceUploader {
             bail!(
                 "uploadVideo failed ({}): {}",
                 status.as_u16(),
-                upload.error.or(upload.message).unwrap_or_else(|| body_text)
+                upload.error.or(upload.message).unwrap_or(body_text)
             );
         }
 
