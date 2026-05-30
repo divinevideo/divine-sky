@@ -149,9 +149,9 @@ Add a test that starts the route with `ATPROTO_AUTH_SERVER_ENABLED` unset and as
 
 Add a test that starts the route with `ATPROTO_AUTH_SERVER_ENABLED=true` and `APP_URL=https://login.divine.video` and asserts a `200 application/json` response containing at least:
 - `"issuer": "https://login.divine.video"`
-- `"authorization_endpoint": "https://login.divine.video/api/oauth/authorize"`
-- `"token_endpoint": "https://login.divine.video/api/oauth/token"`
-- `"pushed_authorization_request_endpoint": "https://login.divine.video/api/oauth/par"`
+- `"authorization_endpoint": "https://login.divine.video/api/atproto/oauth/authorize"`
+- `"token_endpoint": "https://login.divine.video/api/atproto/oauth/token"`
+- `"pushed_authorization_request_endpoint": "https://login.divine.video/api/atproto/oauth/par"`
 - `"scopes_supported"` including `"atproto"`
 - `"authorization_response_iss_parameter_supported": true`
 - `"require_pushed_authorization_requests": true`
