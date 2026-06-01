@@ -1,3 +1,8 @@
+// The assertion locks an in-test mock record store across a final
+// `.assert_async().await`; the test is single-threaded, so holding the guard
+// across await is harmless.
+#![allow(clippy::await_holding_lock)]
+
 use std::sync::Mutex;
 use std::time::Duration;
 
