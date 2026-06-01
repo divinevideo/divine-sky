@@ -1,4 +1,4 @@
-CREATE TABLE account_links (
+CREATE TABLE IF NOT EXISTS account_links (
     nostr_pubkey    TEXT PRIMARY KEY,
     did             TEXT UNIQUE,
     handle          TEXT UNIQUE NOT NULL,
@@ -12,13 +12,13 @@ CREATE TABLE account_links (
     updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
-CREATE TABLE ingest_offsets (
+CREATE TABLE IF NOT EXISTS ingest_offsets (
     source_name     TEXT PRIMARY KEY,
     last_event_id   TEXT NOT NULL,
     last_created_at TIMESTAMPTZ NOT NULL
 );
 
-CREATE TABLE asset_manifest (
+CREATE TABLE IF NOT EXISTS asset_manifest (
     source_sha256   TEXT PRIMARY KEY,
     blossom_url     TEXT,
     at_blob_cid     TEXT NOT NULL,
@@ -28,7 +28,7 @@ CREATE TABLE asset_manifest (
     created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
-CREATE TABLE record_mappings (
+CREATE TABLE IF NOT EXISTS record_mappings (
     nostr_event_id  TEXT PRIMARY KEY,
     did             TEXT NOT NULL REFERENCES account_links(did),
     collection      TEXT NOT NULL,
@@ -38,9 +38,9 @@ CREATE TABLE record_mappings (
     status          TEXT NOT NULL DEFAULT 'published',
     created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
-CREATE UNIQUE INDEX idx_record_mappings_at_uri ON record_mappings(at_uri);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_record_mappings_at_uri ON record_mappings(at_uri);
 
-CREATE TABLE moderation_actions (
+CREATE TABLE IF NOT EXISTS moderation_actions (
     id              BIGSERIAL PRIMARY KEY,
     subject_type    TEXT NOT NULL,
     subject_id      TEXT NOT NULL,
@@ -51,7 +51,7 @@ CREATE TABLE moderation_actions (
     created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
-CREATE TABLE publish_jobs (
+CREATE TABLE IF NOT EXISTS publish_jobs (
     nostr_event_id  TEXT PRIMARY KEY,
     attempt         INT NOT NULL DEFAULT 0,
     state           TEXT NOT NULL DEFAULT 'pending',
@@ -59,4 +59,4 @@ CREATE TABLE publish_jobs (
     created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
-CREATE INDEX idx_publish_jobs_state ON publish_jobs(state);
+CREATE INDEX IF NOT EXISTS idx_publish_jobs_state ON publish_jobs(state);
