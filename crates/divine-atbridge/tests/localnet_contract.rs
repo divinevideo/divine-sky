@@ -18,10 +18,10 @@ fn localnet_docs_and_layout_are_present() {
 #[test]
 fn localnet_plc_and_pds_compose_files_define_required_services() {
     let repo_root = repo_root();
-    let plc = std::fs::read_to_string(repo_root.join("deploy/localnet/plc/docker-compose.yml"))
-        .unwrap();
-    let pds = std::fs::read_to_string(repo_root.join("deploy/localnet/pds/docker-compose.yml"))
-        .unwrap();
+    let plc =
+        std::fs::read_to_string(repo_root.join("deploy/localnet/plc/docker-compose.yml")).unwrap();
+    let pds =
+        std::fs::read_to_string(repo_root.join("deploy/localnet/pds/docker-compose.yml")).unwrap();
     assert!(plc.contains("tailscale:"));
     assert!(plc.contains("app:"));
     assert!(pds.contains("PDS_DID_PLC_URL"));
@@ -34,8 +34,8 @@ fn localnet_jetstream_and_dns_slices_are_defined() {
     let jetstream =
         std::fs::read_to_string(repo_root.join("deploy/localnet/jetstream/docker-compose.yml"))
             .unwrap();
-    let dns = std::fs::read_to_string(repo_root.join("deploy/localnet/dns/docker-compose.yml"))
-        .unwrap();
+    let dns =
+        std::fs::read_to_string(repo_root.join("deploy/localnet/dns/docker-compose.yml")).unwrap();
     assert!(jetstream.contains("JETSTREAM_WS_URL"));
     assert!(dns.contains("coredns:"));
     assert!(dns.contains("app:"));
@@ -46,10 +46,9 @@ fn localnet_override_examples_target_local_services() {
     let repo_root = repo_root();
     let bridge_env =
         std::fs::read_to_string(repo_root.join("deploy/localnet/bridge.env.example")).unwrap();
-    let gateway_env = std::fs::read_to_string(
-        repo_root.join("deploy/localnet/handle-gateway.env.example"),
-    )
-    .unwrap();
+    let gateway_env =
+        std::fs::read_to_string(repo_root.join("deploy/localnet/handle-gateway.env.example"))
+            .unwrap();
     assert!(bridge_env.contains("PLC_DIRECTORY_URL=https://plc."));
     assert!(bridge_env.contains("HANDLE_DOMAIN=divine.test"));
     assert!(gateway_env.contains("ATPROTO_PROVISIONING_URL"));

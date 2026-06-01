@@ -139,7 +139,8 @@ impl AppState {
         handle: String,
         crosspost_enabled: bool,
     ) -> anyhow::Result<AccountLinkRecord> {
-        self.store.upsert_pending_opt_in(&nostr_pubkey, &handle, crosspost_enabled)
+        self.store
+            .upsert_pending_opt_in(&nostr_pubkey, &handle, crosspost_enabled)
     }
 
     pub(crate) fn enqueue_provisioning(&self, nostr_pubkey: &str, handle: &str) {
@@ -160,7 +161,9 @@ impl AppState {
             .flatten()
             .is_none()
         {
-            let _ = self.store.upsert_pending_opt_in(&nostr_pubkey, &handle, true);
+            let _ = self
+                .store
+                .upsert_pending_opt_in(&nostr_pubkey, &handle, true);
         }
         self.store
             .mark_ready(&nostr_pubkey, &did)
@@ -215,9 +218,7 @@ impl AppState {
         &self,
         record: &AccountLinkRecord,
     ) -> anyhow::Result<()> {
-        if let (Some(did), ProvisioningState::Ready) =
-            (&record.did, &record.provisioning_state)
-        {
+        if let (Some(did), ProvisioningState::Ready) = (&record.did, &record.provisioning_state) {
             self.keycast_client
                 .sync_ready(&record.nostr_pubkey, did)
                 .await?;

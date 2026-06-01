@@ -102,10 +102,7 @@ impl FileBackedStore {
     fn load(config: AppConfig) -> anyhow::Result<Self> {
         let records = if config.data_path.exists() {
             let raw = std::fs::read_to_string(&config.data_path).with_context(|| {
-                format!(
-                    "failed to read handle store {}",
-                    config.data_path.display()
-                )
+                format!("failed to read handle store {}", config.data_path.display())
             })?;
             serde_json::from_str(&raw).context("failed to parse handle store JSON")?
         } else {
@@ -285,9 +282,8 @@ fn write_json_atomic(path: &Path, records: &BTreeMap<String, HandleRecord>) -> a
 
 fn write_string_atomic(path: &Path, contents: &str) -> anyhow::Result<()> {
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).with_context(|| {
-            format!("failed to create parent directory {}", parent.display())
-        })?;
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create parent directory {}", parent.display()))?;
     }
 
     let tmp = path.with_extension("tmp");

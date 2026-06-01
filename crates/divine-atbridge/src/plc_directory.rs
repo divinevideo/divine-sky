@@ -284,7 +284,10 @@ mod tests {
             .await;
 
         let client = PlcDirectoryClient::with_max_attempts(server.url(), 2);
-        client.update_did("did:plc:alice123", &operation()).await.unwrap();
+        client
+            .update_did("did:plc:alice123", &operation())
+            .await
+            .unwrap();
         second.assert_async().await;
     }
 

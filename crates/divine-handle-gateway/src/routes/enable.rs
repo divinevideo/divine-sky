@@ -16,13 +16,10 @@ pub async fn handler(
         })?;
     let record = record.ok_or(StatusCode::NOT_FOUND)?;
 
-    state
-        .sync_enabled_state(&record)
-        .await
-        .map_err(|error| {
-            tracing::error!(error = %error, "failed to sync enabled state");
-            StatusCode::BAD_GATEWAY
-        })?;
+    state.sync_enabled_state(&record).await.map_err(|error| {
+        tracing::error!(error = %error, "failed to sync enabled state");
+        StatusCode::BAD_GATEWAY
+    })?;
 
     Ok(Json(record))
 }

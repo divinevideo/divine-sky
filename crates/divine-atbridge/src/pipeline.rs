@@ -198,7 +198,9 @@ impl BlobUploader for Box<dyn BlobUploader> {
         mime_type: &str,
         user_did: &str,
     ) -> Result<BlobRef> {
-        (**self).upload_blob_for_user(data, mime_type, user_did).await
+        (**self)
+            .upload_blob_for_user(data, mime_type, user_did)
+            .await
     }
 }
 
@@ -613,7 +615,11 @@ where
         // Upload blob to PDS (or video service when enabled)
         let blob_ref = self
             .blob_uploader
-            .upload_blob_for_user(&prepared_video.data, &prepared_video.mime_type, &account.did)
+            .upload_blob_for_user(
+                &prepared_video.data,
+                &prepared_video.mime_type,
+                &account.did,
+            )
             .await
             .context("failed to upload blob to PDS")?;
 

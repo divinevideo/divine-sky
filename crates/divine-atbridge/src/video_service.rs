@@ -157,10 +157,7 @@ impl VideoServiceUploader {
             did: String,
         }
 
-        let url = format!(
-            "{}/xrpc/com.atproto.server.describeServer",
-            self.pds_url
-        );
+        let url = format!("{}/xrpc/com.atproto.server.describeServer", self.pds_url);
         let resp: DescribeServer = self
             .client
             .get(&url)
@@ -199,23 +196,19 @@ impl VideoServiceUploader {
         let status = resp.status();
         let body_text = resp.text().await.unwrap_or_default();
 
-        let upload: UploadVideoResponse = serde_json::from_str(&body_text)
-            .with_context(|| {
-                format!(
-                    "uploadVideo response parse failed ({}): {}",
-                    status.as_u16(),
-                    body_text
-                )
-            })?;
+        let upload: UploadVideoResponse = serde_json::from_str(&body_text).with_context(|| {
+            format!(
+                "uploadVideo response parse failed ({}): {}",
+                status.as_u16(),
+                body_text
+            )
+        })?;
 
         if !status.is_success() {
             bail!(
                 "uploadVideo failed ({}): {}",
                 status.as_u16(),
-                upload
-                    .error
-                    .or(upload.message)
-                    .unwrap_or_else(|| body_text)
+                upload.error.or(upload.message).unwrap_or_else(|| body_text)
             );
         }
 
@@ -269,10 +262,7 @@ impl VideoServiceUploader {
                 continue;
             }
 
-            let body: JobStatusResponse = resp
-                .json()
-                .await
-                .context("getJobStatus parse failed")?;
+            let body: JobStatusResponse = resp.json().await.context("getJobStatus parse failed")?;
 
             match body.job_status.state.as_str() {
                 "JOB_STATE_COMPLETED" => {
@@ -280,11 +270,7 @@ impl VideoServiceUploader {
                         .job_status
                         .blob
                         .context("completed job has no blob ref")?;
-                    return Ok(BlobRef::new(
-                        blob.blob_ref.link,
-                        blob.mime_type,
-                        blob.size,
-                    ));
+                    return Ok(BlobRef::new(blob.blob_ref.link, blob.mime_type, blob.size));
                 }
                 "JOB_STATE_FAILED" => {
                     let detail = body
@@ -295,11 +281,7 @@ impl VideoServiceUploader {
                     bail!("video transcoding failed for job {}: {}", job_id, detail);
                 }
                 other => {
-                    tracing::debug!(
-                        "video job {} state: {}",
-                        job_id,
-                        other
-                    );
+                    tracing::debug!("video job {} state: {}", job_id, other);
                 }
             }
         }

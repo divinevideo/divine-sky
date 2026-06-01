@@ -22,7 +22,11 @@ pub async fn handler(
     Json(payload): Json<OptInRequest>,
 ) -> Result<(StatusCode, Json<AccountLinkRecord>), StatusCode> {
     let record = state
-        .upsert_pending_result(payload.nostr_pubkey, payload.handle, payload.crosspost_enabled)
+        .upsert_pending_result(
+            payload.nostr_pubkey,
+            payload.handle,
+            payload.crosspost_enabled,
+        )
         .map_err(|error| {
             tracing::error!(error = %error, "failed to persist pending opt-in");
             StatusCode::INTERNAL_SERVER_ERROR

@@ -41,10 +41,7 @@ async fn main() -> anyhow::Result<()> {
         .reconcile_existing_from_database(&config.database_url)
         .await?;
     if reconciled > 0 {
-        tracing::info!(
-            reconciled,
-            "reconciled existing lifecycle rows at startup"
-        );
+        tracing::info!(reconciled, "reconciled existing lifecycle rows at startup");
     }
 
     let addr: SocketAddr = std::env::var("BIND_ADDR")

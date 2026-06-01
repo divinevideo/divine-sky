@@ -42,7 +42,10 @@ fn reset_database(database_url: &str) {
         &mut conn,
         include_str!("../../../migrations/001_bridge_tables/down.sql"),
     );
-    execute_batch(&mut conn, include_str!("../../../migrations/001_bridge_tables/up.sql"));
+    execute_batch(
+        &mut conn,
+        include_str!("../../../migrations/001_bridge_tables/up.sql"),
+    );
     execute_batch(
         &mut conn,
         include_str!("../../../migrations/004_publish_job_scheduler/up.sql"),

@@ -2,9 +2,7 @@ use std::sync::{Arc, Mutex};
 
 use anyhow::Result;
 use async_trait::async_trait;
-use divine_atbridge::pds_host_backfill::{
-    PdsHostBackfill, PlcMigrationSigner, ReadyStateSync,
-};
+use divine_atbridge::pds_host_backfill::{PdsHostBackfill, PlcMigrationSigner, ReadyStateSync};
 use divine_atbridge::plc_directory::PlcDirectoryClient;
 use divine_atbridge::provisioner::{
     AccountLinkRecord, PlcOperation, PlcService, ProvisioningState,
@@ -74,11 +72,19 @@ fn ready_account() -> AccountLinkRecord {
 }
 
 fn staging_operation() -> PlcOperation {
-    operation_with_endpoint("https://pds.staging.dvines.org", Some("bafyreicurrent"), "sig")
+    operation_with_endpoint(
+        "https://pds.staging.dvines.org",
+        Some("bafyreicurrent"),
+        "sig",
+    )
 }
 
 fn production_operation() -> PlcOperation {
-    operation_with_endpoint("https://pds.divine.video", Some("bafyreiproduction"), "sig-production")
+    operation_with_endpoint(
+        "https://pds.divine.video",
+        Some("bafyreiproduction"),
+        "sig-production",
+    )
 }
 
 fn custom_operation(endpoint: &str) -> PlcOperation {
@@ -192,11 +198,8 @@ async fn pds_host_backfill_skips_plc_update_when_account_is_already_on_productio
         signed_operation: signed_successor_operation(),
     };
 
-    let backfill = PdsHostBackfill::new(
-        PlcDirectoryClient::new("http://127.0.0.1:9"),
-        sync,
-        signer,
-    );
+    let backfill =
+        PdsHostBackfill::new(PlcDirectoryClient::new("http://127.0.0.1:9"), sync, signer);
     let account = ready_account();
 
     backfill
@@ -219,11 +222,8 @@ async fn pds_host_backfill_rejects_non_staging_hosts() {
         signed_operation: signed_successor_operation(),
     };
 
-    let backfill = PdsHostBackfill::new(
-        PlcDirectoryClient::new("http://127.0.0.1:9"),
-        sync,
-        signer,
-    );
+    let backfill =
+        PdsHostBackfill::new(PlcDirectoryClient::new("http://127.0.0.1:9"), sync, signer);
     let account = ready_account();
 
     let error = backfill
