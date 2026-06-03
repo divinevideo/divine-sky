@@ -64,7 +64,7 @@ async fn configured_internal_api_provisions_pending_link() {
     let mut pds_server = mockito::Server::new_async().await;
 
     let plc_mock = plc_server
-        .mock("POST", "/")
+        .mock("POST", mockito::Matcher::Regex("^/did:plc:".to_string()))
         .with_status(201)
         .with_header("content-type", "application/json")
         .with_body(json!({ "did": "did:plc:alice123" }).to_string())
