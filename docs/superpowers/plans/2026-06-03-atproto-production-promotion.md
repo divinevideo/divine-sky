@@ -38,10 +38,11 @@ Confirmed gaps (each is a task below):
 5. **`VIDEO_SERVICE_ENABLED` is unset** on atbridge → videos publish but don't play.
 6. **rsky-pds entryway env unset** (`PDS_OAUTH_AUTHORIZATION_SERVER`, `PDS_ENTRYWAY_DID`) → blocks third-party ATProto *login* (not crossposting). Lower priority.
 
-7. **No crosspost has ever succeeded** in staging (relay down + zero opted-in accounts). The e2e path is unproven anywhere.
+7. **No crosspost has ever succeeded** in staging — but NOT because of infrastructure. UPDATED 2026-06-03 with direct evidence: the staging relay is HEALTHY (NIP-11 `divine-funnelcake`, `auth_required:false`; raw WS handshake returns `101` both from the public edge AND from inside the `sky` namespace), and the bridge IS connected and consuming it (`ingest_offsets` cursor advancing, `last ingested 06:57Z`, zero connection failures in the trailing 15 min — the earlier "failed to connect" bursts were transient reconnects during funnelcake-relay pod rotation, normal resilient behavior). **The real gap is `account_links`=0: no account has ever opted in, so the bridge reads every firehose event and correctly skips them all (`crosspost_enabled && ready` gate).** The blocker to a first crosspost is the opt-in/provisioning flow, not the relay.
+   - Hostname note (from the relay's own LLM guide, https://relay.divine.video/docs/llm-guide): the preferred staging WS host is `wss://relay.staging.divine.video`; `relay.staging.dvines.org` (what the bridge uses) is a working **legacy alias**. Prod WS is `wss://relay.divine.video`. Not a bug today, but prefer the `.divine.video` host when setting the prod `RELAY_URL`.
 
-**Recommended order:** **F (prove staging e2e) → 1 → 2 → 3 → 4 → 5 → D (deploy/verify prod) → E (login).**
-Chunk F comes first: fixing the staging relay + doing one real staging crosspost gives a known-good reference and de-risks prod. Crossposting in prod needs F,1,2,4,5 + the three pods healthy. Login (the full "ATProto integration") additionally needs E.
+**Recommended order:** **F (prove staging e2e via opt-in) → 1 → 2 → 3 → 4 → 5 → D (deploy/verify prod) → E (login).**
+Chunk F comes first: opt in one staging account and confirm one real crosspost — that gives a known-good reference and de-risks prod. Crossposting in prod needs F,1,2,4,5 + the three pods healthy. Login (the full "ATProto integration") additionally needs E.
 
 > **Authoritative doc:** This plan supersedes the prod-secrets / image-pinning / entryway chunks (B, Chunk D-token-trust) of `2026-05-30-atproto-production-rollout.md` with live-verified specifics. Treat THIS file as the execution doc for the prod move; keep the 05-30 plan for the broader divine-sky scheduler/code context only.
 
@@ -49,31 +50,23 @@ Chunk F comes first: fixing the staging relay + doing one real staging crosspost
 
 ## Chunk F: Prove the End-to-End Crosspost Path in Staging FIRST
 
-Rationale: the e2e path has never run. Establish it in staging — cheaper to debug, and it becomes the known-good reference prod copies. Do this before touching prod.
+Rationale: the e2e path has never run (0 opted-in accounts). The infra (relay, bridge connection, firehose ingest) is already verified working — the missing piece is a provisioned account. Opt one in, post a video, confirm it crossposts. This becomes the known-good reference prod copies.
 
-### Task F1: Fix the staging relay
+### Task F1: Confirm the infra prerequisites (already verified 2026-06-03 — re-check before F2)
 
-**Symptom:** `divine-atbridge` logs continuous `failed to connect to relay wss://relay.staging.dvines.org`. No relay → no Nostr events → nothing to crosspost.
+Do NOT chase the relay; it is healthy. Just confirm the bridge is currently connected and ingesting before opting in an account.
 
-- [ ] **Step 1: Determine whether the relay is down or the URL is wrong**
+- [ ] **Step 1: Bridge connected + ingest cursor advancing (no relay fix needed)**
 
 ```bash
 SC=connectgateway_dv-platform-staging_us-central1_gke-staging-membership
-# Is there a relay workload in the cluster?
-kubectl --context $SC get pods -A | grep -iE 'relay|strfry|nostr'
-# Does the hostname resolve / serve?
-curl -sS -I https://relay.staging.dvines.org 2>&1 | head -3
+# zero failures in the trailing window = stably connected (transient reconnects during
+# funnelcake-relay pod rotation are normal and self-heal):
+kubectl --context $SC logs deploy/divine-atbridge -n sky --since=15m | sed 's/\x1b\[[0-9;]*m//g' | grep -c failed
+# relay itself (sanity): NIP-11 should return divine-funnelcake, auth_required:false
+curl -sS -H "Accept: application/nostr+json" https://relay.staging.dvines.org | python3 -c "import sys,json;d=json.load(sys.stdin);print(d['software'],d['limitation']['auth_required'])"
 ```
-Expected to reveal one of: relay pod crashed/absent, DNS/ingress broken, or the bridge's `RELAY_URL` secret points at a dead host.
-
-- [ ] **Step 2: Fix the identified cause** — restart/redeploy the relay if it's a workload, fix DNS/ingress, or correct `divine-atbridge-relay-url-staging` in `dv-platform-staging` Secret Manager if the URL is wrong.
-
-- [ ] **Step 3: Confirm the bridge connects**
-
-```bash
-kubectl --context $SC logs deploy/divine-atbridge -n sky --tail=30 | grep -iE 'connecting bridge runtime|connected|failed to connect'
-```
-Expected: a stable `connecting bridge runtime` with no immediate `failed to connect` follow-up.
+Expected: failures `0` (or a small transient burst that stops); relay prints `divine-funnelcake False`. If failures are sustained AND the relay NIP-11 check fails, only THEN investigate the relay/ingress.
 
 ### Task F2: Provision a staging test account and verify one crosspost
 
@@ -85,6 +78,9 @@ kubectl --context $SC run pg-$$ -n sky --rm -i --restart=Never --image=postgres:
   psql "$DB" -tAc "SELECT nostr_pubkey, provisioning_state, crosspost_enabled FROM account_links;"
 ```
 Expected: one row, `provisioning_state` progressing `pending`→`ready`, `crosspost_enabled=t`.
+
+> **BLOCKED until the PLC fix ships.** First attempt (2026-06-03) FAILED: provisioning never reaches `ready` because of a bug in the bridge — `create_did` POSTed the PLC genesis op to `/` instead of `/:did` (fixed in divine-sky commit on branch `atproto-production-rollout`: "fix(atbridge): POST PLC genesis op to /:did"). This was THE reason no account ever provisioned. **A staging image built from that commit must be deployed before Step 1 can succeed.** Until then any opt-in lands in `provisioning_state=failed` with `provisioning_error='creating did:plc via PLC directory'` (note: that error is truncated — see Chunk G; the real cause was the 404 on `/`).
+> Also: staging `ATPROTO_PROVISIONING_TOKEN` is literally `placeholder` — confirm it matches what the bridge expects, or provisioning auth may fail once the PLC path works.
 
 - [ ] **Step 2: Post a Nostr video** as that account, then confirm it crossposts:
 
@@ -425,6 +421,23 @@ Expected: protected-resource returns `{resource: https://pds.divine.video, autho
 git -C ../divine-iac-coreconfig add k8s/applications/rsky-pds/overlays/production/kustomization.yaml
 git -C ../divine-iac-coreconfig commit -m "feat(rsky-pds): advertise entryway auth server in prod"
 ```
+
+---
+
+## Chunk G: Make Provisioning Failures Debuggable (divine-sky, recommended)
+
+**Why:** The PLC bug took far longer to diagnose than it should have because the real error was swallowed. `mark_link_failed` stores `err.to_string()` (anyhow Display = top frame only) and the tracing call uses `%error`, so the DB `provisioning_error` and logs showed only `creating did:plc via PLC directory` — not the underlying `PLC directory create failed (404): …`. In prod this means provisioning outages are near-undebuggable.
+
+**Files:** `crates/divine-atbridge/src/provisioner.rs` (the `mark_link_failed` call site ~line 368), and the bridge `/provision` error logging in `crates/divine-atbridge/src/health.rs` (`ApiError::into_response`).
+
+- [ ] **Step 1 (RED):** add a test asserting that when the PLC client returns a non-success status, the recorded `provisioning_error` contains the status/body detail (e.g. `404`), not just the wrapper context.
+- [ ] **Step 2 (GREEN):** format the error chain with `{:#}` (anyhow's alternate Display includes causes) where it's stored and logged:
+  - store `format!("{err:#}")` instead of `err.to_string()` in `mark_link_failed`.
+  - log `error = ?self.0` (Debug) or `format!("{:#}", self.0)` in `ApiError::into_response`.
+- [ ] **Step 3:** run `cargo test -p divine-atbridge`, confirm green + the new test passes.
+- [ ] **Step 4: Commit.**
+
+(Optional, separate: the handle-gateway "failed to sync failed state to keycast" masks the primary provisioning failure — it should log the primary error before attempting the keycast sync. And staging `ATPROTO_PROVISIONING_TOKEN=placeholder` should be set to a real value.)
 
 ---
 
