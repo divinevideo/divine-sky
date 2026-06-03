@@ -49,6 +49,35 @@ After creating them, ESO refreshes hourly — force it with
 (or delete the ExternalSecret to trigger immediate recreation), then ArgoCD should
 sync the Deployments and pods should appear.
 
+### STAGING IS THE PROVEN TEMPLATE (verified 2026-06-03)
+
+The bridge works — this is purely a prod deployment/secrets gap, not a code issue.
+The `dv-platform-staging` cluster runs the full stack healthy:
+```
+$ kubectl --context <staging> get pods -n sky
+divine-atbridge-...        1/1 Running (39h)
+divine-handle-gateway-...  1/1 Running (2d22h)   (x2)
+rsky-pds-...               1/1 Running (2d21h)
+$ kubectl --context <staging> get externalsecret -n sky
+divine-atbridge-runtime / handle-gateway / rsky-pds  → SecretSynced=True
+```
+So: the same secret KEY SET (with `-staging` suffix) already exists and works in
+project `dv-platform-staging`. Promotion to prod = recreate that key set with
+`-production` suffix in `dv-platform-prod` and populate with prod values. There is
+NO bridge deployment in POC (`rich-compiler-479518-d2` / `dv-platform-poc`); only
+`staging` and `production` overlays exist. Don't use POC as a reference.
+
+### IMAGE PINNING INTERACTION (important for B2)
+
+Staging runs image `…/containers-staging/divine-atbridge:3ba324c` — an OLDER build
+that PREDATES the startup self-migration (B2). Staging's schema was therefore applied
+out-of-band (hand `psql`). Implication for prod: the self-migration only runs if prod
+is pinned to a build that contains the B2 commit (`048c293` or later). If prod ships
+an older/`latest` image without it, the bridge will NOT self-migrate and the schema
+must be applied manually (or pin prod to a B2-containing build — preferred). This is
+the same image-pinning gap tracked in `2026-05-30-atproto-production-rollout.md`
+Chunk B.
+
 ## B1 — CONFIRMED ROOT CAUSE: the bridge is not running in production
 
 `divine-atbridge` (the service that performs Nostr→Bluesky crossposting) and
