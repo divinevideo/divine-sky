@@ -4,7 +4,9 @@
 
 **Goal:** Get ATProto integration (Nostr→Bluesky crossposting + the PDS/handle path) running in production by promoting the already-working staging deployment to the `dv-platform-prod` cluster.
 
-**Architecture:** This is a **promotion, not a build** — verified 2026-06-03 that the full bridge stack (`divine-atbridge`, `divine-handle-gateway`, `rsky-pds`) runs healthy in `dv-platform-staging` (pods `1/1 Running` for 2+ days, ExternalSecrets `SecretSynced=True`). Production has the same manifests but is `OutOfSync`/`Degraded` with **zero pods** because (a) its GCP Secret Manager secrets were never created, (b) several IaC overlay placeholders/patches are incomplete, and (c) images are unpinned. Staging is the authoritative template for every value.
+**Architecture:** Production has the bridge manifests but is `OutOfSync`/`Degraded` with **zero pods** because (a) its GCP Secret Manager secrets were never created, (b) several IaC overlay placeholders/patches are incomplete, and (c) images are unpinned. Staging is the authoritative template for every config VALUE.
+
+> ⚠️ **CORRECTION (2026-06-03): "staging works" is NOT established — do not assume promotion alone is sufficient.** Staging pods are `1/1 Running` and ExternalSecrets `SecretSynced=True` (control plane healthy), BUT the staging bridge has **never crossposted**: its DB is empty (`account_links`=0 incl. pending, `publish_jobs`=0, published `record_mappings`=0) and the **staging relay `wss://relay.staging.dvines.org` is currently DOWN** (continuous `failed to connect to relay`, verified 06:18 2026-06-03). So the end-to-end Nostr→Bluesky path has never run in any environment. This plan is therefore "**stand up prod config AND prove the path end-to-end for the first time**," not "copy a known-good deployment." Chunk D's verification is a genuine first-light test, and **Chunk F (below) must establish a working crosspost in staging first** — otherwise prod will hit the same relay/opt-in gaps with no template to copy from. Use staging only as the template for config KEY NAMES and structure, not as proof of function.
 
 **Tech Stack:** GKE, ArgoCD, Kustomize, External Secrets Operator (ESO) → GCP Secret Manager, Rust (divine-atbridge/divine-bridge-db), `kubectl`, `gcloud`.
 
@@ -36,8 +38,64 @@ Confirmed gaps (each is a task below):
 5. **`VIDEO_SERVICE_ENABLED` is unset** on atbridge → videos publish but don't play.
 6. **rsky-pds entryway env unset** (`PDS_OAUTH_AUTHORIZATION_SERVER`, `PDS_ENTRYWAY_DID`) → blocks third-party ATProto *login* (not crossposting). Lower priority.
 
-**Recommended order:** 1 → 2 → 3 → 4 → 5 → (deploy/verify) → 6.
-Crossposting needs 1,2,4,5 + atbridge/handle-gateway/rsky-pds healthy. Login (the full "ATProto integration") additionally needs 6.
+7. **No crosspost has ever succeeded** in staging (relay down + zero opted-in accounts). The e2e path is unproven anywhere.
+
+**Recommended order:** **F (prove staging e2e) → 1 → 2 → 3 → 4 → 5 → D (deploy/verify prod) → E (login).**
+Chunk F comes first: fixing the staging relay + doing one real staging crosspost gives a known-good reference and de-risks prod. Crossposting in prod needs F,1,2,4,5 + the three pods healthy. Login (the full "ATProto integration") additionally needs E.
+
+> **Authoritative doc:** This plan supersedes the prod-secrets / image-pinning / entryway chunks (B, Chunk D-token-trust) of `2026-05-30-atproto-production-rollout.md` with live-verified specifics. Treat THIS file as the execution doc for the prod move; keep the 05-30 plan for the broader divine-sky scheduler/code context only.
+
+---
+
+## Chunk F: Prove the End-to-End Crosspost Path in Staging FIRST
+
+Rationale: the e2e path has never run. Establish it in staging — cheaper to debug, and it becomes the known-good reference prod copies. Do this before touching prod.
+
+### Task F1: Fix the staging relay
+
+**Symptom:** `divine-atbridge` logs continuous `failed to connect to relay wss://relay.staging.dvines.org`. No relay → no Nostr events → nothing to crosspost.
+
+- [ ] **Step 1: Determine whether the relay is down or the URL is wrong**
+
+```bash
+SC=connectgateway_dv-platform-staging_us-central1_gke-staging-membership
+# Is there a relay workload in the cluster?
+kubectl --context $SC get pods -A | grep -iE 'relay|strfry|nostr'
+# Does the hostname resolve / serve?
+curl -sS -I https://relay.staging.dvines.org 2>&1 | head -3
+```
+Expected to reveal one of: relay pod crashed/absent, DNS/ingress broken, or the bridge's `RELAY_URL` secret points at a dead host.
+
+- [ ] **Step 2: Fix the identified cause** — restart/redeploy the relay if it's a workload, fix DNS/ingress, or correct `divine-atbridge-relay-url-staging` in `dv-platform-staging` Secret Manager if the URL is wrong.
+
+- [ ] **Step 3: Confirm the bridge connects**
+
+```bash
+kubectl --context $SC logs deploy/divine-atbridge -n sky --tail=30 | grep -iE 'connecting bridge runtime|connected|failed to connect'
+```
+Expected: a stable `connecting bridge runtime` with no immediate `failed to connect` follow-up.
+
+### Task F2: Provision a staging test account and verify one crosspost
+
+- [ ] **Step 1: Opt in a test account** via the staging handle-gateway / keycast flow (claim `<test>.divine.video`, enable ATProto). Confirm the row lands:
+
+```bash
+DB=<staging bridge DATABASE_URL from dv-platform-staging SM>
+kubectl --context $SC run pg-$$ -n sky --rm -i --restart=Never --image=postgres:16 --quiet --command -- \
+  psql "$DB" -tAc "SELECT nostr_pubkey, provisioning_state, crosspost_enabled FROM account_links;"
+```
+Expected: one row, `provisioning_state` progressing `pending`→`ready`, `crosspost_enabled=t`.
+
+- [ ] **Step 2: Post a Nostr video** as that account, then confirm it crossposts:
+
+```bash
+kubectl --context $SC run pg-$$ -n sky --rm -i --restart=Never --image=postgres:16 --quiet --command -- \
+  psql "$DB" -tAc "SELECT state, job_source, count(*) FROM publish_jobs GROUP BY 1,2; \
+                   SELECT status, count(*) FROM record_mappings GROUP BY 1;"
+```
+Expected: a `publish_jobs` row reaching `state='published'`, a `record_mappings` row `status='published'`. Then confirm it actually appears AND plays on Bluesky (validates video routing). **This is the first proof the integration works end to end.**
+
+- [ ] **Step 3: Record the staging config that made it work** as the prod template (relay URL shape, video-service setting, any env the bridge needed). Carry these into the prod tasks below.
 
 ---
 
@@ -94,7 +152,12 @@ Production value sources (confirm each with the infra owner):
 - `divine-atbridge-pds-url-production` → `https://pds.divine.video`
 - `divine-atbridge-handle-domain-production` → `divine.video`
 - `divine-atbridge-blossom-url`, `s3-endpoint`, `s3-bucket` → prod Blossom + prod blob bucket (NOT `*-staging`).
-- `rsky-pds-repo-signing-key`, `-plc-rotation-key`, `-jwt-key`, `-jwt-secret` → **freshly generated for prod.**
+- `rsky-pds-repo-signing-key`, `-plc-rotation-key`, `-jwt-key`, `-jwt-secret` → **freshly generated for prod — BUT first confirm the prod PDS is greenfield.** Zero pods ≠ empty database. If the prod PDS Postgres already has any repos/identities (created under an earlier key), minting a NEW `plc-rotation-key`/`repo-signing-key` orphans them irrecoverably. Check before generating:
+  ```bash
+  # against the prod rsky-pds DB (URL from dv-platform-prod SM, once created):
+  #   SELECT count(*) FROM actor;   -- or the rsky-pds repo/identity table
+  ```
+  If non-zero, do NOT mint new keys — recover the existing ones with the infra owner.
 - `rsky-pds-aws-access-key-id`, `-aws-secret-access-key` → prod blob-store credentials.
 - `*-atproto-provisioning-token`, `keycast-atproto-token`, `*-sync-token` → prod shared secrets (must match the values keycast/name-server use in prod).
 

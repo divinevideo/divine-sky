@@ -49,10 +49,17 @@ After creating them, ESO refreshes hourly — force it with
 (or delete the ExternalSecret to trigger immediate recreation), then ArgoCD should
 sync the Deployments and pods should appear.
 
-### STAGING IS THE PROVEN TEMPLATE (verified 2026-06-03)
+### STAGING IS THE CONFIG TEMPLATE — but NOT proof of function (verified 2026-06-03)
 
-The bridge works — this is purely a prod deployment/secrets gap, not a code issue.
-The `dv-platform-staging` cluster runs the full stack healthy:
+CORRECTION: an earlier draft said "staging is the proven template / the bridge works."
+That overstated it. Staging's CONTROL PLANE is healthy (pods Running, secrets synced),
+so it's a valid template for config KEY NAMES/structure. But the DATA PLANE has never
+run: staging `account_links`=0 (incl. pending), `publish_jobs`=0, published
+`record_mappings`=0, and the staging relay `wss://relay.staging.dvines.org` is
+currently DOWN (continuous connect failures). So no crosspost has ever succeeded in
+any environment. Prove staging end-to-end first (see plan
+`2026-06-03-atproto-production-promotion.md` Chunk F) before treating prod as a copy.
+The `dv-platform-staging` cluster runs the full stack at the pod level:
 ```
 $ kubectl --context <staging> get pods -n sky
 divine-atbridge-...        1/1 Running (39h)
