@@ -5,7 +5,7 @@ use data_encoding::BASE64;
 use reqwest::StatusCode;
 use std::time::Duration;
 
-use crate::provisioner::PdsAccountCreator;
+use crate::provisioner::{PdsAccountCreator, PdsSession};
 
 const DEFAULT_MAX_ATTEMPTS: usize = 3;
 
@@ -131,6 +131,8 @@ struct DescribeRepoResponse {
 struct CreateAccountResponse {
     #[serde(rename = "accessJwt")]
     access_jwt: Option<String>,
+    #[serde(rename = "refreshJwt")]
+    refresh_jwt: Option<String>,
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -141,7 +143,7 @@ struct XrpcErrorBody {
 
 #[async_trait::async_trait]
 impl PdsAccountCreator for PdsAccountsClient {
-    async fn create_account(&self, did: &str, handle: &str) -> Result<()> {
+    async fn create_account(&self, did: &str, handle: &str) -> Result<Option<PdsSession>> {
         let body = serde_json::json!({
             "did": did,
             "handle": handle,
@@ -176,15 +178,29 @@ impl PdsAccountCreator for PdsAccountsClient {
                     .json()
                     .await
                     .context("parsing PDS createAccount response")?;
-                if let Some(access_jwt) = payload.access_jwt {
-                    self.activate_account(&access_jwt).await?;
-                }
-                return Ok(());
+                let session = match (payload.access_jwt, payload.refresh_jwt) {
+                    (Some(access_jwt), Some(refresh_jwt)) => {
+                        self.activate_account(&access_jwt).await?;
+                        Some(PdsSession {
+                            access_jwt,
+                            refresh_jwt,
+                        })
+                    }
+                    (Some(access_jwt), None) => {
+                        self.activate_account(&access_jwt).await?;
+                        None
+                    }
+                    _ => None,
+                };
+                return Ok(session);
             }
 
             let body = response.text().await.unwrap_or_default();
             if is_existing_account_conflict(status, &body) {
-                return self.confirm_existing_repo(did, handle).await;
+                self.confirm_existing_repo(did, handle).await?;
+                // Existing repo: no fresh session issued here. A session for an
+                // already-provisioned account is obtained separately (refresh/login).
+                return Ok(None);
             }
 
             let message = parse_error_message(&body);

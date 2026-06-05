@@ -8,14 +8,15 @@ use divine_bridge_db::models::NewProvisioningKey;
 use divine_bridge_db::{
     get_account_link_lifecycle, get_account_link_lifecycle_by_handle, get_provisioning_key,
     insert_provisioning_key, mark_account_link_failed, mark_account_link_ready,
-    upsert_pending_account_link,
+    store_account_pds_session, upsert_pending_account_link,
 };
 use secp256k1::rand::rngs::OsRng;
 use secp256k1::rand::RngCore;
 use secp256k1::{PublicKey, Secp256k1, SecretKey};
 
 use crate::provisioner::{
-    AccountLinkRecord, AccountLinkStore, KeyPair, KeyStore, PendingAccountLink, ProvisioningState,
+    AccountLinkRecord, AccountLinkStore, KeyPair, KeyStore, PdsSession, PendingAccountLink,
+    ProvisioningState,
 };
 
 const PROVISIONING_KEY_ENVELOPE_VERSION: u8 = 1;
@@ -218,6 +219,16 @@ impl AccountLinkStore for DbAccountLinkStore {
         let mut connection = self.connect()?;
         let row = mark_account_link_failed(&mut connection, nostr_pubkey, did, error)?;
         map_record(row)
+    }
+
+    async fn store_pds_session(&self, nostr_pubkey: &str, session: &PdsSession) -> Result<()> {
+        let mut connection = self.connect()?;
+        store_account_pds_session(
+            &mut connection,
+            nostr_pubkey,
+            &session.access_jwt,
+            &session.refresh_jwt,
+        )
     }
 }
 

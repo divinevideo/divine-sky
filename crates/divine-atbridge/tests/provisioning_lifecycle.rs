@@ -6,7 +6,7 @@ use async_trait::async_trait;
 use chrono::Utc;
 use divine_atbridge::provisioner::{
     AccountLinkRecord, AccountLinkStore, AccountProvisioner, KeyPair, KeyStore, PdsAccountCreator,
-    PendingAccountLink, PlcClient, PlcOperation, ProvisioningState,
+    PdsSession, PendingAccountLink, PlcClient, PlcOperation, ProvisioningState,
 };
 use secp256k1::{PublicKey, Secp256k1, SecretKey};
 
@@ -106,6 +106,10 @@ impl AccountLinkStore for LifecycleStore {
         record.updated_at = Utc::now();
         Ok(record.clone())
     }
+
+    async fn store_pds_session(&self, _nostr_pubkey: &str, _session: &PdsSession) -> Result<()> {
+        Ok(())
+    }
 }
 
 struct MockKeyStore {
@@ -153,7 +157,7 @@ struct MockPdsCreator {
 
 #[async_trait]
 impl PdsAccountCreator for MockPdsCreator {
-    async fn create_account(&self, did: &str, handle: &str) -> Result<()> {
+    async fn create_account(&self, did: &str, handle: &str) -> Result<Option<PdsSession>> {
         self.calls
             .lock()
             .unwrap()
@@ -161,7 +165,10 @@ impl PdsAccountCreator for MockPdsCreator {
         if self.fail {
             bail!("PDS account creation failed");
         }
-        Ok(())
+        Ok(Some(PdsSession {
+            access_jwt: format!("access-{did}"),
+            refresh_jwt: format!("refresh-{did}"),
+        }))
     }
 }
 
