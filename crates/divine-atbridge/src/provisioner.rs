@@ -216,6 +216,7 @@ where
     pub link_store: L,
     pub pds_endpoint: String,
     pub handle_domain: String,
+    pub recovery_rotation_did_keys: Vec<String>,
 }
 
 impl<K, P, A, L> AccountProvisioner<K, P, A, L>
@@ -366,7 +367,7 @@ where
 
         let mut operation = PlcOperation {
             op_type: "plc_operation".to_string(),
-            rotation_keys: vec![rotation_did_key],
+            rotation_keys: self.rotation_keys_for_genesis(rotation_did_key),
             verification_methods,
             also_known_as: vec![format!("at://{handle}")],
             services,
@@ -436,6 +437,12 @@ where
                 Err(err)
             }
         }
+    }
+
+    fn rotation_keys_for_genesis(&self, operational_rotation_did_key: String) -> Vec<String> {
+        let mut rotation_keys = self.recovery_rotation_did_keys.clone();
+        rotation_keys.push(operational_rotation_did_key);
+        rotation_keys
     }
 }
 
@@ -666,6 +673,7 @@ mod tests {
             link_store: MockLinkStore { links },
             pds_endpoint: "https://pds.divine.video".to_string(),
             handle_domain: "divine.video".to_string(),
+            recovery_rotation_did_keys: Vec::new(),
         };
 
         ProvisionerHarness {
@@ -732,6 +740,26 @@ mod tests {
             .expect("a PDS session must be persisted after provisioning");
         assert!(session.access_jwt.starts_with("access-"));
         assert!(session.refresh_jwt.starts_with("refresh-"));
+    }
+
+    #[tokio::test]
+    async fn configured_recovery_rotation_key_precedes_operational_key_in_genesis() {
+        let links = SharedLinks::default();
+        let mut harness = make_provisioner(links, false, false);
+        let recovery_key = "did:key:zQ3shrecoveryofflinekey".to_string();
+        harness.provisioner.recovery_rotation_did_keys = vec![recovery_key.clone()];
+
+        harness
+            .provisioner
+            .provision_account("npub_recovery", "recovery.divine.video")
+            .await
+            .expect("provisioning should succeed");
+
+        let calls = harness.plc_calls.lock().unwrap();
+        let operation = calls.first().expect("PLC create should be called");
+        assert_eq!(operation.rotation_keys.len(), 2);
+        assert_eq!(operation.rotation_keys[0], recovery_key);
+        assert_ne!(operation.rotation_keys[1], operation.rotation_keys[0]);
     }
 
     #[tokio::test]

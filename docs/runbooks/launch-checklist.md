@@ -30,6 +30,8 @@
 - Verify `divine-router` serves `/.well-known/atproto-did` only for active + ready usernames and returns `404` otherwise.
 - Verify `divine-handle-gateway` does not present itself as a public `/.well-known/atproto-did` host.
 - Confirm `pds.divine.video` healthchecks, MinIO buckets, and relay connectivity are green before enabling traffic.
+- Confirm `divine-atbridge` has `PLC_RECOVERY_ROTATION_DID_KEYS` set to the public `did:key` value(s) for offline PLC recovery keys before creating production user DIDs.
+- Verify a canary DID's PLC audit log lists the offline recovery key before the generated operational rotation key; PLC treats earlier `rotationKeys` entries as higher authority.
 - Verify relay cursor advancement happens after queue persistence, not after publish completion.
 - Verify backfill jobs drain oldest first by `event_created_at`.
 - Verify live jobs can still publish while backlog rows remain queued.

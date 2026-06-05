@@ -49,8 +49,11 @@ The bridge now expects these runtime values:
 - `PDS_AUTH_TOKEN`
 - `BLOSSOM_URL`
 - `DATABASE_URL`
+- `PLC_RECOVERY_ROTATION_DID_KEYS` for real provisioning environments
 
 For the local compose stack, these are supplied in [config/docker-compose.yml](/Users/rabble/code/divine/divine-sky/config/docker-compose.yml). Outside compose, export them before running `cargo run -p divine-atbridge`.
+
+`PLC_RECOVERY_ROTATION_DID_KEYS` is optional for local-only tests and required before production DID creation. It contains comma-separated public `did:key` values for offline recovery rotation keys. Do not place the recovery private key in the bridge, PDS, or cluster-readable Secret Manager project.
 
 ## PDS-Specific Dev Stack
 

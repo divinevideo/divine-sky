@@ -198,6 +198,7 @@ fn make_provisioner(links: SharedLinks, pds_fail: bool) -> LifecycleHarness {
         link_store: LifecycleStore { links },
         pds_endpoint: "https://pds.divine.video".to_string(),
         handle_domain: "divine.video".to_string(),
+        recovery_rotation_did_keys: Vec::new(),
     };
 
     LifecycleHarness {

@@ -44,10 +44,13 @@ The bridge runtime now expects:
 export PDS_AUTH_TOKEN=local-dev-token
 export PLC_DIRECTORY_URL=http://127.0.0.1:2583
 export HANDLE_DOMAIN=divine.video
+export PLC_RECOVERY_ROTATION_DID_KEYS=
 export RELAY_SOURCE_NAME=local-stack-relay
 ```
 
 `config/docker-compose.yml` sets these values for bridge startup in the local stack. It does not provide a dedicated PLC mock, so end-to-end provisioning still requires overriding `PLC_DIRECTORY_URL` to a real or test PLC endpoint when you exercise the opt-in flow.
+
+Set `PLC_RECOVERY_ROTATION_DID_KEYS` to a comma-separated list of public `did:key` values when provisioning real ATProto accounts. The bridge includes those public keys before its generated operational rotation key in each new PLC genesis operation; the matching private recovery keys must stay offline.
 
 The localnet lab in `deploy/localnet/` exists for that fuller provisioning path. It uses `divine.test` for local handles and expects bridge plus handle-gateway to consume localnet env overrides rather than branching runtime code.
 
