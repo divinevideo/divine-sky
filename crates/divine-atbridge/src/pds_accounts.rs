@@ -60,6 +60,33 @@ impl PdsAccountsClient {
         )
     }
 
+    fn activate_account_endpoint(&self) -> String {
+        format!(
+            "{}/xrpc/com.atproto.server.activateAccount",
+            self.base_url.trim_end_matches('/')
+        )
+    }
+
+    /// Activate a freshly-created (deactivated) account, authenticated as that
+    /// account via the `accessJwt` returned by createAccount.
+    async fn activate_account(&self, access_jwt: &str) -> Result<()> {
+        let response = self
+            .client
+            .post(self.activate_account_endpoint())
+            .header("Authorization", format!("Bearer {access_jwt}"))
+            .send()
+            .await
+            .context("sending PDS activateAccount request")?;
+
+        let status = response.status();
+        if !status.is_success() {
+            let body = response.text().await.unwrap_or_default();
+            let message = parse_error_message(&body);
+            anyhow::bail!("activateAccount failed ({}): {}", status.as_u16(), message);
+        }
+        Ok(())
+    }
+
     async fn confirm_existing_repo(&self, did: &str, handle: &str) -> Result<()> {
         let response = self
             .client
@@ -101,6 +128,12 @@ struct DescribeRepoResponse {
 }
 
 #[derive(Debug, serde::Deserialize)]
+struct CreateAccountResponse {
+    #[serde(rename = "accessJwt")]
+    access_jwt: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize)]
 struct XrpcErrorBody {
     error: Option<String>,
     message: Option<String>,
@@ -136,6 +169,16 @@ impl PdsAccountCreator for PdsAccountsClient {
 
             let status = response.status();
             if status.is_success() {
+                // rsky-pds creates a did-import account DEACTIVATED and returns an
+                // accessJwt for it. Activate it (authed as the account) so its repo
+                // serves records; without this, crossposts never appear.
+                let payload: CreateAccountResponse = response
+                    .json()
+                    .await
+                    .context("parsing PDS createAccount response")?;
+                if let Some(access_jwt) = payload.access_jwt {
+                    self.activate_account(&access_jwt).await?;
+                }
                 return Ok(());
             }
 
@@ -225,6 +268,47 @@ mod tests {
             .await
             .unwrap();
         mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn create_account_activates_with_returned_access_jwt() {
+        // rsky-pds creates a did-import account in a DEACTIVATED state and returns
+        // an accessJwt for it. A deactivated repo does not serve records, so the
+        // bridge must call activateAccount authenticated as that account (Bearer
+        // accessJwt) — otherwise crossposts never appear. (Confirmed live: 24/33
+        // staging repos were active:false because this step was missing.)
+        let mut server = mockito::Server::new_async().await;
+        let create = server
+            .mock("POST", "/xrpc/com.atproto.server.createAccount")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                serde_json::json!({
+                    "did": "did:plc:abc123",
+                    "handle": "alice.divine.video",
+                    "accessJwt": "access-jwt-for-account",
+                    "refreshJwt": "refresh-jwt-for-account"
+                })
+                .to_string(),
+            )
+            .create_async()
+            .await;
+        let activate = server
+            .mock("POST", "/xrpc/com.atproto.server.activateAccount")
+            .match_header("authorization", "Bearer access-jwt-for-account")
+            .with_status(200)
+            .with_body("{}")
+            .create_async()
+            .await;
+
+        let client = PdsAccountsClient::new(server.url(), "admin-token");
+        client
+            .create_account("did:plc:abc123", "alice.divine.video")
+            .await
+            .unwrap();
+
+        create.assert_async().await;
+        activate.assert_async().await; // fails if the bridge never activates the account
     }
 
     #[tokio::test]
