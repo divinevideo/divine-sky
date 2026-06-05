@@ -59,10 +59,10 @@ The Wall 3 fix (PR #13) makes `createAccount` return — and the bridge receive 
 - ✅ **Incr 1** — migration 006: `pds_access_jwt`/`pds_refresh_jwt`/`pds_session_updated_at` on `account_links` (idempotent, in startup runner).
 - ✅ **Incr 2** — provisioner persists the session: `create_account -> Option<PdsSession>`, `AccountLinkStore::store_pds_session` + `store_account_pds_session` query. Test: `successful_provisioning_persists_pds_session`.
 - ✅ **Incr 3** — publish path authenticates per-account: `SessionProvider` trait, `PdsClient::with_session_provider` + `auth_token_for(did)` (falls back to shared token), `DbSessionProvider` resolves the access JWT by DID, wired in runtime. Test: `create_record_uses_per_account_session_token`.
-- ⏳ **Incr 4** — refresh on 401: on `AuthRequiredError`/expired access JWT, call `com.atproto.server.refreshSession` with the stored refresh JWT, persist the rotation, retry once.
-- ⏳ **Incr 5** — backfill sessions for the ~33 pre-existing repos (no stored session → can't publish; needs admin/createSession path or re-provision). The shared-token fallback does NOT help them (rsky rejects it per-DID).
-- ✅ **Blob path** — `uploadBlob` authenticates per-account: `PdsClient::upload_blob_for_did` + `BlobUploader::upload_blob_for_user` override; and the **video-service path** `getServiceAuth` now calls `auth_token_for(user_did)` (rsky issues that token for the requesting DID). Both blob client and publisher share one `DbSessionProvider`. Tests: `upload_blob_for_user_uses_per_account_session_token`.
-- ⏳ **Follow-up** — `putRecord`/`deleteRecord` still use the shared token; route those per-account too (needed for edits/deletes, not the first create).
+- ✅ **Incr 4** — refresh on 401: `post_repo_write_as` calls `com.atproto.server.refreshSession` with the stored refresh JWT, persists the rotation (`store_session`), and retries once. Test: `create_record_refreshes_session_and_retries_on_401`.
+- ✅ **Blob path** — `uploadBlob` authenticates per-account (`upload_blob_for_did` + `BlobUploader::upload_blob_for_user`); the **video-service path** `getServiceAuth` calls `auth_token_for(user_did)`. Both blob client and publisher share one `DbSessionProvider`. Test: `upload_blob_for_user_uses_per_account_session_token`.
+- ✅ **putRecord / deleteRecord** — routed through `post_repo_write_as`, so all repo writes (create/put/delete/uploadBlob) auth per-account with 401-refresh. Test: `delete_record_uses_per_account_session_token`.
+- ⏳ **Incr 5 (only remaining)** — backfill sessions for the ~33 pre-existing repos (no stored session → can't publish; needs admin/createSession or re-provision). Shared-token fallback does NOT help them (rsky rejects per-DID). Best done AFTER a live deploy confirms the new-account path.
 
 ## Acceptance criteria
 - A crosspost `createRecord` for account X authenticates as DID X and succeeds against rsky-pds (no `AuthRequiredError`).
