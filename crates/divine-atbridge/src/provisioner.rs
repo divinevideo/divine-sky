@@ -386,7 +386,7 @@ where
             Ok(did) => did,
             Err(err) => {
                 self.link_store
-                    .mark_link_failed(nostr_pubkey, None, &err.to_string())
+                    .mark_link_failed(nostr_pubkey, None, &format!("{err:#}"))
                     .await
                     .context("recording PLC provisioning failure")?;
                 return Err(err);
@@ -430,7 +430,7 @@ where
             }
             Err(err) => {
                 self.link_store
-                    .mark_link_failed(nostr_pubkey, Some(did), &err.to_string())
+                    .mark_link_failed(nostr_pubkey, Some(did), &format!("{err:#}"))
                     .await
                     .context("recording PDS provisioning failure")?;
                 Err(err)

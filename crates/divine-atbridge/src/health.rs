@@ -253,9 +253,14 @@ struct ApiError(anyhow::Error);
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
-        let message = self.0.to_string();
+        // `{:#}` includes the full anyhow cause chain (e.g. the PLC directory
+        // status + body), not just the top-level context — provisioning failures
+        // are otherwise undebuggable. `status_for_error` keys off the top message,
+        // which is the first line of the chained string.
+        let message = format!("{:#}", self.0);
+        let top = self.0.to_string();
         tracing::error!(error = %message, "AT bridge internal API request failed");
-        (status_for_error(&message), message).into_response()
+        (status_for_error(&top), message).into_response()
     }
 }
 
