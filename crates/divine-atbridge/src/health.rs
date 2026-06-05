@@ -384,10 +384,12 @@ pub fn app_with_config(config: BridgeConfig) -> Result<Router> {
         pds_creator: PdsAccountsClient::new(
             provisioning_pds_url.clone(),
             config.pds_auth_token.clone(),
+            config.account_email_domain.clone(),
         ),
         link_store: DbAccountLinkStore::new(config.database_url.clone()),
         pds_endpoint: provisioning_pds_url,
         handle_domain: config.handle_domain.clone(),
+        recovery_rotation_did_keys: config.plc_recovery_rotation_did_keys.clone(),
     };
 
     Ok(app_with_state(InternalApiState {
@@ -424,10 +426,12 @@ pub async fn spawn(
             pds_creator: PdsAccountsClient::new(
                 provisioning_pds_url.clone(),
                 config.pds_auth_token.clone(),
+                config.account_email_domain.clone(),
             ),
             link_store: DbAccountLinkStore::new(config.database_url.clone()),
             pds_endpoint: provisioning_pds_url,
             handle_domain: config.handle_domain.clone(),
+            recovery_rotation_did_keys: config.plc_recovery_rotation_did_keys.clone(),
         })),
     });
     let listener = tokio::net::TcpListener::bind(addr)

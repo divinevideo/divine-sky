@@ -41,6 +41,16 @@ fn reset_database(database_url: &str) {
         &mut conn,
         include_str!("../../../migrations/004_publish_job_scheduler/up.sql"),
     );
+    execute_batch(
+        &mut conn,
+        include_str!("../../../migrations/005_crosspost_default_true/up.sql"),
+    );
+    // Session columns (pds_access_jwt/refresh_jwt) — the rsky-native provisioner
+    // always stores a session, so this migration is required for /provision.
+    execute_batch(
+        &mut conn,
+        include_str!("../../../migrations/006_account_pds_session/up.sql"),
+    );
 }
 
 #[tokio::test]
@@ -60,14 +70,18 @@ async fn configured_internal_api_provisions_pending_link() {
     )
     .expect("pending row should seed");
 
-    let mut plc_server = mockito::Server::new_async().await;
+    // rsky-native: the bridge no longer talks to the PLC directory at all; rsky
+    // mints the DID inside createAccount. The PLC server is kept only to provide a
+    // valid URL in config (it must receive ZERO calls).
+    let plc_server = mockito::Server::new_async().await;
     let mut pds_server = mockito::Server::new_async().await;
 
-    let plc_mock = plc_server
-        .mock("POST", mockito::Matcher::Regex("^/did:plc:".to_string()))
-        .with_status(201)
+    let invite_mock = pds_server
+        .mock("POST", "/xrpc/com.atproto.server.createInviteCode")
+        .match_header("authorization", "Basic YWRtaW46YWRtaW4tdG9rZW4=")
+        .with_status(200)
         .with_header("content-type", "application/json")
-        .with_body(json!({ "did": "did:plc:alice123" }).to_string())
+        .with_body(json!({ "code": "divine-invite-1" }).to_string())
         .create_async()
         .await;
 
@@ -75,7 +89,16 @@ async fn configured_internal_api_provisions_pending_link() {
         .mock("POST", "/xrpc/com.atproto.server.createAccount")
         .match_header("authorization", "Basic YWRtaW46YWRtaW4tdG9rZW4=")
         .with_status(200)
-        .with_body("{}")
+        .with_header("content-type", "application/json")
+        .with_body(
+            json!({
+                "did": "did:plc:alice123",
+                "handle": "alice.divine.video",
+                "accessJwt": "access-jwt",
+                "refreshJwt": "refresh-jwt"
+            })
+            .to_string(),
+        )
         .create_async()
         .await;
 
@@ -91,6 +114,8 @@ async fn configured_internal_api_provisions_pending_link() {
         health_bind_addr: "127.0.0.1:0".into(),
         plc_directory_url: plc_server.url(),
         handle_domain: "divine.video".into(),
+        plc_recovery_rotation_did_keys: Vec::new(),
+        account_email_domain: "divine.video".into(),
         provisioning_bearer_token: "test-provisioning-token".into(),
         video_service_url: "https://video.bsky.app".into(),
         video_service_enabled: false,
@@ -130,7 +155,7 @@ async fn configured_internal_api_provisions_pending_link() {
     assert_eq!(payload["handle"], "alice.divine.video");
     assert!(payload["signing_key_id"].as_str().unwrap_or_default().len() > 8);
 
-    plc_mock.assert_async().await;
+    invite_mock.assert_async().await;
     pds_mock.assert_async().await;
 
     let stored = get_account_link_lifecycle(&mut conn, "npub1alice")
@@ -154,6 +179,8 @@ fn configured_internal_api_requires_provisioning_token() {
         health_bind_addr: "127.0.0.1:0".into(),
         plc_directory_url: "https://plc.directory".into(),
         handle_domain: "divine.video".into(),
+        plc_recovery_rotation_did_keys: Vec::new(),
+        account_email_domain: "divine.video".into(),
         provisioning_bearer_token: String::new(),
         video_service_url: "https://video.bsky.app".into(),
         video_service_enabled: false,

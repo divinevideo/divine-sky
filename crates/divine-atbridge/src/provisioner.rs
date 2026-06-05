@@ -9,6 +9,10 @@ use secp256k1::{PublicKey, Secp256k1, SecretKey};
 // Types
 // ---------------------------------------------------------------------------
 
+/// Sentinel stored in the NOT-NULL signing/rotation key columns now that rsky
+/// owns the account's keys (the bridge no longer generates per-account keypairs).
+pub const RSKY_MANAGED_KEY_REF: &str = "rsky-managed";
+
 /// Result of successfully provisioning or recovering an ATProto account.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProvisionResult {
@@ -121,11 +125,28 @@ pub struct PdsSession {
     pub refresh_jwt: String,
 }
 
-/// Creates accounts on the PDS.
+/// A freshly provisioned account: the rsky-minted DID plus its session (if the
+/// PDS issued one). In the rsky-native model the bridge does NOT supply a DID —
+/// rsky mints the did:plc with its own rotation/signing keys and returns it here.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CreatedAccount {
+    pub did: String,
+    pub session: Option<PdsSession>,
+}
+
+/// Creates accounts on the PDS, rsky-native: rsky authors the did:plc (listing
+/// the supplied `recovery_keys` first in rotation_keys, then its own operational
+/// key) and the account is born active.
 #[async_trait]
 pub trait PdsAccountCreator: Send + Sync {
-    /// Create (and activate) the account; returns its session if the PDS issued one.
-    async fn create_account(&self, did: &str, handle: &str) -> Result<Option<PdsSession>>;
+    /// Create an account for `handle`. rsky mints the DID and returns it plus an
+    /// active session. `recovery_keys` are `did:key` values listed first
+    /// (highest priority) in the new DID's rotation_keys.
+    async fn create_account(
+        &self,
+        handle: &str,
+        recovery_keys: &[String],
+    ) -> Result<CreatedAccount>;
 }
 
 /// Stores lifecycle-aware account-link state.
@@ -216,6 +237,9 @@ where
     pub link_store: L,
     pub pds_endpoint: String,
     pub handle_domain: String,
+    /// Offline recovery `did:key` rotation keys passed to rsky on every
+    /// createAccount so a cold key can recover any account. From config.
+    pub recovery_rotation_did_keys: Vec<String>,
 }
 
 impl<K, P, A, L> AccountProvisioner<K, P, A, L>
@@ -304,9 +328,14 @@ where
             }
             ProvisioningState::Pending | ProvisioningState::Failed => {
                 if let Some(did) = existing.did.clone() {
+                    // rsky already minted the DID (it's stored), so the account
+                    // exists and was born active. Re-creating with no DID would
+                    // mint a duplicate — instead just (re)mark the link ready.
                     let record = self
-                        .create_pds_account_and_mark_ready(nostr_pubkey, &did, handle)
-                        .await?;
+                        .link_store
+                        .mark_link_ready(nostr_pubkey, &did)
+                        .await
+                        .context("marking existing account link ready")?;
                     Ok(ProvisionResult {
                         did,
                         handle: record.handle,
@@ -326,116 +355,55 @@ where
         handle: &str,
         crosspost_enabled: bool,
     ) -> Result<ProvisionResult> {
-        let (signing_key_id, signing_keypair) = self
-            .key_store
-            .generate_keypair("signing-key")
-            .await
-            .context("generating AT signing keypair")?;
-        let (rotation_key_id, rotation_keypair) = self
-            .key_store
-            .generate_keypair("plc-rotation-key")
-            .await
-            .context("generating PLC rotation keypair")?;
-
+        // rsky-native: rsky owns the rotation + signing keys, so the bridge no
+        // longer generates keypairs or mints a did:plc. We persist sentinels for
+        // the NOT-NULL key columns (lifecycle visibility only).
         self.link_store
             .save_pending_link(PendingAccountLink {
                 nostr_pubkey,
                 did: None,
                 handle,
                 crosspost_enabled,
-                signing_key_id: &signing_key_id,
-                plc_rotation_key_ref: &rotation_key_id,
+                signing_key_id: RSKY_MANAGED_KEY_REF,
+                plc_rotation_key_ref: RSKY_MANAGED_KEY_REF,
             })
             .await
             .context("saving pending account link")?;
 
-        let signing_did_key = pubkey_to_did_key(&signing_keypair.public_key);
-        let rotation_did_key = pubkey_to_did_key(&rotation_keypair.public_key);
-
-        let mut verification_methods = std::collections::BTreeMap::new();
-        verification_methods.insert("atproto".to_string(), signing_did_key);
-
-        let mut services = std::collections::BTreeMap::new();
-        services.insert(
-            "atproto_pds".to_string(),
-            PlcService {
-                service_type: "AtprotoPersonalDataServer".to_string(),
-                endpoint: self.pds_endpoint.clone(),
-            },
-        );
-
-        let mut operation = PlcOperation {
-            op_type: "plc_operation".to_string(),
-            rotation_keys: vec![rotation_did_key],
-            verification_methods,
-            also_known_as: vec![format!("at://{handle}")],
-            services,
-            prev: None,
-            sig: String::new(),
-        };
-
-        operation.sig = sign_plc_operation(&operation, &rotation_keypair.secret_key)
-            .context("signing PLC operation")?;
-
-        let did = match self
-            .plc_client
-            .create_did(&operation)
+        let created = match self
+            .pds_creator
+            .create_account(handle, &self.recovery_rotation_did_keys)
             .await
-            .context("creating did:plc via PLC directory")
+            .context("creating account on PDS")
         {
-            Ok(did) => did,
+            Ok(created) => created,
             Err(err) => {
                 self.link_store
                     .mark_link_failed(nostr_pubkey, None, &format!("{err:#}"))
                     .await
-                    .context("recording PLC provisioning failure")?;
+                    .context("recording PDS provisioning failure")?;
                 return Err(err);
             }
         };
 
+        if let Some(session) = &created.session {
+            self.link_store
+                .store_pds_session(nostr_pubkey, session)
+                .await
+                .context("persisting PDS session for account")?;
+        }
+
         let record = self
-            .create_pds_account_and_mark_ready(nostr_pubkey, &did, handle)
-            .await?;
+            .link_store
+            .mark_link_ready(nostr_pubkey, &created.did)
+            .await
+            .context("marking account link ready")?;
 
         Ok(ProvisionResult {
-            did,
+            did: created.did,
             handle: record.handle,
             signing_key_id: record.signing_key_id,
         })
-    }
-
-    async fn create_pds_account_and_mark_ready(
-        &self,
-        nostr_pubkey: &str,
-        did: &str,
-        handle: &str,
-    ) -> Result<AccountLinkRecord> {
-        match self
-            .pds_creator
-            .create_account(did, handle)
-            .await
-            .context("creating account on PDS")
-        {
-            Ok(session) => {
-                if let Some(session) = session {
-                    self.link_store
-                        .store_pds_session(nostr_pubkey, &session)
-                        .await
-                        .context("persisting PDS session for account")?;
-                }
-                self.link_store
-                    .mark_link_ready(nostr_pubkey, did)
-                    .await
-                    .context("marking account link ready")
-            }
-            Err(err) => {
-                self.link_store
-                    .mark_link_failed(nostr_pubkey, Some(did), &format!("{err:#}"))
-                    .await
-                    .context("recording PDS provisioning failure")?;
-                Err(err)
-            }
-        }
     }
 }
 
@@ -527,23 +495,34 @@ mod tests {
 
     struct MockPdsCreator {
         fail: bool,
-        calls: Arc<Mutex<Vec<(String, String)>>>,
+        /// Records each call as (handle, recovery_keys) so tests can assert the
+        /// rsky-native shape: rsky mints the DID, recovery keys are passed through.
+        calls: Arc<Mutex<Vec<(String, Vec<String>)>>>,
     }
 
     #[async_trait]
     impl PdsAccountCreator for MockPdsCreator {
-        async fn create_account(&self, did: &str, handle: &str) -> Result<Option<PdsSession>> {
+        async fn create_account(
+            &self,
+            handle: &str,
+            recovery_keys: &[String],
+        ) -> Result<CreatedAccount> {
             self.calls
                 .lock()
                 .unwrap()
-                .push((did.to_string(), handle.to_string()));
+                .push((handle.to_string(), recovery_keys.to_vec()));
             if self.fail {
                 bail!("PDS account creation failed");
             }
-            Ok(Some(PdsSession {
-                access_jwt: format!("access-{did}"),
-                refresh_jwt: format!("refresh-{did}"),
-            }))
+            // rsky mints the DID; the bridge does not supply one.
+            let did = "did:plc:testaccount".to_string();
+            Ok(CreatedAccount {
+                session: Some(PdsSession {
+                    access_jwt: format!("access-{did}"),
+                    refresh_jwt: format!("refresh-{did}"),
+                }),
+                did,
+            })
         }
     }
 
@@ -638,11 +617,13 @@ mod tests {
         }
     }
 
+    const TEST_RECOVERY_KEY: &str = "did:key:zRecoveryTest";
+
     struct ProvisionerHarness {
         provisioner: AccountProvisioner<MockKeyStore, MockPlcClient, MockPdsCreator, MockLinkStore>,
         generated: Arc<Mutex<Vec<String>>>,
         plc_calls: Arc<Mutex<Vec<PlcOperation>>>,
-        pds_calls: Arc<Mutex<Vec<(String, String)>>>,
+        pds_calls: Arc<Mutex<Vec<(String, Vec<String>)>>>,
     }
 
     fn make_provisioner(links: SharedLinks, plc_fail: bool, pds_fail: bool) -> ProvisionerHarness {
@@ -666,6 +647,7 @@ mod tests {
             link_store: MockLinkStore { links },
             pds_endpoint: "https://pds.divine.video".to_string(),
             handle_domain: "divine.video".to_string(),
+            recovery_rotation_did_keys: vec![TEST_RECOVERY_KEY.to_string()],
         };
 
         ProvisionerHarness {
@@ -694,7 +676,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn successful_provisioning_flow_uses_distinct_keys() {
+    async fn successful_provisioning_is_rsky_native() {
+        // rsky-native: the bridge generates NO keys and makes NO PLC call. It calls
+        // createAccount (which mints the DID), passing the configured recovery keys.
         let links = SharedLinks::default();
         let harness = make_provisioner(links.clone(), false, false);
 
@@ -707,10 +691,17 @@ mod tests {
         let stored = links.get("npub_abc123");
         assert_eq!(stored.provisioning_state, ProvisioningState::Ready);
         assert_eq!(stored.did.as_deref(), Some("did:plc:testaccount"));
-        assert_ne!(stored.signing_key_id, stored.plc_rotation_key_ref);
-        assert_eq!(harness.generated.lock().unwrap().len(), 2);
-        assert_eq!(harness.plc_calls.lock().unwrap().len(), 1);
-        assert_eq!(harness.pds_calls.lock().unwrap().len(), 1);
+        // rsky owns the keys → sentinel refs in the NOT-NULL key columns.
+        assert_eq!(stored.signing_key_id, RSKY_MANAGED_KEY_REF);
+        assert_eq!(stored.plc_rotation_key_ref, RSKY_MANAGED_KEY_REF);
+        assert!(harness.generated.lock().unwrap().is_empty());
+        assert!(harness.plc_calls.lock().unwrap().is_empty());
+
+        // createAccount called once with the handle + the configured recovery keys.
+        let pds_calls = harness.pds_calls.lock().unwrap();
+        assert_eq!(pds_calls.len(), 1);
+        assert_eq!(pds_calls[0].0, "alice.divine.video");
+        assert_eq!(pds_calls[0].1, vec![TEST_RECOVERY_KEY.to_string()]);
         assert_eq!(result.signing_key_id, stored.signing_key_id);
     }
 
@@ -766,19 +757,23 @@ mod tests {
 
         let stored = links.get("npub_fail");
         assert_eq!(stored.provisioning_state, ProvisioningState::Failed);
-        assert_eq!(stored.did.as_deref(), Some("did:plc:testaccount"));
+        // rsky never returned a DID (createAccount failed) → link has no DID.
+        assert_eq!(stored.did, None);
         assert!(stored
             .provisioning_error
             .as_deref()
             .unwrap_or_default()
             .contains("PDS"));
-        assert_eq!(harness.plc_calls.lock().unwrap().len(), 1);
+        assert!(harness.plc_calls.lock().unwrap().is_empty());
         assert_eq!(harness.pds_calls.lock().unwrap().len(), 1);
         assert!(err.to_string().contains("creating account on PDS"));
     }
 
     #[tokio::test]
-    async fn retry_reuses_existing_failed_link() {
+    async fn retry_of_link_with_existing_did_marks_ready_without_recreating() {
+        // A Failed link that already carries a DID means rsky already minted the
+        // account. Re-running createAccount (no DID) would mint a DUPLICATE, so the
+        // retry must just re-mark the link ready and NOT call createAccount.
         let links = SharedLinks::default();
         links.insert(failed_record("npub_retry", "dana.divine.video"));
 
@@ -795,7 +790,8 @@ mod tests {
         assert_eq!(stored.did.as_deref(), Some("did:plc:retryme"));
         assert!(harness.generated.lock().unwrap().is_empty());
         assert!(harness.plc_calls.lock().unwrap().is_empty());
-        assert_eq!(harness.pds_calls.lock().unwrap().len(), 1);
+        // No new account created — the existing DID is reused as-is.
+        assert!(harness.pds_calls.lock().unwrap().is_empty());
         assert_eq!(result.did, "did:plc:retryme");
     }
 
