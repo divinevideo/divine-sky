@@ -76,21 +76,33 @@ quota wall hold regardless.)
 
 
 - **Prod recovery key CREATED 2026-06-05** (fresh, not reused from staging): private →
-  `divine-atproto-plc-recovery-key-private-production`; public did:key →
+  `divine-atproto-plc-recovery-key-private-production` (SM has ONE version, v1 — almost
+  certainly the ONLY copy; deleting it destroys the key); public did:key →
   `divine-atproto-plc-recovery-key-did-production` =
   `did:key:zQ3shqtkyxqEpU468PfA6nKHpFbKwGx6oaao6jEs5cpxerjv1`.
-- **⚠️ PROD ISOLATION NOT DONE — BLOCKED ON PERMISSIONS.** Attempted an IAM deny policy
-  excluding the cluster SAs (`argocd-production`, `external-secrets-production`,
-  `keycast-migration`) from `versions.access` on the private recovery secret →
-  `denypolicies.create denied` (rabble@divine.video lacks `iam.googleapis.com/denypolicies.create`).
-  Because those SAs hold PROJECT-level `secretAccessor` (additive, can't be subtracted by a
-  secret-level allow), the prod private recovery key is currently readable by the same accounts
-  that read the operational rotation key → NO real recovery isolation yet.
-  REQUIRES an IAM/org admin to either: (a) apply the deny policy, (b) CMEK-encrypt the secret
-  with a KMS key the cluster SAs can't decrypt (keyrings exist: app-keys-production,
-  prod-proofsign), or (c) move the private half cold/offline out of the cluster-readable project
-  (preferred — cluster only needs the public did:key). Until one is done, treat the recovery
-  key as NOT providing isolation.
+- **❌ CMEK WAS THE WRONG TOOL (corrected 2026-06-05).** I CMEK-encrypted the private secret
+  with KMS key `plc-recovery-cmek` (keyring `app-keys-production`, us-central1) and granted
+  decrypt only to the SM service agent. This does NOT isolate any caller: **Secret Manager
+  CMEK is transparent to callers** — the SM service agent performs the decrypt, and a caller
+  needs ONLY `roles/secretmanager.secretAccessor` (zero KMS permission) to read the plaintext.
+  So CMEK gave a kill-switch (disable the KMS key → nobody reads the secret), NOT caller
+  isolation. Corollary: `keycast-migration`'s project-level KMS grant is irrelevant to secret
+  access — do NOT touch it (would break keycast's own master-key access for no benefit).
+- **⚠️ PROD ISOLATION STILL NOT ACHIEVED. The ONLY real lever is `secretAccessor`, and it's
+  project-level.** `argocd-production`, `external-secrets-production`, and `keycast-migration`
+  all hold project-level `secretAccessor` → they can read the private recovery secret (CMEK or
+  not). A secret-level allow can't subtract a project-level grant; the deny policy that would
+  is org-level (`denypolicies.create denied` for rabble@divine.video). Therefore the correct
+  fix is **(c): the private half must NOT live in dv-platform-prod at all.** The cluster only
+  ever consumes the PUBLIC did:key (via `PLC_RECOVERY_ROTATION_DID_KEYS`, added in Option B
+  Task 1); the bridge never reads the private half — it's break-glass-only.
+- **BLOCKING SAFETY GATE before removing the private secret:** SM v1 is likely the only copy.
+  Removing it from the project requires FIRST securing a durable copy in the chosen cold
+  destination. Do NOT delete first. Do NOT print the private value into any transcript/log.
+  Destination is an OWNER decision (separate isolated GCP project vs. offline/cold human
+  custody) — see launch-gate note. This is a PROD-PROMOTION gate, not a launch blocker: no
+  prod accounts exist yet and Option B isn't deployed, so the private key currently has zero
+  live consumers. Sequence it AFTER staging Option B + staging e2e are proven.
 
 ## Bottom line
 Day-to-day safety is reasonable (SM + tight workload IAM). "Long-lasting" is **not yet true**
