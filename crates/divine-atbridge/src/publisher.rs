@@ -6,9 +6,25 @@
 use anyhow::{Context, Result};
 use divine_bridge_types::BlobRef;
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 use std::time::Duration;
 
 use crate::pipeline::{BlobUploader, PdsPublisher, PublishedRecord};
+
+/// Resolves the per-account PDS access token for repo writes. rsky-pds authorizes
+/// `com.atproto.repo.*` writes as the repo's own DID, so each write must use that
+/// account's session token rather than a shared admin token.
+#[async_trait::async_trait]
+pub trait SessionProvider: Send + Sync {
+    /// Return the access JWT for `did`, or `None` to fall back to the default token.
+    async fn access_token(&self, did: &str) -> Result<Option<String>>;
+
+    /// Return the refresh JWT for `did`, used to mint a new access token on 401.
+    async fn refresh_token(&self, did: &str) -> Result<Option<String>>;
+
+    /// Persist a rotated session (access + refresh JWT) after a refresh.
+    async fn store_session(&self, did: &str, access_jwt: &str, refresh_jwt: &str) -> Result<()>;
+}
 
 // ---------------------------------------------------------------------------
 // Response types
@@ -60,16 +76,34 @@ struct XrpcError {
     message: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+struct RefreshSessionResponse {
+    #[serde(rename = "accessJwt")]
+    access_jwt: String,
+    #[serde(rename = "refreshJwt")]
+    refresh_jwt: String,
+}
+
 // ---------------------------------------------------------------------------
 // PdsClient
 // ---------------------------------------------------------------------------
 
 /// HTTP client for ATProto PDS XRPC endpoints.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct PdsClient {
     base_url: String,
     auth_token: String,
+    session_provider: Option<Arc<dyn SessionProvider>>,
     client: reqwest::Client,
+}
+
+impl std::fmt::Debug for PdsClient {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PdsClient")
+            .field("base_url", &self.base_url)
+            .field("has_session_provider", &self.session_provider.is_some())
+            .finish_non_exhaustive()
+    }
 }
 
 impl PdsClient {
@@ -78,6 +112,7 @@ impl PdsClient {
         Self {
             base_url: base_url.into(),
             auth_token: auth_token.into(),
+            session_provider: None,
             client: reqwest::Client::builder()
                 .connect_timeout(Duration::from_secs(5))
                 .timeout(Duration::from_secs(60))
@@ -86,17 +121,131 @@ impl PdsClient {
         }
     }
 
+    /// Attach a per-account session provider used to authenticate repo writes as
+    /// the target DID. Falls back to the default token when the provider has no
+    /// session for a DID.
+    pub fn with_session_provider(mut self, provider: Arc<dyn SessionProvider>) -> Self {
+        self.session_provider = Some(provider);
+        self
+    }
+
+    /// Resolve the bearer token to use when acting as `did`'s account (its session
+    /// token if known, else the default token). Used for repo writes and for
+    /// `getServiceAuth`, both of which rsky authorizes as the account DID.
+    pub async fn auth_token_for(&self, did: &str) -> Result<String> {
+        if let Some(provider) = &self.session_provider {
+            if let Some(token) = provider.access_token(did).await? {
+                return Ok(token);
+            }
+        }
+        Ok(self.auth_token.clone())
+    }
+
+    /// On a 401 for `did`, mint a fresh access token via `refreshSession` using the
+    /// stored refresh JWT, persist the rotated session, and return the new access
+    /// token. Returns `None` if there is no session provider or no refresh token.
+    async fn refresh_session_for(&self, did: &str) -> Result<Option<String>> {
+        let Some(provider) = &self.session_provider else {
+            return Ok(None);
+        };
+        let Some(refresh_jwt) = provider.refresh_token(did).await? else {
+            return Ok(None);
+        };
+
+        let url = format!("{}/xrpc/com.atproto.server.refreshSession", self.base_url);
+        let resp = self
+            .client
+            .post(&url)
+            .header("Authorization", format!("Bearer {refresh_jwt}"))
+            .send()
+            .await
+            .context("failed to send refreshSession request")?;
+        let status = resp.status();
+        if !status.is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            anyhow::bail!(
+                "refreshSession failed ({}): {}",
+                status.as_u16(),
+                parse_xrpc_error(&body)
+            );
+        }
+        let refreshed: RefreshSessionResponse = resp
+            .json()
+            .await
+            .context("failed to parse refreshSession response")?;
+        provider
+            .store_session(did, &refreshed.access_jwt, &refreshed.refresh_jwt)
+            .await
+            .context("failed to persist rotated PDS session")?;
+        Ok(Some(refreshed.access_jwt))
+    }
+
+    /// POST a JSON repo-write to `path`, authenticated as `did`'s account, with a
+    /// single refresh-and-retry on 401. Centralizes the per-account auth +
+    /// token-refresh behavior for createRecord/putRecord/deleteRecord.
+    async fn post_repo_write_as(
+        &self,
+        did: &str,
+        path: &str,
+        body: &serde_json::Value,
+    ) -> Result<reqwest::Response> {
+        let url = format!("{}/xrpc/{path}", self.base_url);
+        let mut auth_token = self.auth_token_for(did).await?;
+        let mut refreshed = false;
+        loop {
+            let resp = self
+                .client
+                .post(&url)
+                .header("Content-Type", "application/json")
+                .header("Authorization", format!("Bearer {auth_token}"))
+                .json(body)
+                .send()
+                .await
+                .with_context(|| format!("failed to send {path} request"))?;
+
+            if resp.status() == reqwest::StatusCode::UNAUTHORIZED && !refreshed {
+                if let Some(new_token) = self.refresh_session_for(did).await? {
+                    auth_token = new_token;
+                    refreshed = true;
+                    continue;
+                }
+            }
+            return Ok(resp);
+        }
+    }
+
     /// Upload a blob to the PDS.
     ///
     /// Calls `POST /xrpc/com.atproto.repo.uploadBlob` with raw bytes.
     pub async fn upload_blob(&self, data: &[u8], mime_type: &str) -> Result<BlobRef> {
+        self.upload_blob_with_token(data, mime_type, &self.auth_token)
+            .await
+    }
+
+    /// Upload a blob authenticated as `did`'s account (per-account session token).
+    pub async fn upload_blob_for_did(
+        &self,
+        data: &[u8],
+        mime_type: &str,
+        did: &str,
+    ) -> Result<BlobRef> {
+        let token = self.auth_token_for(did).await?;
+        self.upload_blob_with_token(data, mime_type, &token).await
+    }
+
+    async fn upload_blob_with_token(
+        &self,
+        data: &[u8],
+        mime_type: &str,
+        auth_token: &str,
+    ) -> Result<BlobRef> {
         let url = format!("{}/xrpc/com.atproto.repo.uploadBlob", self.base_url);
 
         let resp = self
             .client
             .post(&url)
             .header("Content-Type", mime_type)
-            .header("Authorization", format!("Bearer {}", self.auth_token))
+            .header("Authorization", format!("Bearer {auth_token}"))
             .body(data.to_vec())
             .send()
             .await
@@ -128,8 +277,6 @@ impl PdsClient {
         collection: &str,
         record: &serde_json::Value,
     ) -> Result<CreateRecordResponse> {
-        let url = format!("{}/xrpc/com.atproto.repo.createRecord", self.base_url);
-
         let body = serde_json::json!({
             "repo": did,
             "collection": collection,
@@ -138,14 +285,8 @@ impl PdsClient {
         });
 
         let resp = self
-            .client
-            .post(&url)
-            .header("Content-Type", "application/json")
-            .header("Authorization", format!("Bearer {}", self.auth_token))
-            .json(&body)
-            .send()
-            .await
-            .context("failed to send createRecord request")?;
+            .post_repo_write_as(did, "com.atproto.repo.createRecord", &body)
+            .await?;
 
         let status = resp.status();
         if !status.is_success() {
@@ -176,8 +317,6 @@ impl PdsClient {
         rkey: &str,
         record: &serde_json::Value,
     ) -> Result<PutRecordResponse> {
-        let url = format!("{}/xrpc/com.atproto.repo.putRecord", self.base_url);
-
         let body = serde_json::json!({
             "repo": did,
             "collection": collection,
@@ -186,14 +325,8 @@ impl PdsClient {
         });
 
         let resp = self
-            .client
-            .post(&url)
-            .header("Content-Type", "application/json")
-            .header("Authorization", format!("Bearer {}", self.auth_token))
-            .json(&body)
-            .send()
-            .await
-            .context("failed to send putRecord request")?;
+            .post_repo_write_as(did, "com.atproto.repo.putRecord", &body)
+            .await?;
 
         let status = resp.status();
         if !status.is_success() {
@@ -211,8 +344,6 @@ impl PdsClient {
     ///
     /// Calls `POST /xrpc/com.atproto.repo.deleteRecord`.
     pub async fn delete_record(&self, did: &str, collection: &str, rkey: &str) -> Result<()> {
-        let url = format!("{}/xrpc/com.atproto.repo.deleteRecord", self.base_url);
-
         let body = serde_json::json!({
             "repo": did,
             "collection": collection,
@@ -220,14 +351,8 @@ impl PdsClient {
         });
 
         let resp = self
-            .client
-            .post(&url)
-            .header("Content-Type", "application/json")
-            .header("Authorization", format!("Bearer {}", self.auth_token))
-            .json(&body)
-            .send()
-            .await
-            .context("failed to send deleteRecord request")?;
+            .post_repo_write_as(did, "com.atproto.repo.deleteRecord", &body)
+            .await?;
 
         let status = resp.status();
         if !status.is_success() {
@@ -244,6 +369,15 @@ impl PdsClient {
 impl BlobUploader for PdsClient {
     async fn upload_blob(&self, data: &[u8], mime_type: &str) -> Result<BlobRef> {
         PdsClient::upload_blob(self, data, mime_type).await
+    }
+
+    async fn upload_blob_for_user(
+        &self,
+        data: &[u8],
+        mime_type: &str,
+        user_did: &str,
+    ) -> Result<BlobRef> {
+        PdsClient::upload_blob_for_did(self, data, mime_type, user_did).await
     }
 }
 
@@ -382,6 +516,182 @@ mod tests {
         mock.assert_async().await;
     }
 
+    #[derive(Debug)]
+    struct StaticSessionProvider {
+        token: String,
+    }
+
+    #[async_trait::async_trait]
+    impl SessionProvider for StaticSessionProvider {
+        async fn access_token(&self, _did: &str) -> Result<Option<String>> {
+            Ok(Some(self.token.clone()))
+        }
+        async fn refresh_token(&self, _did: &str) -> Result<Option<String>> {
+            Ok(None)
+        }
+        async fn store_session(&self, _did: &str, _access: &str, _refresh: &str) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    /// Records refresh + store calls so tests can assert the 401-refresh-retry flow.
+    #[derive(Default)]
+    struct RefreshingSessionProvider {
+        stored: std::sync::Mutex<Vec<(String, String)>>,
+    }
+
+    #[async_trait::async_trait]
+    impl SessionProvider for RefreshingSessionProvider {
+        async fn access_token(&self, _did: &str) -> Result<Option<String>> {
+            Ok(Some("stale-access-jwt".to_string()))
+        }
+        async fn refresh_token(&self, _did: &str) -> Result<Option<String>> {
+            Ok(Some("refresh-jwt".to_string()))
+        }
+        async fn store_session(&self, _did: &str, access: &str, refresh: &str) -> Result<()> {
+            self.stored
+                .lock()
+                .unwrap()
+                .push((access.to_string(), refresh.to_string()));
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn create_record_refreshes_session_and_retries_on_401() {
+        let mut server = mockito::Server::new_async().await;
+        // First createRecord with the stale token -> 401.
+        let unauthorized = server
+            .mock("POST", "/xrpc/com.atproto.repo.createRecord")
+            .match_header("Authorization", "Bearer stale-access-jwt")
+            .with_status(401)
+            .with_body(serde_json::json!({"error": "ExpiredToken"}).to_string())
+            .expect(1)
+            .create_async()
+            .await;
+        // refreshSession returns rotated tokens.
+        let refresh = server
+            .mock("POST", "/xrpc/com.atproto.server.refreshSession")
+            .match_header("Authorization", "Bearer refresh-jwt")
+            .with_status(200)
+            .with_body(
+                serde_json::json!({"accessJwt": "new-access-jwt", "refreshJwt": "new-refresh-jwt"})
+                    .to_string(),
+            )
+            .expect(1)
+            .create_async()
+            .await;
+        // Retry with the new token -> success.
+        let ok = server
+            .mock("POST", "/xrpc/com.atproto.repo.createRecord")
+            .match_header("Authorization", "Bearer new-access-jwt")
+            .with_status(200)
+            .with_header("Content-Type", "application/json")
+            .with_body(
+                serde_json::json!({
+                    "uri": "at://did:plc:abc123/app.bsky.feed.post/rk",
+                    "cid": "bafyrei123",
+                    "validationStatus": "valid"
+                })
+                .to_string(),
+            )
+            .expect(1)
+            .create_async()
+            .await;
+
+        let provider = Arc::new(RefreshingSessionProvider::default());
+        let client = PdsClient::new(server.url(), "shared").with_session_provider(provider.clone());
+        client
+            .create_record(
+                "did:plc:abc123",
+                "app.bsky.feed.post",
+                &serde_json::json!({"text": "hi"}),
+            )
+            .await
+            .unwrap();
+
+        unauthorized.assert_async().await;
+        refresh.assert_async().await;
+        ok.assert_async().await;
+        // The rotated session was persisted.
+        assert_eq!(
+            provider.stored.lock().unwrap().as_slice(),
+            &[("new-access-jwt".to_string(), "new-refresh-jwt".to_string())]
+        );
+    }
+
+    #[tokio::test]
+    async fn create_record_uses_per_account_session_token() {
+        // rsky authorizes repo writes as the account DID, so create_record must
+        // send the account's session token (from the provider), not the shared one.
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("POST", "/xrpc/com.atproto.repo.createRecord")
+            .match_header("Authorization", "Bearer account-session-jwt")
+            .with_status(200)
+            .with_header("Content-Type", "application/json")
+            .with_body(
+                serde_json::json!({
+                    "uri": "at://did:plc:abc123/app.bsky.feed.post/rk",
+                    "cid": "bafyrei123",
+                    "validationStatus": "valid"
+                })
+                .to_string(),
+            )
+            .create_async()
+            .await;
+
+        let client = PdsClient::new(server.url(), "shared-admin-token").with_session_provider(
+            Arc::new(StaticSessionProvider {
+                token: "account-session-jwt".to_string(),
+            }),
+        );
+        client
+            .create_record(
+                "did:plc:abc123",
+                "app.bsky.feed.post",
+                &serde_json::json!({"text": "hi"}),
+            )
+            .await
+            .unwrap();
+        mock.assert_async().await; // fails if it sent the shared token instead
+    }
+
+    #[tokio::test]
+    async fn upload_blob_for_user_uses_per_account_session_token() {
+        // Video crossposts upload the blob as the account; it must use the
+        // account's session token, not the shared one.
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("POST", "/xrpc/com.atproto.repo.uploadBlob")
+            .match_header("Authorization", "Bearer account-session-jwt")
+            .with_status(200)
+            .with_header("Content-Type", "application/json")
+            .with_body(
+                serde_json::json!({
+                    "blob": {
+                        "ref": {"$link": "bafblob"},
+                        "mimeType": "video/mp4",
+                        "size": 3
+                    }
+                })
+                .to_string(),
+            )
+            .create_async()
+            .await;
+
+        let client = PdsClient::new(server.url(), "shared-admin-token").with_session_provider(
+            Arc::new(StaticSessionProvider {
+                token: "account-session-jwt".to_string(),
+            }),
+        );
+        client
+            .upload_blob_for_did(b"abc", "video/mp4", "did:plc:abc123")
+            .await
+            .unwrap();
+        mock.assert_async().await;
+    }
+
     #[tokio::test]
     async fn create_record_rejects_unknown_validation_status() {
         let mut server = mockito::Server::new_async().await;
@@ -475,6 +785,30 @@ mod tests {
             .await
             .unwrap();
 
+        mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn delete_record_uses_per_account_session_token() {
+        // Deletes (e.g. tombstoning a crossposted video) must also auth as the account.
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("POST", "/xrpc/com.atproto.repo.deleteRecord")
+            .match_header("Authorization", "Bearer account-session-jwt")
+            .with_status(200)
+            .with_body("{}")
+            .create_async()
+            .await;
+
+        let client = PdsClient::new(server.url(), "shared").with_session_provider(Arc::new(
+            StaticSessionProvider {
+                token: "account-session-jwt".to_string(),
+            },
+        ));
+        client
+            .delete_record("did:plc:xyz", "app.bsky.feed.post", "rk1")
+            .await
+            .unwrap();
         mock.assert_async().await;
     }
 

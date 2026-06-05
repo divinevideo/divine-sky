@@ -51,6 +51,10 @@ const MIGRATIONS: &[EmbeddedMigration] = &[
         name: "005_crosspost_default_true",
         up_sql: include_str!("../../../migrations/005_crosspost_default_true/up.sql"),
     },
+    EmbeddedMigration {
+        name: "006_account_pds_session",
+        up_sql: include_str!("../../../migrations/006_account_pds_session/up.sql"),
+    },
 ];
 
 /// Apply all bridge-owned migrations to `database_url` on startup.

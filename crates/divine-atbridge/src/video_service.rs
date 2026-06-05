@@ -74,8 +74,6 @@ pub struct VideoServiceUploader {
     pds_client: PdsClient,
     /// PDS XRPC base URL (e.g. `https://pds.staging.dvines.org`).
     pds_url: String,
-    /// Admin bearer token for the PDS.
-    pds_auth_token: String,
     /// Video transcoding service base URL (e.g. `https://video.bsky.app`).
     video_service_url: String,
     /// How long to poll `getJobStatus` before giving up.
@@ -88,7 +86,6 @@ impl VideoServiceUploader {
     pub fn new(
         pds_client: PdsClient,
         pds_url: String,
-        pds_auth_token: String,
         video_service_url: String,
         poll_timeout: Duration,
         poll_interval: Duration,
@@ -103,7 +100,6 @@ impl VideoServiceUploader {
             client,
             pds_client,
             pds_url,
-            pds_auth_token,
             video_service_url,
             poll_timeout,
             poll_interval,
@@ -124,10 +120,14 @@ impl VideoServiceUploader {
             self.pds_url, pds_service_did
         );
 
+        // getServiceAuth issues a token for the *authenticated* account (rsky uses
+        // AccessFull and sets iss = credentials.did), so it must be called as the
+        // user's account session, not the shared admin token.
+        let auth_token = self.pds_client.auth_token_for(user_did).await?;
         let resp = self
             .client
             .get(&url)
-            .header("Authorization", format!("Bearer {}", self.pds_auth_token))
+            .header("Authorization", format!("Bearer {auth_token}"))
             .send()
             .await
             .context("getServiceAuth request failed")?;

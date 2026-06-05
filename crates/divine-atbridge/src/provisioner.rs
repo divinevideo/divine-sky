@@ -113,10 +113,19 @@ pub trait PlcClient: Send + Sync {
     async fn create_did(&self, operation: &PlcOperation) -> Result<String>;
 }
 
+/// A PDS session (access + refresh JWT) for an account, returned by createAccount.
+/// Required for repo writes, which rsky-pds authorizes as the account's own DID.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PdsSession {
+    pub access_jwt: String,
+    pub refresh_jwt: String,
+}
+
 /// Creates accounts on the PDS.
 #[async_trait]
 pub trait PdsAccountCreator: Send + Sync {
-    async fn create_account(&self, did: &str, handle: &str) -> Result<()>;
+    /// Create (and activate) the account; returns its session if the PDS issued one.
+    async fn create_account(&self, did: &str, handle: &str) -> Result<Option<PdsSession>>;
 }
 
 /// Stores lifecycle-aware account-link state.
@@ -133,6 +142,8 @@ pub trait AccountLinkStore: Send + Sync {
         did: Option<&str>,
         error: &str,
     ) -> Result<AccountLinkRecord>;
+    /// Persist the account's PDS session (access/refresh JWT) for later repo writes.
+    async fn store_pds_session(&self, nostr_pubkey: &str, session: &PdsSession) -> Result<()>;
 }
 
 // ---------------------------------------------------------------------------
@@ -405,11 +416,18 @@ where
             .await
             .context("creating account on PDS")
         {
-            Ok(()) => self
-                .link_store
-                .mark_link_ready(nostr_pubkey, did)
-                .await
-                .context("marking account link ready"),
+            Ok(session) => {
+                if let Some(session) = session {
+                    self.link_store
+                        .store_pds_session(nostr_pubkey, &session)
+                        .await
+                        .context("persisting PDS session for account")?;
+                }
+                self.link_store
+                    .mark_link_ready(nostr_pubkey, did)
+                    .await
+                    .context("marking account link ready")
+            }
             Err(err) => {
                 self.link_store
                     .mark_link_failed(nostr_pubkey, Some(did), &err.to_string())
@@ -434,6 +452,7 @@ mod tests {
     #[derive(Clone, Default)]
     struct SharedLinks {
         records: Arc<Mutex<HashMap<String, AccountLinkRecord>>>,
+        sessions: Arc<Mutex<HashMap<String, PdsSession>>>,
     }
 
     impl SharedLinks {
@@ -451,6 +470,10 @@ mod tests {
                 .get(pubkey)
                 .cloned()
                 .expect("link must exist")
+        }
+
+        fn session(&self, pubkey: &str) -> Option<PdsSession> {
+            self.sessions.lock().unwrap().get(pubkey).cloned()
         }
     }
 
@@ -509,7 +532,7 @@ mod tests {
 
     #[async_trait]
     impl PdsAccountCreator for MockPdsCreator {
-        async fn create_account(&self, did: &str, handle: &str) -> Result<()> {
+        async fn create_account(&self, did: &str, handle: &str) -> Result<Option<PdsSession>> {
             self.calls
                 .lock()
                 .unwrap()
@@ -517,7 +540,10 @@ mod tests {
             if self.fail {
                 bail!("PDS account creation failed");
             }
-            Ok(())
+            Ok(Some(PdsSession {
+                access_jwt: format!("access-{did}"),
+                refresh_jwt: format!("refresh-{did}"),
+            }))
         }
     }
 
@@ -601,6 +627,15 @@ mod tests {
             record.updated_at = Utc::now();
             Ok(record.clone())
         }
+
+        async fn store_pds_session(&self, nostr_pubkey: &str, session: &PdsSession) -> Result<()> {
+            self.links
+                .sessions
+                .lock()
+                .unwrap()
+                .insert(nostr_pubkey.to_string(), session.clone());
+            Ok(())
+        }
     }
 
     struct ProvisionerHarness {
@@ -677,6 +712,26 @@ mod tests {
         assert_eq!(harness.plc_calls.lock().unwrap().len(), 1);
         assert_eq!(harness.pds_calls.lock().unwrap().len(), 1);
         assert_eq!(result.signing_key_id, stored.signing_key_id);
+    }
+
+    #[tokio::test]
+    async fn successful_provisioning_persists_pds_session() {
+        // The session returned by createAccount must be stored so the publish
+        // path can authenticate repo writes as the account (Wall 4).
+        let links = SharedLinks::default();
+        let harness = make_provisioner(links.clone(), false, false);
+
+        harness
+            .provisioner
+            .provision_account("npub_sess", "erin.divine.video")
+            .await
+            .expect("provisioning should succeed");
+
+        let session = links
+            .session("npub_sess")
+            .expect("a PDS session must be persisted after provisioning");
+        assert!(session.access_jwt.starts_with("access-"));
+        assert!(session.refresh_jwt.starts_with("refresh-"));
     }
 
     #[tokio::test]

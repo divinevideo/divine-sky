@@ -1,7 +1,7 @@
 # Bridge per-account publish auth (Wall 4) — Design Spec
 
 **Date:** 2026-06-05
-**Status:** Proposed — needs maintainer decision on the session-management approach before implementation.
+**Status:** DECIDED 2026-06-05 → **Option A (per-account session).** Option B (service JWT) is **impossible**, verified against rsky source: `create_record` uses `AccessStandardIncludeChecks` → `access_check` → `validate_access_token` → `validate_bearer_token`, which only accepts a **user session** token (`credentials.did = Some`). The service-JWT path (`UserDidAuth`/`verify_service_jwt`) sets `credentials.did = None` and is wired only to specific endpoints (mod/labeler) with `aud` checks — it is never consulted by `createRecord`, and the `did != credentials.did.unwrap()` gate (`create_record.rs:50`) requires a real `did`. So repo writes MUST use a per-account session. Implementing Option A.
 
 ## Problem (evidence-backed)
 
@@ -54,6 +54,15 @@ The Wall 3 fix (PR #13) makes `createAccount` return — and the bridge receive 
 1. Does the bridge set an account **password** at `createAccount`? (Today it sends only `{did, handle}` — no password. `createSession`/refresh may need one. If not, sessions must come from the `createAccount` response only, and there's no recovery path if they're lost → leans toward storing refreshJwt durably.)
 2. Is there an existing service-auth path (entryway/service DID) rsky-pds will accept for third-party repo writes? (If yes → Option B.)
 3. How should the ~33 already-provisioned staging repos (and any prod ones) be backfilled with sessions?
+
+## Implementation progress (branch `fix/atbridge-per-account-publish-auth`)
+- ✅ **Incr 1** — migration 006: `pds_access_jwt`/`pds_refresh_jwt`/`pds_session_updated_at` on `account_links` (idempotent, in startup runner).
+- ✅ **Incr 2** — provisioner persists the session: `create_account -> Option<PdsSession>`, `AccountLinkStore::store_pds_session` + `store_account_pds_session` query. Test: `successful_provisioning_persists_pds_session`.
+- ✅ **Incr 3** — publish path authenticates per-account: `SessionProvider` trait, `PdsClient::with_session_provider` + `auth_token_for(did)` (falls back to shared token), `DbSessionProvider` resolves the access JWT by DID, wired in runtime. Test: `create_record_uses_per_account_session_token`.
+- ✅ **Incr 4** — refresh on 401: `post_repo_write_as` calls `com.atproto.server.refreshSession` with the stored refresh JWT, persists the rotation (`store_session`), and retries once. Test: `create_record_refreshes_session_and_retries_on_401`.
+- ✅ **Blob path** — `uploadBlob` authenticates per-account (`upload_blob_for_did` + `BlobUploader::upload_blob_for_user`); the **video-service path** `getServiceAuth` calls `auth_token_for(user_did)`. Both blob client and publisher share one `DbSessionProvider`. Test: `upload_blob_for_user_uses_per_account_session_token`.
+- ✅ **putRecord / deleteRecord** — routed through `post_repo_write_as`, so all repo writes (create/put/delete/uploadBlob) auth per-account with 401-refresh. Test: `delete_record_uses_per_account_session_token`.
+- ⏳ **Incr 5 (only remaining)** — backfill sessions for the ~33 pre-existing repos (no stored session → can't publish; needs admin/createSession or re-provision). Shared-token fallback does NOT help them (rsky rejects per-DID). Best done AFTER a live deploy confirms the new-account path.
 
 ## Acceptance criteria
 - A crosspost `createRecord` for account X authenticates as DID X and succeeds against rsky-pds (no `AuthRequiredError`).

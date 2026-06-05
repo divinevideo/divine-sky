@@ -235,6 +235,86 @@ pub fn disable_account_link(
     Ok(result)
 }
 
+#[derive(Debug, QueryableByName)]
+struct PdsAccessJwtRow {
+    #[diesel(sql_type = diesel::sql_types::Nullable<Text>)]
+    pds_access_jwt: Option<String>,
+}
+
+/// Look up the stored PDS access JWT for an account by its DID (for repo writes).
+pub fn get_account_pds_access_jwt_by_did(
+    conn: &mut PgConnection,
+    did: &str,
+) -> Result<Option<String>> {
+    let row = sql_query("SELECT pds_access_jwt FROM account_links WHERE did = $1")
+        .bind::<Text, _>(did)
+        .get_result::<PdsAccessJwtRow>(conn)
+        .optional()?;
+    Ok(row.and_then(|r| r.pds_access_jwt))
+}
+
+#[derive(Debug, QueryableByName)]
+struct PdsRefreshJwtRow {
+    #[diesel(sql_type = diesel::sql_types::Nullable<Text>)]
+    pds_refresh_jwt: Option<String>,
+}
+
+/// Look up the stored PDS refresh JWT for an account by its DID (for refreshSession).
+pub fn get_account_pds_refresh_jwt_by_did(
+    conn: &mut PgConnection,
+    did: &str,
+) -> Result<Option<String>> {
+    let row = sql_query("SELECT pds_refresh_jwt FROM account_links WHERE did = $1")
+        .bind::<Text, _>(did)
+        .get_result::<PdsRefreshJwtRow>(conn)
+        .optional()?;
+    Ok(row.and_then(|r| r.pds_refresh_jwt))
+}
+
+/// Persist a rotated PDS session, keyed by DID (used after refreshSession).
+pub fn store_account_pds_session_by_did(
+    conn: &mut PgConnection,
+    did: &str,
+    access_jwt: &str,
+    refresh_jwt: &str,
+) -> Result<()> {
+    sql_query(
+        "UPDATE account_links
+         SET pds_access_jwt = $2,
+             pds_refresh_jwt = $3,
+             pds_session_updated_at = NOW(),
+             updated_at = NOW()
+         WHERE did = $1",
+    )
+    .bind::<Text, _>(did)
+    .bind::<Text, _>(access_jwt)
+    .bind::<Text, _>(refresh_jwt)
+    .execute(conn)?;
+    Ok(())
+}
+
+/// Persist the account's PDS session (access/refresh JWT) for later repo writes.
+pub fn store_account_pds_session(
+    conn: &mut PgConnection,
+    nostr_pubkey: &str,
+    access_jwt: &str,
+    refresh_jwt: &str,
+) -> Result<()> {
+    sql_query(
+        "UPDATE account_links
+         SET pds_access_jwt = $2,
+             pds_refresh_jwt = $3,
+             pds_session_updated_at = NOW(),
+             updated_at = NOW()
+         WHERE nostr_pubkey = $1",
+    )
+    .bind::<Text, _>(nostr_pubkey)
+    .bind::<Text, _>(access_jwt)
+    .bind::<Text, _>(refresh_jwt)
+    .execute(conn)?;
+    Ok(())
+}
+
 /// Re-enable a previously disabled account-link record.
 ///
 /// Restores `provisioning_state` to `ready` if the account has a DID
