@@ -115,8 +115,10 @@ impl PdsClient {
         self
     }
 
-    /// Resolve the bearer token to use when writing to `did`'s repo.
-    async fn auth_token_for(&self, did: &str) -> Result<String> {
+    /// Resolve the bearer token to use when acting as `did`'s account (its session
+    /// token if known, else the default token). Used for repo writes and for
+    /// `getServiceAuth`, both of which rsky authorizes as the account DID.
+    pub async fn auth_token_for(&self, did: &str) -> Result<String> {
         if let Some(provider) = &self.session_provider {
             if let Some(token) = provider.access_token(did).await? {
                 return Ok(token);

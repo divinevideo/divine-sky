@@ -495,8 +495,11 @@ pub async fn run_service_with_state(
     let account_store = DbAccountStore::new(connection.clone());
     let record_store = DbRecordStore::new(connection.clone());
     let blob_fetcher = HttpBlobFetcher::new(Duration::from_secs(60))?;
+    let session_provider: std::sync::Arc<dyn crate::publisher::SessionProvider> =
+        std::sync::Arc::new(DbSessionProvider::new(connection.clone()));
     let pds_client_for_blobs =
-        PdsClient::new(config.pds_url.clone(), config.pds_auth_token.clone());
+        PdsClient::new(config.pds_url.clone(), config.pds_auth_token.clone())
+            .with_session_provider(session_provider.clone());
     let blob_uploader: Box<dyn crate::pipeline::BlobUploader> = if config.video_service_enabled {
         tracing::info!(
             video_service_url = %config.video_service_url,
@@ -505,7 +508,6 @@ pub async fn run_service_with_state(
         Box::new(VideoServiceUploader::new(
             pds_client_for_blobs,
             config.pds_url.clone(),
-            config.pds_auth_token.clone(),
             config.video_service_url.clone(),
             Duration::from_secs(config.video_service_poll_timeout_secs),
             Duration::from_millis(config.video_service_poll_interval_ms),
@@ -514,9 +516,7 @@ pub async fn run_service_with_state(
         Box::new(pds_client_for_blobs)
     };
     let pds_publisher = PdsClient::new(config.pds_url.clone(), config.pds_auth_token.clone())
-        .with_session_provider(std::sync::Arc::new(DbSessionProvider::new(
-            connection.clone(),
-        )));
+        .with_session_provider(session_provider.clone());
     let pipeline = Arc::new(BridgePipeline::new(
         account_store,
         record_store,
