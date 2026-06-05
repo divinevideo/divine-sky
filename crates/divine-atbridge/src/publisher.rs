@@ -180,6 +180,40 @@ impl PdsClient {
         Ok(Some(refreshed.access_jwt))
     }
 
+    /// POST a JSON repo-write to `path`, authenticated as `did`'s account, with a
+    /// single refresh-and-retry on 401. Centralizes the per-account auth +
+    /// token-refresh behavior for createRecord/putRecord/deleteRecord.
+    async fn post_repo_write_as(
+        &self,
+        did: &str,
+        path: &str,
+        body: &serde_json::Value,
+    ) -> Result<reqwest::Response> {
+        let url = format!("{}/xrpc/{path}", self.base_url);
+        let mut auth_token = self.auth_token_for(did).await?;
+        let mut refreshed = false;
+        loop {
+            let resp = self
+                .client
+                .post(&url)
+                .header("Content-Type", "application/json")
+                .header("Authorization", format!("Bearer {auth_token}"))
+                .json(body)
+                .send()
+                .await
+                .with_context(|| format!("failed to send {path} request"))?;
+
+            if resp.status() == reqwest::StatusCode::UNAUTHORIZED && !refreshed {
+                if let Some(new_token) = self.refresh_session_for(did).await? {
+                    auth_token = new_token;
+                    refreshed = true;
+                    continue;
+                }
+            }
+            return Ok(resp);
+        }
+    }
+
     /// Upload a blob to the PDS.
     ///
     /// Calls `POST /xrpc/com.atproto.repo.uploadBlob` with raw bytes.
@@ -243,8 +277,6 @@ impl PdsClient {
         collection: &str,
         record: &serde_json::Value,
     ) -> Result<CreateRecordResponse> {
-        let url = format!("{}/xrpc/com.atproto.repo.createRecord", self.base_url);
-
         let body = serde_json::json!({
             "repo": did,
             "collection": collection,
@@ -252,29 +284,9 @@ impl PdsClient {
             "record": record,
         });
 
-        let mut auth_token = self.auth_token_for(did).await?;
-        let mut refreshed = false;
-        let resp = loop {
-            let resp = self
-                .client
-                .post(&url)
-                .header("Content-Type", "application/json")
-                .header("Authorization", format!("Bearer {auth_token}"))
-                .json(&body)
-                .send()
-                .await
-                .context("failed to send createRecord request")?;
-
-            // On 401, mint a fresh access token via refreshSession and retry once.
-            if resp.status() == reqwest::StatusCode::UNAUTHORIZED && !refreshed {
-                if let Some(new_token) = self.refresh_session_for(did).await? {
-                    auth_token = new_token;
-                    refreshed = true;
-                    continue;
-                }
-            }
-            break resp;
-        };
+        let resp = self
+            .post_repo_write_as(did, "com.atproto.repo.createRecord", &body)
+            .await?;
 
         let status = resp.status();
         if !status.is_success() {
@@ -305,8 +317,6 @@ impl PdsClient {
         rkey: &str,
         record: &serde_json::Value,
     ) -> Result<PutRecordResponse> {
-        let url = format!("{}/xrpc/com.atproto.repo.putRecord", self.base_url);
-
         let body = serde_json::json!({
             "repo": did,
             "collection": collection,
@@ -315,14 +325,8 @@ impl PdsClient {
         });
 
         let resp = self
-            .client
-            .post(&url)
-            .header("Content-Type", "application/json")
-            .header("Authorization", format!("Bearer {}", self.auth_token))
-            .json(&body)
-            .send()
-            .await
-            .context("failed to send putRecord request")?;
+            .post_repo_write_as(did, "com.atproto.repo.putRecord", &body)
+            .await?;
 
         let status = resp.status();
         if !status.is_success() {
@@ -340,8 +344,6 @@ impl PdsClient {
     ///
     /// Calls `POST /xrpc/com.atproto.repo.deleteRecord`.
     pub async fn delete_record(&self, did: &str, collection: &str, rkey: &str) -> Result<()> {
-        let url = format!("{}/xrpc/com.atproto.repo.deleteRecord", self.base_url);
-
         let body = serde_json::json!({
             "repo": did,
             "collection": collection,
@@ -349,14 +351,8 @@ impl PdsClient {
         });
 
         let resp = self
-            .client
-            .post(&url)
-            .header("Content-Type", "application/json")
-            .header("Authorization", format!("Bearer {}", self.auth_token))
-            .json(&body)
-            .send()
-            .await
-            .context("failed to send deleteRecord request")?;
+            .post_repo_write_as(did, "com.atproto.repo.deleteRecord", &body)
+            .await?;
 
         let status = resp.status();
         if !status.is_success() {
@@ -789,6 +785,30 @@ mod tests {
             .await
             .unwrap();
 
+        mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn delete_record_uses_per_account_session_token() {
+        // Deletes (e.g. tombstoning a crossposted video) must also auth as the account.
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("POST", "/xrpc/com.atproto.repo.deleteRecord")
+            .match_header("Authorization", "Bearer account-session-jwt")
+            .with_status(200)
+            .with_body("{}")
+            .create_async()
+            .await;
+
+        let client = PdsClient::new(server.url(), "shared").with_session_provider(Arc::new(
+            StaticSessionProvider {
+                token: "account-session-jwt".to_string(),
+            },
+        ));
+        client
+            .delete_record("did:plc:xyz", "app.bsky.feed.post", "rk1")
+            .await
+            .unwrap();
         mock.assert_async().await;
     }
 
