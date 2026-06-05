@@ -3,6 +3,7 @@
 pub mod backfill_planner;
 pub mod config;
 pub mod deletion;
+pub mod funnelcake_rest;
 pub mod health;
 pub mod nostr_consumer;
 pub mod pds_accounts;
