@@ -11,8 +11,9 @@ use divine_bridge_db::models::{
 };
 use divine_bridge_db::{
     cancel_publish_job, claim_next_backfill_job, claim_next_live_job, enqueue_publish_job,
-    get_account_link_lifecycle, get_ingest_offset, get_publish_job, get_record_mapping,
-    insert_asset, insert_record_mapping, mark_publish_job_completed, mark_publish_job_failed,
+    get_account_link_lifecycle, get_account_pds_access_jwt_by_did, get_ingest_offset,
+    get_publish_job, get_record_mapping, insert_asset, insert_record_mapping,
+    mark_publish_job_completed, mark_publish_job_failed,
     update_record_mapping_status as update_record_mapping_status_query, upsert_ingest_offset,
 };
 use divine_bridge_types::{NostrEvent, PublishJobSource, PublishState, RecordStatus};
@@ -81,6 +82,26 @@ impl AccountStore for DbAccountStore {
         let mut connection = self.connection.lock().unwrap();
         let row = get_account_link_lifecycle(&mut connection, nostr_pubkey)?;
         Ok(row.and_then(|row| account_link_from_lifecycle_row(&row)))
+    }
+}
+
+/// Resolves a per-account PDS access token (by DID) from the bridge database so
+/// repo writes authenticate as the account, as rsky-pds requires.
+pub struct DbSessionProvider {
+    connection: SharedConnection,
+}
+
+impl DbSessionProvider {
+    pub fn new(connection: SharedConnection) -> Self {
+        Self { connection }
+    }
+}
+
+#[async_trait::async_trait]
+impl crate::publisher::SessionProvider for DbSessionProvider {
+    async fn access_token(&self, did: &str) -> Result<Option<String>> {
+        let mut connection = self.connection.lock().unwrap();
+        get_account_pds_access_jwt_by_did(&mut connection, did)
     }
 }
 
@@ -492,7 +513,10 @@ pub async fn run_service_with_state(
     } else {
         Box::new(pds_client_for_blobs)
     };
-    let pds_publisher = PdsClient::new(config.pds_url.clone(), config.pds_auth_token.clone());
+    let pds_publisher = PdsClient::new(config.pds_url.clone(), config.pds_auth_token.clone())
+        .with_session_provider(std::sync::Arc::new(DbSessionProvider::new(
+            connection.clone(),
+        )));
     let pipeline = Arc::new(BridgePipeline::new(
         account_store,
         record_store,

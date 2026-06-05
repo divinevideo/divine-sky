@@ -235,6 +235,24 @@ pub fn disable_account_link(
     Ok(result)
 }
 
+#[derive(Debug, QueryableByName)]
+struct PdsAccessJwtRow {
+    #[diesel(sql_type = diesel::sql_types::Nullable<Text>)]
+    pds_access_jwt: Option<String>,
+}
+
+/// Look up the stored PDS access JWT for an account by its DID (for repo writes).
+pub fn get_account_pds_access_jwt_by_did(
+    conn: &mut PgConnection,
+    did: &str,
+) -> Result<Option<String>> {
+    let row = sql_query("SELECT pds_access_jwt FROM account_links WHERE did = $1")
+        .bind::<Text, _>(did)
+        .get_result::<PdsAccessJwtRow>(conn)
+        .optional()?;
+    Ok(row.and_then(|r| r.pds_access_jwt))
+}
+
 /// Persist the account's PDS session (access/refresh JWT) for later repo writes.
 pub fn store_account_pds_session(
     conn: &mut PgConnection,

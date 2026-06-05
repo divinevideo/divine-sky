@@ -6,9 +6,19 @@
 use anyhow::{Context, Result};
 use divine_bridge_types::BlobRef;
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 use std::time::Duration;
 
 use crate::pipeline::{BlobUploader, PdsPublisher, PublishedRecord};
+
+/// Resolves the per-account PDS access token for repo writes. rsky-pds authorizes
+/// `com.atproto.repo.*` writes as the repo's own DID, so each write must use that
+/// account's session token rather than a shared admin token.
+#[async_trait::async_trait]
+pub trait SessionProvider: Send + Sync {
+    /// Return the access JWT for `did`, or `None` to fall back to the default token.
+    async fn access_token(&self, did: &str) -> Result<Option<String>>;
+}
 
 // ---------------------------------------------------------------------------
 // Response types
@@ -65,11 +75,21 @@ struct XrpcError {
 // ---------------------------------------------------------------------------
 
 /// HTTP client for ATProto PDS XRPC endpoints.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct PdsClient {
     base_url: String,
     auth_token: String,
+    session_provider: Option<Arc<dyn SessionProvider>>,
     client: reqwest::Client,
+}
+
+impl std::fmt::Debug for PdsClient {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PdsClient")
+            .field("base_url", &self.base_url)
+            .field("has_session_provider", &self.session_provider.is_some())
+            .finish_non_exhaustive()
+    }
 }
 
 impl PdsClient {
@@ -78,12 +98,31 @@ impl PdsClient {
         Self {
             base_url: base_url.into(),
             auth_token: auth_token.into(),
+            session_provider: None,
             client: reqwest::Client::builder()
                 .connect_timeout(Duration::from_secs(5))
                 .timeout(Duration::from_secs(60))
                 .build()
                 .expect("reqwest client builder should succeed"),
         }
+    }
+
+    /// Attach a per-account session provider used to authenticate repo writes as
+    /// the target DID. Falls back to the default token when the provider has no
+    /// session for a DID.
+    pub fn with_session_provider(mut self, provider: Arc<dyn SessionProvider>) -> Self {
+        self.session_provider = Some(provider);
+        self
+    }
+
+    /// Resolve the bearer token to use when writing to `did`'s repo.
+    async fn auth_token_for(&self, did: &str) -> Result<String> {
+        if let Some(provider) = &self.session_provider {
+            if let Some(token) = provider.access_token(did).await? {
+                return Ok(token);
+            }
+        }
+        Ok(self.auth_token.clone())
     }
 
     /// Upload a blob to the PDS.
@@ -137,11 +176,12 @@ impl PdsClient {
             "record": record,
         });
 
+        let auth_token = self.auth_token_for(did).await?;
         let resp = self
             .client
             .post(&url)
             .header("Content-Type", "application/json")
-            .header("Authorization", format!("Bearer {}", self.auth_token))
+            .header("Authorization", format!("Bearer {auth_token}"))
             .json(&body)
             .send()
             .await
@@ -380,6 +420,55 @@ mod tests {
         assert_eq!(resp.cid, "bafyrei123");
         assert_eq!(resp.validation_status.as_deref(), Some("valid"));
         mock.assert_async().await;
+    }
+
+    #[derive(Debug)]
+    struct StaticSessionProvider {
+        token: String,
+    }
+
+    #[async_trait::async_trait]
+    impl SessionProvider for StaticSessionProvider {
+        async fn access_token(&self, _did: &str) -> Result<Option<String>> {
+            Ok(Some(self.token.clone()))
+        }
+    }
+
+    #[tokio::test]
+    async fn create_record_uses_per_account_session_token() {
+        // rsky authorizes repo writes as the account DID, so create_record must
+        // send the account's session token (from the provider), not the shared one.
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("POST", "/xrpc/com.atproto.repo.createRecord")
+            .match_header("Authorization", "Bearer account-session-jwt")
+            .with_status(200)
+            .with_header("Content-Type", "application/json")
+            .with_body(
+                serde_json::json!({
+                    "uri": "at://did:plc:abc123/app.bsky.feed.post/rk",
+                    "cid": "bafyrei123",
+                    "validationStatus": "valid"
+                })
+                .to_string(),
+            )
+            .create_async()
+            .await;
+
+        let client = PdsClient::new(server.url(), "shared-admin-token").with_session_provider(
+            Arc::new(StaticSessionProvider {
+                token: "account-session-jwt".to_string(),
+            }),
+        );
+        client
+            .create_record(
+                "did:plc:abc123",
+                "app.bsky.feed.post",
+                &serde_json::json!({"text": "hi"}),
+            )
+            .await
+            .unwrap();
+        mock.assert_async().await; // fails if it sent the shared token instead
     }
 
     #[tokio::test]
