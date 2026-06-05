@@ -44,6 +44,11 @@ pub struct BridgeConfig {
     pub video_service_poll_timeout_secs: u64,
     /// Interval in milliseconds between poll requests (VIDEO_SERVICE_POLL_INTERVAL_MS).
     pub video_service_poll_interval_ms: u64,
+    /// Whether to run the lease-expiry / failed-backfill watchdog poll loop
+    /// (WATCHDOG_ENABLED). Off by default — opt in per environment.
+    pub watchdog_enabled: bool,
+    /// Watchdog poll cadence in seconds (WATCHDOG_INTERVAL_SECS).
+    pub watchdog_interval_secs: u64,
 }
 
 impl BridgeConfig {
@@ -79,6 +84,13 @@ impl BridgeConfig {
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(5000),
+            watchdog_enabled: env::var("WATCHDOG_ENABLED")
+                .map(|v| v == "true")
+                .unwrap_or(false),
+            watchdog_interval_secs: env::var("WATCHDOG_INTERVAL_SECS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(30),
         })
     }
 
@@ -125,6 +137,8 @@ mod tests {
             video_service_enabled: false,
             video_service_poll_timeout_secs: 120,
             video_service_poll_interval_ms: 5000,
+            watchdog_enabled: false,
+            watchdog_interval_secs: 30,
         };
         assert_eq!(config.relay_url, "wss://relay.example.com");
         assert_eq!(config.s3_bucket, "test-bucket");
@@ -149,6 +163,8 @@ mod tests {
             video_service_enabled: false,
             video_service_poll_timeout_secs: 120,
             video_service_poll_interval_ms: 5000,
+            watchdog_enabled: false,
+            watchdog_interval_secs: 30,
         };
 
         assert_eq!(config.provisioning_pds_url(), "https://pds.divine.video");
@@ -173,6 +189,8 @@ mod tests {
             video_service_enabled: false,
             video_service_poll_timeout_secs: 120,
             video_service_poll_interval_ms: 5000,
+            watchdog_enabled: false,
+            watchdog_interval_secs: 30,
         };
 
         assert_eq!(config.provisioning_pds_url(), "http://pds:2583");

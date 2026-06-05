@@ -44,6 +44,9 @@ fn reset_database(database_url: &str) {
     );
 }
 
+// Test fixture builder mirrors the account_links columns; the arg count is
+// inherent to the schema, not a design smell.
+#[allow(clippy::too_many_arguments)]
 fn seed_account(
     conn: &mut PgConnection,
     nostr_pubkey: &str,

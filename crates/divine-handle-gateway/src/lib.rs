@@ -137,8 +137,10 @@ impl AppState {
         &self,
         nostr_pubkey: String,
         handle: String,
+        crosspost_enabled: bool,
     ) -> anyhow::Result<AccountLinkRecord> {
-        self.store.upsert_pending_opt_in(&nostr_pubkey, &handle)
+        self.store
+            .upsert_pending_opt_in(&nostr_pubkey, &handle, crosspost_enabled)
     }
 
     pub(crate) fn enqueue_provisioning(&self, nostr_pubkey: &str, handle: &str) {
@@ -159,7 +161,9 @@ impl AppState {
             .flatten()
             .is_none()
         {
-            let _ = self.store.upsert_pending_opt_in(&nostr_pubkey, &handle);
+            let _ = self
+                .store
+                .upsert_pending_opt_in(&nostr_pubkey, &handle, true);
         }
         self.store
             .mark_ready(&nostr_pubkey, &did)
@@ -202,6 +206,28 @@ impl AppState {
             .sync_state_for_handle(handle, None, "disabled")
             .await
     }
+
+    pub(crate) fn enable_by_pubkey_result(
+        &self,
+        nostr_pubkey: &str,
+    ) -> anyhow::Result<Option<AccountLinkRecord>> {
+        self.store.enable(nostr_pubkey)
+    }
+
+    pub(crate) async fn sync_enabled_state(
+        &self,
+        record: &AccountLinkRecord,
+    ) -> anyhow::Result<()> {
+        if let (Some(did), ProvisioningState::Ready) = (&record.did, &record.provisioning_state) {
+            self.keycast_client
+                .sync_ready(&record.nostr_pubkey, did)
+                .await?;
+            self.name_server_client
+                .sync_state_for_handle(&record.handle, Some(did.as_str()), "ready")
+                .await?;
+        }
+        Ok(())
+    }
 }
 
 pub fn app() -> Router {
@@ -228,6 +254,10 @@ fn app_with_state(state: AppState) -> Router {
         .route(
             "/api/account-links/:nostr_pubkey/disable",
             post(routes::disable::handler),
+        )
+        .route(
+            "/api/account-links/:nostr_pubkey/enable",
+            post(routes::enable::handler),
         )
         .route(
             "/api/account-links/:nostr_pubkey/export",

@@ -4,8 +4,9 @@ use anyhow::{Context, Result};
 use diesel::Connection;
 use diesel::PgConnection;
 use divine_bridge_db::{
-    disable_account_link, get_account_link_lifecycle, get_account_link_lifecycle_by_handle,
-    mark_account_link_failed, mark_account_link_ready, upsert_pending_account_link,
+    disable_account_link, enable_account_link, get_account_link_lifecycle,
+    get_account_link_lifecycle_by_handle, mark_account_link_failed, mark_account_link_ready,
+    upsert_pending_account_link,
 };
 
 use crate::AccountLinkRecord;
@@ -30,6 +31,7 @@ impl DbStore {
         &self,
         nostr_pubkey: &str,
         handle: &str,
+        crosspost_enabled: bool,
     ) -> Result<AccountLinkRecord> {
         let signing_key_id = format!("pending-signing:{nostr_pubkey}");
         let plc_rotation_key_ref = format!("pending-rotation:{nostr_pubkey}");
@@ -40,7 +42,7 @@ impl DbStore {
             handle,
             &signing_key_id,
             &plc_rotation_key_ref,
-            true,
+            crosspost_enabled,
         )?;
         Ok(AccountLinkRecord::from(row))
     }
@@ -80,6 +82,15 @@ impl DbStore {
         }
         let mut connection = self.connection.lock().unwrap();
         let row = disable_account_link(&mut connection, nostr_pubkey)?;
+        Ok(Some(AccountLinkRecord::from(row)))
+    }
+
+    pub fn enable(&self, nostr_pubkey: &str) -> Result<Option<AccountLinkRecord>> {
+        if self.get_by_pubkey(nostr_pubkey)?.is_none() {
+            return Ok(None);
+        }
+        let mut connection = self.connection.lock().unwrap();
+        let row = enable_account_link(&mut connection, nostr_pubkey)?;
         Ok(Some(AccountLinkRecord::from(row)))
     }
 }

@@ -34,10 +34,6 @@ impl PlcDirectoryClient {
         }
     }
 
-    fn endpoint(&self) -> String {
-        format!("{}/", self.base_url.trim_end_matches('/'))
-    }
-
     fn did_endpoint(&self, did: &str) -> String {
         format!("{}/{}", self.base_url.trim_end_matches('/'), did)
     }
@@ -63,7 +59,7 @@ impl PlcClient for PlcDirectoryClient {
         for attempt in 0..self.max_attempts {
             let response = match self
                 .client
-                .post(self.endpoint())
+                .post(self.did_endpoint(&derived_did))
                 .json(operation)
                 .send()
                 .await
@@ -208,7 +204,7 @@ mod tests {
     async fn create_did_returns_did_from_response() {
         let mut server = mockito::Server::new_async().await;
         let mock = server
-            .mock("POST", "/")
+            .mock("POST", mockito::Matcher::Regex("^/did:plc:".to_string()))
             .with_status(201)
             .with_header("content-type", "application/json")
             .with_body(serde_json::json!({"did":"did:plc:from-directory"}).to_string())
@@ -222,17 +218,41 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn create_did_posts_to_the_derived_did_path() {
+        // The PLC HTTP API submits the genesis operation to `POST /:did`, where
+        // the DID is derived client-side from the operation. Posting to the bare
+        // root `/` returns 404 on plc.directory, which is why provisioning never
+        // succeeded. This test pins the correct path.
+        let op = operation();
+        let derived = derive_did_plc(&op);
+
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("POST", format!("/{derived}").as_str())
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(serde_json::json!({}).to_string())
+            .create_async()
+            .await;
+
+        let client = PlcDirectoryClient::new(server.url());
+        let did = client.create_did(&op).await.unwrap();
+        mock.assert_async().await; // fails if create_did POSTed to `/` instead of `/:did`
+        assert_eq!(did, derived);
+    }
+
+    #[tokio::test]
     async fn create_did_retries_server_errors() {
         let mut server = mockito::Server::new_async().await;
         let _first = server
-            .mock("POST", "/")
+            .mock("POST", mockito::Matcher::Regex("^/did:plc:".to_string()))
             .with_status(503)
             .with_body("temporary")
             .expect(1)
             .create_async()
             .await;
         let second = server
-            .mock("POST", "/")
+            .mock("POST", mockito::Matcher::Regex("^/did:plc:".to_string()))
             .with_status(201)
             .with_header("content-type", "application/json")
             .with_body(serde_json::json!({"did":"did:plc:retry-ok"}).to_string())
@@ -250,7 +270,7 @@ mod tests {
     async fn create_did_conflict_returns_derived_did() {
         let mut server = mockito::Server::new_async().await;
         let mock = server
-            .mock("POST", "/")
+            .mock("POST", mockito::Matcher::Regex("^/did:plc:".to_string()))
             .with_status(409)
             .with_body("already exists")
             .create_async()
@@ -284,7 +304,10 @@ mod tests {
             .await;
 
         let client = PlcDirectoryClient::with_max_attempts(server.url(), 2);
-        client.update_did("did:plc:alice123", &operation()).await.unwrap();
+        client
+            .update_did("did:plc:alice123", &operation())
+            .await
+            .unwrap();
         second.assert_async().await;
     }
 

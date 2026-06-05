@@ -4,7 +4,7 @@
 
 Verify that a `ready` DiVine account can be used by an external Bluesky-compatible client through the delegated ATProto Authorization Server on `entryway.divine.video`.
 
-This smoke test covers the live ATProto launch contract:
+This smoke test covers the live Phase 1 launch contract:
 
 - PDS protected-resource discovery
 - Authorization Server metadata discovery
@@ -60,15 +60,18 @@ curl -sS https://entryway.divine.video/.well-known/oauth-authorization-server | 
 Expect at least:
 
 - `issuer = "https://entryway.divine.video"`
-- `authorization_endpoint = "https://entryway.divine.video/api/oauth/authorize"`
-- `token_endpoint = "https://entryway.divine.video/api/oauth/token"`
-- `pushed_authorization_request_endpoint = "https://entryway.divine.video/api/oauth/par"`
-- `token_endpoint_auth_methods_supported` includes `none`
+- `authorization_endpoint = "https://entryway.divine.video/api/atproto/oauth/authorize"`
+- `token_endpoint = "https://entryway.divine.video/api/atproto/oauth/token"`
+- `pushed_authorization_request_endpoint = "https://entryway.divine.video/api/atproto/oauth/par"`
+- `scopes_supported` includes `atproto`
+- `token_endpoint_auth_methods_supported` includes both `none` and `private_key_jwt`
+- `client_id_metadata_document_supported = true`
 - `require_pushed_authorization_requests = true`
 
-This smoke test uses the public-client path only.
+This smoke test uses the public-client path by default.
 
 - Public client: send `client_id` directly and do not include `client_assertion`.
+- Confidential client: host a client metadata document at the `client_id` URL, set `token_endpoint_auth_method = private_key_jwt`, publish `jwks` or `jwks_uri`, and include `client_assertion_type=urn:ietf:params:oauth:client-assertion-type:jwt-bearer` plus a signed `client_assertion` at PAR, token exchange, and refresh. The assertion uses `iss = sub = client_id` and `aud = https://entryway.divine.video`.
 
 ## 3. Create A PAR Request
 
@@ -99,7 +102,7 @@ header = { typ: "dpop+jwt", alg: "ES256", jwk: JSON.parse(ENV.fetch("P256_DPOP_J
 payload = {
   jti: "par-#{SecureRandom.uuid}",
   htm: "POST",
-  htu: "https://entryway.divine.video/api/oauth/par",
+  htu: "https://entryway.divine.video/api/atproto/oauth/par",
   iat: Integer(ENV.fetch("PAR_IAT"))
 }
 segments = [
@@ -117,7 +120,7 @@ puts "#{segments.join(".")}.#{Base64.urlsafe_encode64(sig, padding: false)}"
 
 curl -sS \
   -D /tmp/atproto-par-headers.txt \
-  -X POST https://entryway.divine.video/api/oauth/par \
+  -X POST https://entryway.divine.video/api/atproto/oauth/par \
   -H 'Content-Type: application/x-www-form-urlencoded' \
   -H "DPoP: $PAR_DPOP" \
   --data-urlencode 'client_id=https://example-client.invalid' \
@@ -147,7 +150,7 @@ PAR_NONCE="$(awk 'BEGIN{IGNORECASE=1}/^DPoP-Nonce:/{print $2}' /tmp/atproto-par-
 Open:
 
 ```text
-https://entryway.divine.video/api/oauth/authorize?request_uri=<urlencoded request_uri>
+https://entryway.divine.video/api/atproto/oauth/authorize?request_uri=<urlencoded request_uri>
 ```
 
 Expect:
@@ -172,7 +175,7 @@ header = { typ: "dpop+jwt", alg: "ES256", jwk: JSON.parse(ENV.fetch("P256_DPOP_J
 payload = {
   jti: "token-#{SecureRandom.uuid}",
   htm: "POST",
-  htu: "https://entryway.divine.video/api/oauth/token",
+  htu: "https://entryway.divine.video/api/atproto/oauth/token",
   iat: Integer(`date +%s`),
   nonce: ENV.fetch("PAR_NONCE")
 }
@@ -191,7 +194,7 @@ puts "#{segments.join(".")}.#{Base64.urlsafe_encode64(sig, padding: false)}"
 
 curl -sS \
   -D /tmp/atproto-token-headers.txt \
-  -X POST https://entryway.divine.video/api/oauth/token \
+  -X POST https://entryway.divine.video/api/atproto/oauth/token \
   -H 'Content-Type: application/x-www-form-urlencoded' \
   -H "DPoP: $TOKEN_DPOP" \
   --data-urlencode 'grant_type=authorization_code' \
@@ -229,7 +232,7 @@ header = { typ: "dpop+jwt", alg: "ES256", jwk: JSON.parse(ENV.fetch("P256_DPOP_J
 payload = {
   jti: "refresh-#{SecureRandom.uuid}",
   htm: "POST",
-  htu: "https://entryway.divine.video/api/oauth/token",
+  htu: "https://entryway.divine.video/api/atproto/oauth/token",
   iat: Integer(`date +%s`),
   nonce: ENV.fetch("TOKEN_NONCE")
 }
@@ -248,7 +251,7 @@ puts "#{segments.join(".")}.#{Base64.urlsafe_encode64(sig, padding: false)}"
 
 curl -sS \
   -D /tmp/atproto-refresh-headers.txt \
-  -X POST https://entryway.divine.video/api/oauth/token \
+  -X POST https://entryway.divine.video/api/atproto/oauth/token \
   -H 'Content-Type: application/x-www-form-urlencoded' \
   -H "DPoP: $REFRESH_DPOP" \
   --data-urlencode 'grant_type=refresh_token' \

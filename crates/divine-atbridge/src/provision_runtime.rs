@@ -1,17 +1,17 @@
-use anyhow::{bail, Context, Result};
 use aes_gcm::aead::Aead;
 use aes_gcm::{Aes256Gcm, KeyInit, Nonce};
+use anyhow::{bail, Context, Result};
 use async_trait::async_trait;
 use diesel::Connection;
 use diesel::PgConnection;
-use divine_bridge_db::{
-    get_account_link_lifecycle, get_account_link_lifecycle_by_handle, mark_account_link_failed,
-    mark_account_link_ready, upsert_pending_account_link, get_provisioning_key,
-    insert_provisioning_key,
-};
 use divine_bridge_db::models::NewProvisioningKey;
-use secp256k1::rand::RngCore;
+use divine_bridge_db::{
+    get_account_link_lifecycle, get_account_link_lifecycle_by_handle, get_provisioning_key,
+    insert_provisioning_key, mark_account_link_failed, mark_account_link_ready,
+    upsert_pending_account_link,
+};
 use secp256k1::rand::rngs::OsRng;
+use secp256k1::rand::RngCore;
 use secp256k1::{PublicKey, Secp256k1, SecretKey};
 
 use crate::provisioner::{

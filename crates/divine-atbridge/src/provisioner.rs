@@ -159,12 +159,22 @@ fn unsigned_operation_bytes(operation: &PlcOperation) -> Vec<u8> {
 pub fn derive_did_plc(operation: &PlcOperation) -> String {
     use sha2::{Digest, Sha256};
 
-    let cbor_bytes = unsigned_operation_bytes(operation);
+    // The did:plc identifier is base32(sha256(SIGNED genesis op))[..24]. The
+    // signature is part of the hashed bytes (matches the rsky reference and the
+    // PLC directory's own computation), so the operation must carry its `sig`
+    // before deriving — hashing the unsigned bytes yields a DID the directory
+    // rejects at `POST /:did`.
+    let cbor_bytes = signed_operation_bytes(operation);
     let hash = Sha256::digest(&cbor_bytes);
     let encoded = data_encoding::BASE32_NOPAD
         .encode(&hash[..15])
         .to_ascii_lowercase();
     format!("did:plc:{encoded}")
+}
+
+fn signed_operation_bytes(operation: &PlcOperation) -> Vec<u8> {
+    let value = serde_json::to_value(operation).expect("PlcOperation serialises to JSON");
+    serde_ipld_dagcbor::to_vec(&value).expect("valid PLC operations encode to DAG-CBOR")
 }
 
 pub fn sign_plc_operation(operation: &PlcOperation, secret_key: &SecretKey) -> Result<String> {
@@ -743,5 +753,55 @@ mod tests {
         let did_key = pubkey_to_did_key(&public);
         assert!(did_key.starts_with("did:key:z"));
         assert_eq!(did_key, pubkey_to_did_key(&public));
+    }
+
+    fn sample_operation(sig: &str) -> PlcOperation {
+        let mut verification_methods = std::collections::BTreeMap::new();
+        verification_methods.insert("atproto".to_string(), "did:key:zsigning".to_string());
+        let mut services = std::collections::BTreeMap::new();
+        services.insert(
+            "atproto_pds".to_string(),
+            PlcService {
+                service_type: "AtprotoPersonalDataServer".to_string(),
+                endpoint: "https://pds.divine.video".to_string(),
+            },
+        );
+        PlcOperation {
+            op_type: "plc_operation".to_string(),
+            rotation_keys: vec!["did:key:zrotation".to_string()],
+            verification_methods,
+            also_known_as: vec!["at://alice.divine.video".to_string()],
+            services,
+            prev: None,
+            sig: sig.to_string(),
+        }
+    }
+
+    #[test]
+    fn derive_did_plc_hashes_the_signed_operation() {
+        use sha2::{Digest, Sha256};
+
+        // Per the did:plc spec and the rsky reference implementation, the DID is
+        // base32(sha256(SIGNED genesis op))[..24]. Hashing the unsigned op derives
+        // a DID that does not match what the PLC directory computes, so the
+        // `POST /:did` create is rejected. This pins the signed-op derivation.
+        let op = sample_operation("realsignaturevalue");
+
+        // The derived DID must equal base32(sha256(dagcbor(signed op)))[..24].
+        let signed_value = serde_json::to_value(&op).unwrap();
+        let signed_bytes = serde_ipld_dagcbor::to_vec(&signed_value).unwrap();
+        let hash = Sha256::digest(&signed_bytes);
+        let expected = format!(
+            "did:plc:{}",
+            data_encoding::BASE32_NOPAD
+                .encode(&hash[..15])
+                .to_ascii_lowercase()
+        );
+        assert_eq!(derive_did_plc(&op), expected);
+
+        // And the signature must affect the DID (two ops differing only in sig
+        // must derive different DIDs — proves the signed op is hashed).
+        let op_other_sig = sample_operation("differentsignature");
+        assert_ne!(derive_did_plc(&op), derive_did_plc(&op_other_sig));
     }
 }

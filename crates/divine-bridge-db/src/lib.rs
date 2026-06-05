@@ -3,8 +3,10 @@
 //! Provides Diesel models matching the 6 bridge tables and named queries
 //! for idempotency checks and lookups.
 
+pub mod migrations;
 pub mod models;
 pub mod queries;
 pub mod schema;
 
+pub use migrations::run_pending_migrations;
 pub use queries::*;

@@ -235,6 +235,32 @@ pub fn disable_account_link(
     Ok(result)
 }
 
+/// Re-enable a previously disabled account-link record.
+///
+/// Restores `provisioning_state` to `ready` if the account has a DID
+/// (was previously provisioned), or `pending` if not.
+pub fn enable_account_link(
+    conn: &mut PgConnection,
+    nostr_pubkey: &str,
+) -> Result<AccountLinkLifecycleRow> {
+    let query = format!(
+        "UPDATE account_links
+         SET crosspost_enabled = TRUE,
+             provisioning_state = CASE
+                 WHEN did IS NOT NULL THEN 'ready'
+                 ELSE 'pending'
+             END,
+             disabled_at = NULL,
+             updated_at = NOW()
+         WHERE nostr_pubkey = $1
+         RETURNING {ACCOUNT_LINK_LIFECYCLE_COLUMNS}"
+    );
+    let result = sql_query(query)
+        .bind::<Text, _>(nostr_pubkey)
+        .get_result::<AccountLinkLifecycleRow>(conn)?;
+    Ok(result)
+}
+
 /// Load eligible accounts that still need backlog seeding.
 pub fn list_accounts_requiring_backfill(
     conn: &mut PgConnection,
@@ -703,12 +729,8 @@ pub fn cancel_publish_job(
 
     let existing = get_publish_job(conn, nostr_event_id)?
         .ok_or_else(|| anyhow!("publish job missing after cancel for {nostr_event_id}"))?;
-    if existing.state == PublishState::Published.as_str()
-        || existing.state == PublishState::Skipped.as_str()
-    {
-        if existing.state == PublishState::Skipped.as_str() && existing.completed_at.is_some() {
-            return Ok(existing);
-        }
+    if existing.state == PublishState::Skipped.as_str() && existing.completed_at.is_some() {
+        return Ok(existing);
     }
 
     mark_publish_job_skipped(conn, nostr_event_id, error_msg)

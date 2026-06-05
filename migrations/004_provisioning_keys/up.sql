@@ -1,4 +1,4 @@
-CREATE TABLE provisioning_keys (
+CREATE TABLE IF NOT EXISTS provisioning_keys (
     key_ref             TEXT PRIMARY KEY,
     key_purpose         TEXT NOT NULL,
     public_key_hex      TEXT NOT NULL,

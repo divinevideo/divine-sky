@@ -1,3 +1,8 @@
+// This test holds a process-wide serialization Mutex across `.await` on
+// purpose: it keeps DB-touching tests from racing on the shared database. The
+// guard is a plain marker lock (no data), so holding it across await is safe.
+#![allow(clippy::await_holding_lock)]
+
 use std::collections::VecDeque;
 use std::sync::Mutex;
 use std::time::Duration;

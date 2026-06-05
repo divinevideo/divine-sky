@@ -29,8 +29,8 @@ use crate::pipeline::{
     PublishJobEnvelope, QueueDecision, RecordMapping, RecordStore,
 };
 use crate::publisher::PdsClient;
-use crate::video_service::VideoServiceUploader;
 use crate::runtime_filter;
+use crate::video_service::VideoServiceUploader;
 
 pub type SharedConnection = Arc<Mutex<PgConnection>>;
 
