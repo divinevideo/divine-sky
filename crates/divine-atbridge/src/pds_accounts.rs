@@ -1,11 +1,17 @@
-//! PDS account provisioning client.
+//! PDS account provisioning client (rsky-native).
+//!
+//! The bridge does NOT mint DIDs. It asks rsky to create the account WITHOUT a
+//! DID, so rsky authors the did:plc with its own rotation + signing keys
+//! (listing the configured offline recovery key first) and the account is born
+//! active. rsky returns `{did, accessJwt, refreshJwt}`, which we surface as a
+//! [`CreatedAccount`].
 
 use anyhow::{Context, Result};
 use data_encoding::BASE64;
 use reqwest::StatusCode;
 use std::time::Duration;
 
-use crate::provisioner::{PdsAccountCreator, PdsSession};
+use crate::provisioner::{CreatedAccount, PdsAccountCreator, PdsSession};
 
 const DEFAULT_MAX_ATTEMPTS: usize = 3;
 
@@ -14,18 +20,25 @@ pub struct PdsAccountsClient {
     base_url: String,
     /// Pre-computed HTTP Basic auth header value: `Basic base64(admin:<password>)`
     basic_auth_header: String,
+    /// Email domain used to synthesize a unique per-account address.
+    email_domain: String,
     client: reqwest::Client,
     max_attempts: usize,
 }
 
 impl PdsAccountsClient {
-    pub fn new(base_url: impl Into<String>, admin_password: impl Into<String>) -> Self {
-        Self::with_max_attempts(base_url, admin_password, DEFAULT_MAX_ATTEMPTS)
+    pub fn new(
+        base_url: impl Into<String>,
+        admin_password: impl Into<String>,
+        email_domain: impl Into<String>,
+    ) -> Self {
+        Self::with_max_attempts(base_url, admin_password, email_domain, DEFAULT_MAX_ATTEMPTS)
     }
 
     pub fn with_max_attempts(
         base_url: impl Into<String>,
         admin_password: impl Into<String>,
+        email_domain: impl Into<String>,
         max_attempts: usize,
     ) -> Self {
         let client = reqwest::Client::builder()
@@ -41,6 +54,7 @@ impl PdsAccountsClient {
         Self {
             base_url: base_url.into(),
             basic_auth_header,
+            email_domain: email_domain.into(),
             client,
             max_attempts: max_attempts.max(1),
         }
@@ -53,6 +67,13 @@ impl PdsAccountsClient {
         )
     }
 
+    fn create_invite_code_endpoint(&self) -> String {
+        format!(
+            "{}/xrpc/com.atproto.server.createInviteCode",
+            self.base_url.trim_end_matches('/')
+        )
+    }
+
     fn describe_repo_endpoint(&self) -> String {
         format!(
             "{}/xrpc/com.atproto.repo.describeRepo",
@@ -60,38 +81,49 @@ impl PdsAccountsClient {
         )
     }
 
-    fn activate_account_endpoint(&self) -> String {
-        format!(
-            "{}/xrpc/com.atproto.server.activateAccount",
-            self.base_url.trim_end_matches('/')
-        )
+    /// Synthesize a unique, deliverable-shaped address for the account. rsky
+    /// validates email format (and uniqueness), so derive it from the handle.
+    fn account_email(&self, handle: &str) -> String {
+        format!("noreply+{handle}@{}", self.email_domain)
     }
 
-    /// Activate a freshly-created (deactivated) account, authenticated as that
-    /// account via the `accessJwt` returned by createAccount.
-    async fn activate_account(&self, access_jwt: &str) -> Result<()> {
+    /// Mint a single-use invite code (admin auth). rsky requires an invite code
+    /// when PDS_INVITE_REQUIRED=true, which it is in every Divine environment.
+    async fn create_invite_code(&self) -> Result<String> {
         let response = self
             .client
-            .post(self.activate_account_endpoint())
-            .header("Authorization", format!("Bearer {access_jwt}"))
+            .post(self.create_invite_code_endpoint())
+            .header("Authorization", &self.basic_auth_header)
+            .json(&serde_json::json!({ "useCount": 1 }))
             .send()
             .await
-            .context("sending PDS activateAccount request")?;
+            .context("sending PDS createInviteCode request")?;
 
         let status = response.status();
         if !status.is_success() {
             let body = response.text().await.unwrap_or_default();
             let message = parse_error_message(&body);
-            anyhow::bail!("activateAccount failed ({}): {}", status.as_u16(), message);
+            anyhow::bail!("createInviteCode failed ({}): {}", status.as_u16(), message);
         }
-        Ok(())
+
+        let payload: InviteCodeResponse = response
+            .json()
+            .await
+            .context("parsing createInviteCode response")?;
+        anyhow::ensure!(
+            !payload.code.is_empty(),
+            "createInviteCode returned an empty code"
+        );
+        Ok(payload.code)
     }
 
-    async fn confirm_existing_repo(&self, did: &str, handle: &str) -> Result<()> {
+    /// Resolve an already-existing account's DID from its handle, used to recover
+    /// idempotently when createAccount reports the handle is already taken.
+    async fn resolve_existing_did(&self, handle: &str) -> Result<String> {
         let response = self
             .client
             .get(self.describe_repo_endpoint())
-            .query(&[("repo", did)])
+            .query(&[("repo", handle)])
             .header("Authorization", &self.basic_auth_header)
             .send()
             .await
@@ -108,16 +140,13 @@ impl PdsAccountsClient {
             .json()
             .await
             .context("parsing describeRepo response")?;
-        anyhow::ensure!(repo.did == did, "existing repo DID mismatch");
-
         if let Some(existing_handle) = repo.handle {
             anyhow::ensure!(
                 existing_handle.eq_ignore_ascii_case(handle),
                 "existing repo handle mismatch"
             );
         }
-
-        Ok(())
+        Ok(repo.did)
     }
 }
 
@@ -128,7 +157,13 @@ struct DescribeRepoResponse {
 }
 
 #[derive(Debug, serde::Deserialize)]
+struct InviteCodeResponse {
+    code: String,
+}
+
+#[derive(Debug, serde::Deserialize)]
 struct CreateAccountResponse {
+    did: String,
     #[serde(rename = "accessJwt")]
     access_jwt: Option<String>,
     #[serde(rename = "refreshJwt")]
@@ -143,11 +178,27 @@ struct XrpcErrorBody {
 
 #[async_trait::async_trait]
 impl PdsAccountCreator for PdsAccountsClient {
-    async fn create_account(&self, did: &str, handle: &str) -> Result<Option<PdsSession>> {
-        let body = serde_json::json!({
-            "did": did,
+    async fn create_account(
+        &self,
+        handle: &str,
+        recovery_keys: &[String],
+    ) -> Result<CreatedAccount> {
+        // rsky requires an invite code; mint one per account (single use).
+        let invite_code = self.create_invite_code().await?;
+        let password = generate_password();
+        let email = self.account_email(handle);
+
+        let mut body = serde_json::json!({
             "handle": handle,
+            "email": email,
+            "password": password,
+            "inviteCode": invite_code,
         });
+        // rsky lists `recoveryKey` first in the new DID's rotation_keys (it accepts
+        // a single key); pass the highest-priority configured recovery key.
+        if let Some(recovery_key) = recovery_keys.first() {
+            body["recoveryKey"] = serde_json::Value::String(recovery_key.clone());
+        }
 
         let mut last_error: Option<anyhow::Error> = None;
         for attempt in 0..self.max_attempts {
@@ -171,39 +222,34 @@ impl PdsAccountCreator for PdsAccountsClient {
 
             let status = response.status();
             if status.is_success() {
-                // rsky-pds creates a did-import account DEACTIVATED and returns an
-                // accessJwt for it. Activate it (authed as the account) so its repo
-                // serves records; without this, crossposts never appear.
+                // rsky-native (no supplied DID) mints the did:plc and returns the
+                // account ACTIVE with a session. No activateAccount step needed.
                 let payload: CreateAccountResponse = response
                     .json()
                     .await
                     .context("parsing PDS createAccount response")?;
                 let session = match (payload.access_jwt, payload.refresh_jwt) {
-                    (Some(access_jwt), Some(refresh_jwt)) => {
-                        self.activate_account(&access_jwt).await?;
-                        Some(PdsSession {
-                            access_jwt,
-                            refresh_jwt,
-                        })
-                    }
-                    (Some(access_jwt), None) => {
-                        self.activate_account(&access_jwt).await?;
-                        None
-                    }
+                    (Some(access_jwt), Some(refresh_jwt)) => Some(PdsSession {
+                        access_jwt,
+                        refresh_jwt,
+                    }),
                     _ => None,
                 };
-                return Ok(session);
+                return Ok(CreatedAccount {
+                    did: payload.did,
+                    session,
+                });
             }
 
-            let body = response.text().await.unwrap_or_default();
-            if is_existing_account_conflict(status, &body) {
-                self.confirm_existing_repo(did, handle).await?;
-                // Existing repo: no fresh session issued here. A session for an
-                // already-provisioned account is obtained separately (refresh/login).
-                return Ok(None);
+            let response_body = response.text().await.unwrap_or_default();
+            if is_existing_account_conflict(status, &response_body) {
+                // Handle already provisioned: recover its DID idempotently. No
+                // fresh session is issued here (obtained later via login/refresh).
+                let did = self.resolve_existing_did(handle).await?;
+                return Ok(CreatedAccount { did, session: None });
             }
 
-            let message = parse_error_message(&body);
+            let message = parse_error_message(&response_body);
             let err = anyhow::anyhow!("createAccount failed ({}): {message}", status.as_u16());
             if status.is_server_error() && attempt + 1 < self.max_attempts {
                 last_error = Some(err);
@@ -215,6 +261,17 @@ impl PdsAccountCreator for PdsAccountsClient {
 
         Err(last_error.unwrap_or_else(|| anyhow::anyhow!("createAccount failed")))
     }
+}
+
+/// Generate a 32-byte random account password (hex). Not persisted — rsky admin
+/// can reset it, and the bridge re-authenticates via the stored session/refresh.
+fn generate_password() -> String {
+    use secp256k1::rand::rngs::OsRng;
+    use secp256k1::rand::RngCore;
+
+    let mut bytes = [0u8; 32];
+    OsRng.fill_bytes(&mut bytes);
+    data_encoding::HEXLOWER.encode(&bytes)
 }
 
 fn is_existing_account_conflict(status: StatusCode, body: &str) -> bool {
@@ -259,107 +316,136 @@ fn retry_delay(attempt: usize) -> Duration {
 mod tests {
     use super::*;
 
-    #[tokio::test]
-    async fn create_account_posts_expected_payload() {
-        let mut server = mockito::Server::new_async().await;
-        let mock = server
-            .mock("POST", "/xrpc/com.atproto.server.createAccount")
-            .match_header("authorization", "Basic YWRtaW46YWRtaW4tdG9rZW4=")
-            .match_header("content-type", "application/json")
-            .match_body(mockito::Matcher::JsonString(
-                serde_json::json!({
-                    "did":"did:plc:abc123",
-                    "handle":"alice.divine.video"
-                })
-                .to_string(),
-            ))
+    /// Stand up a mockito invite endpoint returning a fixed code.
+    async fn mock_invite(server: &mut mockito::ServerGuard) -> mockito::Mock {
+        server
+            .mock("POST", "/xrpc/com.atproto.server.createInviteCode")
             .with_status(200)
-            .with_body("{}")
+            .with_header("content-type", "application/json")
+            .with_body(serde_json::json!({ "code": "divine-invite-1" }).to_string())
             .create_async()
-            .await;
-
-        let client = PdsAccountsClient::new(server.url(), "admin-token");
-        client
-            .create_account("did:plc:abc123", "alice.divine.video")
             .await
-            .unwrap();
-        mock.assert_async().await;
     }
 
     #[tokio::test]
-    async fn create_account_activates_with_returned_access_jwt() {
-        // rsky-pds creates a did-import account in a DEACTIVATED state and returns
-        // an accessJwt for it. A deactivated repo does not serve records, so the
-        // bridge must call activateAccount authenticated as that account (Bearer
-        // accessJwt) — otherwise crossposts never appear. (Confirmed live: 24/33
-        // staging repos were active:false because this step was missing.)
+    async fn create_account_posts_rsky_native_payload() {
+        // rsky-native: NO `did`; WITH handle, email, password, inviteCode, and the
+        // recovery key. rsky mints the DID and returns it.
         let mut server = mockito::Server::new_async().await;
+        let invite = mock_invite(&mut server).await;
         let create = server
             .mock("POST", "/xrpc/com.atproto.server.createAccount")
+            .match_header("authorization", "Basic YWRtaW46YWRtaW4tdG9rZW4=")
+            .match_header("content-type", "application/json")
+            .match_body(mockito::Matcher::AllOf(vec![
+                mockito::Matcher::PartialJsonString(
+                    serde_json::json!({
+                        "handle": "alice.divine.video",
+                        "email": "noreply+alice.divine.video@divine.video",
+                        "inviteCode": "divine-invite-1",
+                        "recoveryKey": "did:key:zRecovery"
+                    })
+                    .to_string(),
+                ),
+                // A password must be present and there must be NO `did` field.
+                mockito::Matcher::Regex("\"password\"".to_string()),
+            ]))
             .with_status(200)
             .with_header("content-type", "application/json")
             .with_body(
                 serde_json::json!({
-                    "did": "did:plc:abc123",
+                    "did": "did:plc:minted",
                     "handle": "alice.divine.video",
-                    "accessJwt": "access-jwt-for-account",
-                    "refreshJwt": "refresh-jwt-for-account"
+                    "accessJwt": "access-jwt",
+                    "refreshJwt": "refresh-jwt"
                 })
                 .to_string(),
             )
             .create_async()
             .await;
-        let activate = server
-            .mock("POST", "/xrpc/com.atproto.server.activateAccount")
-            .match_header("authorization", "Bearer access-jwt-for-account")
-            .with_status(200)
-            .with_body("{}")
-            .create_async()
-            .await;
 
-        let client = PdsAccountsClient::new(server.url(), "admin-token");
-        client
-            .create_account("did:plc:abc123", "alice.divine.video")
+        let client = PdsAccountsClient::new(server.url(), "admin-token", "divine.video");
+        let created = client
+            .create_account("alice.divine.video", &["did:key:zRecovery".to_string()])
             .await
-            .unwrap();
+            .expect("rsky-native createAccount should succeed");
 
+        assert_eq!(created.did, "did:plc:minted");
+        let session = created.session.expect("session should be returned");
+        assert_eq!(session.access_jwt, "access-jwt");
+        assert_eq!(session.refresh_jwt, "refresh-jwt");
+        invite.assert_async().await;
         create.assert_async().await;
-        activate.assert_async().await; // fails if the bridge never activates the account
     }
 
     #[tokio::test]
-    async fn create_account_conflict_recovers_by_describing_repo() {
+    async fn create_account_without_recovery_key_omits_recovery_field() {
+        // With no configured recovery key, the body carries handle/password/invite
+        // but NO `recoveryKey` (and never a `did` — rsky authors that).
         let mut server = mockito::Server::new_async().await;
+        let _invite = mock_invite(&mut server).await;
+        let create = server
+            .mock("POST", "/xrpc/com.atproto.server.createAccount")
+            .match_body(mockito::Matcher::AllOf(vec![
+                mockito::Matcher::PartialJsonString(
+                    serde_json::json!({ "handle": "alice.divine.video" }).to_string(),
+                ),
+                mockito::Matcher::Regex("\"password\"".to_string()),
+            ]))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                serde_json::json!({ "did": "did:plc:minted", "accessJwt": "a", "refreshJwt": "r" })
+                    .to_string(),
+            )
+            .create_async()
+            .await;
+
+        let client = PdsAccountsClient::new(server.url(), "admin-token", "divine.video");
+        let created = client
+            .create_account("alice.divine.video", &[])
+            .await
+            .expect("createAccount without recovery key should still work");
+        assert_eq!(created.did, "did:plc:minted");
+        create.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn create_account_conflict_recovers_did_from_handle() {
+        let mut server = mockito::Server::new_async().await;
+        let _invite = mock_invite(&mut server).await;
         let conflict = server
             .mock("POST", "/xrpc/com.atproto.server.createAccount")
-            .with_status(409)
-            .with_body("Account already exists")
+            .with_status(400)
+            .with_body("Handle already taken")
             .create_async()
             .await;
         let describe = server
             .mock("GET", "/xrpc/com.atproto.repo.describeRepo")
             .match_query(mockito::Matcher::UrlEncoded(
                 "repo".into(),
-                "did:plc:abc123".into(),
+                "alice.divine.video".into(),
             ))
             .with_status(200)
             .with_header("content-type", "application/json")
             .with_body(
                 serde_json::json!({
-                    "did":"did:plc:abc123",
-                    "handle":"alice.divine.video"
+                    "did": "did:plc:existing",
+                    "handle": "alice.divine.video"
                 })
                 .to_string(),
             )
             .create_async()
             .await;
 
-        let client = PdsAccountsClient::new(server.url(), "admin-token");
-        client
-            .create_account("did:plc:abc123", "alice.divine.video")
+        let client = PdsAccountsClient::new(server.url(), "admin-token", "divine.video");
+        let created = client
+            .create_account("alice.divine.video", &[])
             .await
-            .unwrap();
+            .expect("conflict should recover");
 
+        assert_eq!(created.did, "did:plc:existing");
+        assert!(created.session.is_none());
         conflict.assert_async().await;
         describe.assert_async().await;
     }
@@ -367,6 +453,7 @@ mod tests {
     #[tokio::test]
     async fn create_account_retries_server_error() {
         let mut server = mockito::Server::new_async().await;
+        let _invite = mock_invite(&mut server).await;
         let _first = server
             .mock("POST", "/xrpc/com.atproto.server.createAccount")
             .with_status(503)
@@ -377,16 +464,18 @@ mod tests {
         let second = server
             .mock("POST", "/xrpc/com.atproto.server.createAccount")
             .with_status(200)
-            .with_body("{}")
+            .with_body(serde_json::json!({ "did": "did:plc:minted" }).to_string())
             .expect(1)
             .create_async()
             .await;
 
-        let client = PdsAccountsClient::with_max_attempts(server.url(), "admin-token", 2);
-        client
-            .create_account("did:plc:abc123", "alice.divine.video")
+        let client =
+            PdsAccountsClient::with_max_attempts(server.url(), "admin-token", "divine.video", 2);
+        let created = client
+            .create_account("alice.divine.video", &[])
             .await
-            .unwrap();
+            .expect("retry should succeed");
+        assert_eq!(created.did, "did:plc:minted");
         second.assert_async().await;
     }
 }

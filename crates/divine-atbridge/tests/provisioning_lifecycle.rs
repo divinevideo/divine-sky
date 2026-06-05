@@ -5,8 +5,9 @@ use anyhow::{bail, Result};
 use async_trait::async_trait;
 use chrono::Utc;
 use divine_atbridge::provisioner::{
-    AccountLinkRecord, AccountLinkStore, AccountProvisioner, KeyPair, KeyStore, PdsAccountCreator,
-    PdsSession, PendingAccountLink, PlcClient, PlcOperation, ProvisioningState,
+    AccountLinkRecord, AccountLinkStore, AccountProvisioner, CreatedAccount, KeyPair, KeyStore,
+    PdsAccountCreator, PdsSession, PendingAccountLink, PlcClient, PlcOperation, ProvisioningState,
+    RSKY_MANAGED_KEY_REF,
 };
 use secp256k1::{PublicKey, Secp256k1, SecretKey};
 
@@ -152,23 +153,31 @@ impl PlcClient for MockPlcClient {
 
 struct MockPdsCreator {
     fail: bool,
-    calls: Arc<Mutex<Vec<(String, String)>>>,
+    calls: Arc<Mutex<Vec<(String, Vec<String>)>>>,
 }
 
 #[async_trait]
 impl PdsAccountCreator for MockPdsCreator {
-    async fn create_account(&self, did: &str, handle: &str) -> Result<Option<PdsSession>> {
+    async fn create_account(
+        &self,
+        handle: &str,
+        recovery_keys: &[String],
+    ) -> Result<CreatedAccount> {
         self.calls
             .lock()
             .unwrap()
-            .push((did.to_string(), handle.to_string()));
+            .push((handle.to_string(), recovery_keys.to_vec()));
         if self.fail {
             bail!("PDS account creation failed");
         }
-        Ok(Some(PdsSession {
-            access_jwt: format!("access-{did}"),
-            refresh_jwt: format!("refresh-{did}"),
-        }))
+        let did = "did:plc:testaccount".to_string();
+        Ok(CreatedAccount {
+            session: Some(PdsSession {
+                access_jwt: format!("access-{did}"),
+                refresh_jwt: format!("refresh-{did}"),
+            }),
+            did,
+        })
     }
 }
 
@@ -176,7 +185,7 @@ struct LifecycleHarness {
     provisioner: AccountProvisioner<MockKeyStore, MockPlcClient, MockPdsCreator, LifecycleStore>,
     generated: Arc<Mutex<Vec<String>>>,
     plc_calls: Arc<Mutex<Vec<PlcOperation>>>,
-    pds_calls: Arc<Mutex<Vec<(String, String)>>>,
+    pds_calls: Arc<Mutex<Vec<(String, Vec<String>)>>>,
 }
 
 fn make_provisioner(links: SharedLinks, pds_fail: bool) -> LifecycleHarness {
@@ -198,6 +207,7 @@ fn make_provisioner(links: SharedLinks, pds_fail: bool) -> LifecycleHarness {
         link_store: LifecycleStore { links },
         pds_endpoint: "https://pds.divine.video".to_string(),
         handle_domain: "divine.video".to_string(),
+        recovery_rotation_did_keys: vec!["did:key:zRecoveryTest".to_string()],
     };
 
     LifecycleHarness {
@@ -273,9 +283,11 @@ async fn provisioning_lifecycle_transitions_pending_to_ready_with_distinct_keys(
     let stored = links.get("npub_abc123");
     assert_eq!(stored.provisioning_state, ProvisioningState::Ready);
     assert_eq!(stored.did.as_deref(), Some("did:plc:testaccount"));
-    assert_ne!(stored.signing_key_id, stored.plc_rotation_key_ref);
-    assert_eq!(harness.generated.lock().unwrap().len(), 2);
-    assert_eq!(harness.plc_calls.lock().unwrap().len(), 1);
+    // rsky-native: no bridge key generation, no PLC call; sentinel key refs.
+    assert_eq!(stored.signing_key_id, RSKY_MANAGED_KEY_REF);
+    assert_eq!(stored.plc_rotation_key_ref, RSKY_MANAGED_KEY_REF);
+    assert!(harness.generated.lock().unwrap().is_empty());
+    assert!(harness.plc_calls.lock().unwrap().is_empty());
     assert_eq!(harness.pds_calls.lock().unwrap().len(), 1);
     assert_eq!(result.signing_key_id, stored.signing_key_id);
 }
@@ -298,7 +310,8 @@ async fn provisioning_lifecycle_retry_reuses_existing_failed_link() {
     assert_eq!(stored.did.as_deref(), Some("did:plc:retryme"));
     assert!(harness.generated.lock().unwrap().is_empty());
     assert!(harness.plc_calls.lock().unwrap().is_empty());
-    assert_eq!(harness.pds_calls.lock().unwrap().len(), 1);
+    // Existing DID is reused — no duplicate account is created.
+    assert!(harness.pds_calls.lock().unwrap().is_empty());
     assert_eq!(result.did, "did:plc:retryme");
 }
 
@@ -341,10 +354,11 @@ async fn provisioning_lifecycle_pending_without_did_creates_fresh_identity() {
     assert_eq!(stored.provisioning_state, ProvisioningState::Ready);
     assert_eq!(stored.did.as_deref(), Some("did:plc:testaccount"));
     assert!(stored.crosspost_enabled, "opt-in flag should be preserved");
-    assert_ne!(stored.signing_key_id, "pending-signing:legacy");
-    assert_ne!(stored.plc_rotation_key_ref, "pending-rotation:legacy");
-    assert_eq!(harness.generated.lock().unwrap().len(), 2);
-    assert_eq!(harness.plc_calls.lock().unwrap().len(), 1);
+    // Legacy per-account key refs are replaced by the rsky-managed sentinel.
+    assert_eq!(stored.signing_key_id, RSKY_MANAGED_KEY_REF);
+    assert_eq!(stored.plc_rotation_key_ref, RSKY_MANAGED_KEY_REF);
+    assert!(harness.generated.lock().unwrap().is_empty());
+    assert!(harness.plc_calls.lock().unwrap().is_empty());
     assert_eq!(harness.pds_calls.lock().unwrap().len(), 1);
     assert_eq!(result.did, "did:plc:testaccount");
 }
