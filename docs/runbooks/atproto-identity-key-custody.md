@@ -58,5 +58,25 @@ So Divine is NOT silently paying for tens of thousands of per-user secrets; the 
 (List-price math; Divine may have committed-use discounts. The O(1)-vs-O(users) and the
 quota wall hold regardless.)
 
+## Recovery key status (2026-06-05)
+- **Staging recovery key CREATED.** secp256k1 keypair, project's exact did:key encoding
+  (`0xe701` multicodec + compressed pubkey, base58btc). Private →
+  `divine-atproto-plc-recovery-key-private-staging`; public did:key →
+  `divine-atproto-plc-recovery-key-did-staging` =
+  `did:key:zQ3shq8UUvhTbj8bzTyCnGkT6C7pFDVKAB23bd2JcsENaSgjk`. Throwaway generator, deleted;
+  private key never written to disk.
+- **⚠️ KNOWN GAP (staging, accepted):** the private recovery key inherits project IAM →
+  `external-secrets` + `argocd` SAs can read it, the SAME accounts that read the operational
+  rotation key. So it's not yet more isolated than the key it recovers → minimal real recovery
+  value. Fine for resettable staging; NOT for prod.
+- **PROD GATE:** isolate the prod private recovery key from the cluster — either keep it
+  cold/offline outside the cluster-readable SM project (cluster only needs the PUBLIC did:key
+  via `PLC_RECOVERY_ROTATION_DID_KEYS`), or a secret-level IAM policy excluding app/ESO/argocd
+  SAs (break-glass only). Also still pending: offline BACKUP of the operational rotation key.
+
 ## Bottom line
-Day-to-day safety is reasonable (SM + tight workload IAM). "Long-lasting" is **not yet true** until #1 (recovery key in every DID) and #2 (offline backup) are done. The good news: rsky already supports the recovery key, so #1 is a config/wiring task in the Option-B flow, not an rsky change — but it MUST be wired before the first prod account is created.
+Day-to-day safety is reasonable (SM + tight workload IAM). "Long-lasting" is **not yet true**
+until the recovery key is in every DID (config/wiring, Task 1–2 of the Option-B plan),
+the prod recovery private key is isolated from the cluster (gate above), and the operational
+rotation key has an offline backup. rsky natively supports the recovery key, so it's wiring,
+not an rsky change — but it MUST be set before the first PROD account is created.
