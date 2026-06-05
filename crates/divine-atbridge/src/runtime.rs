@@ -11,9 +11,10 @@ use divine_bridge_db::models::{
 };
 use divine_bridge_db::{
     cancel_publish_job, claim_next_backfill_job, claim_next_live_job, enqueue_publish_job,
-    get_account_link_lifecycle, get_account_pds_access_jwt_by_did, get_ingest_offset,
-    get_publish_job, get_record_mapping, insert_asset, insert_record_mapping,
-    mark_publish_job_completed, mark_publish_job_failed,
+    get_account_link_lifecycle, get_account_pds_access_jwt_by_did,
+    get_account_pds_refresh_jwt_by_did, get_ingest_offset, get_publish_job, get_record_mapping,
+    insert_asset, insert_record_mapping, mark_publish_job_completed, mark_publish_job_failed,
+    store_account_pds_session_by_did,
     update_record_mapping_status as update_record_mapping_status_query, upsert_ingest_offset,
 };
 use divine_bridge_types::{NostrEvent, PublishJobSource, PublishState, RecordStatus};
@@ -102,6 +103,16 @@ impl crate::publisher::SessionProvider for DbSessionProvider {
     async fn access_token(&self, did: &str) -> Result<Option<String>> {
         let mut connection = self.connection.lock().unwrap();
         get_account_pds_access_jwt_by_did(&mut connection, did)
+    }
+
+    async fn refresh_token(&self, did: &str) -> Result<Option<String>> {
+        let mut connection = self.connection.lock().unwrap();
+        get_account_pds_refresh_jwt_by_did(&mut connection, did)
+    }
+
+    async fn store_session(&self, did: &str, access_jwt: &str, refresh_jwt: &str) -> Result<()> {
+        let mut connection = self.connection.lock().unwrap();
+        store_account_pds_session_by_did(&mut connection, did, access_jwt, refresh_jwt)
     }
 }
 
