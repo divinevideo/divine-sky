@@ -76,11 +76,19 @@ impl PlcClient for PlcDirectoryClient {
 
             let status = response.status();
             if status.is_success() {
-                let payload: PlcCreateDidResponse = response
-                    .json()
-                    .await
-                    .context("parsing PLC directory create response")?;
-                return Ok(payload.did.unwrap_or(derived_did));
+                // A successful PLC create returns an empty body (the DID is the
+                // self-authenticating hash we already derived). Only parse a DID
+                // out if the body is non-empty JSON; otherwise use the derived DID.
+                let body = response.text().await.unwrap_or_default();
+                let did = if body.trim().is_empty() {
+                    derived_did
+                } else {
+                    serde_json::from_str::<PlcCreateDidResponse>(&body)
+                        .ok()
+                        .and_then(|p| p.did)
+                        .unwrap_or(derived_did)
+                };
+                return Ok(did);
             }
 
             if status == StatusCode::CONFLICT {
@@ -238,6 +246,27 @@ mod tests {
         let client = PlcDirectoryClient::new(server.url());
         let did = client.create_did(&op).await.unwrap();
         mock.assert_async().await; // fails if create_did POSTed to `/` instead of `/:did`
+        assert_eq!(did, derived);
+    }
+
+    #[tokio::test]
+    async fn create_did_accepts_empty_success_body() {
+        // The real plc.directory returns 200 with an EMPTY body on create (the DID
+        // is the self-authenticating derived hash). Parsing it as JSON used to fail
+        // with "expected value at line 1 column 1"; we must fall back to the
+        // derived DID instead.
+        let op = operation();
+        let derived = derive_did_plc(&op);
+        let mut server = mockito::Server::new_async().await;
+        server
+            .mock("POST", mockito::Matcher::Regex("^/did:plc:".to_string()))
+            .with_status(200)
+            .with_body("") // empty, like real plc.directory
+            .create_async()
+            .await;
+
+        let client = PlcDirectoryClient::new(server.url());
+        let did = client.create_did(&op).await.unwrap();
         assert_eq!(did, derived);
     }
 
