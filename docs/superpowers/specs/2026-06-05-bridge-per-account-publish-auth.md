@@ -61,7 +61,8 @@ The Wall 3 fix (PR #13) makes `createAccount` return — and the bridge receive 
 - ✅ **Incr 3** — publish path authenticates per-account: `SessionProvider` trait, `PdsClient::with_session_provider` + `auth_token_for(did)` (falls back to shared token), `DbSessionProvider` resolves the access JWT by DID, wired in runtime. Test: `create_record_uses_per_account_session_token`.
 - ⏳ **Incr 4** — refresh on 401: on `AuthRequiredError`/expired access JWT, call `com.atproto.server.refreshSession` with the stored refresh JWT, persist the rotation, retry once.
 - ⏳ **Incr 5** — backfill sessions for the ~33 pre-existing repos (no stored session → can't publish; needs admin/createSession path or re-provision). The shared-token fallback does NOT help them (rsky rejects it per-DID).
-- ⏳ **Follow-up** — `uploadBlob`/`putRecord`/`deleteRecord` still use the shared token; route those per-account too (video crossposts need `uploadBlob` as the account).
+- ✅ **Blob path** — `uploadBlob` authenticates per-account: `PdsClient::upload_blob_for_did` + `BlobUploader::upload_blob_for_user` override; and the **video-service path** `getServiceAuth` now calls `auth_token_for(user_did)` (rsky issues that token for the requesting DID). Both blob client and publisher share one `DbSessionProvider`. Tests: `upload_blob_for_user_uses_per_account_session_token`.
+- ⏳ **Follow-up** — `putRecord`/`deleteRecord` still use the shared token; route those per-account too (needed for edits/deletes, not the first create).
 
 ## Acceptance criteria
 - A crosspost `createRecord` for account X authenticates as DID X and succeeds against rsky-pds (no `AuthRequiredError`).
