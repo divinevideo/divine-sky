@@ -1,7 +1,7 @@
 # Bridge per-account publish auth (Wall 4) — Design Spec
 
 **Date:** 2026-06-05
-**Status:** Proposed — needs maintainer decision on the session-management approach before implementation.
+**Status:** DECIDED 2026-06-05 → **Option A (per-account session).** Option B (service JWT) is **impossible**, verified against rsky source: `create_record` uses `AccessStandardIncludeChecks` → `access_check` → `validate_access_token` → `validate_bearer_token`, which only accepts a **user session** token (`credentials.did = Some`). The service-JWT path (`UserDidAuth`/`verify_service_jwt`) sets `credentials.did = None` and is wired only to specific endpoints (mod/labeler) with `aud` checks — it is never consulted by `createRecord`, and the `did != credentials.did.unwrap()` gate (`create_record.rs:50`) requires a real `did`. So repo writes MUST use a per-account session. Implementing Option A.
 
 ## Problem (evidence-backed)
 
