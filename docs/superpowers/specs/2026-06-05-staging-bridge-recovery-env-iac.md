@@ -1,6 +1,20 @@
-# IaC handoff: wire recovery-key env into the staging atbridge
+# IaC handoff: deploy rsky-native atbridge + wire recovery-key env (staging)
 
 **Date:** 2026-06-05. **Target repo:** the IaC repo (NOT divine-sky). **For:** iac-coreconfig.
+
+## 0. Bump the staging atbridge image to the rsky-native build
+divine-sky PR #18 merged to `main` (squash commit `9a8aec8`). Image built + pushed to
+`us-central1-docker.pkg.dev/dv-platform-staging/containers-staging/divine-atbridge:9a8aec8`.
+In `k8s/applications/divine-atbridge/overlays/staging/kustomization.yaml` set:
+```yaml
+images:
+  - name: divine-atbridge
+    newName: us-central1-docker.pkg.dev/dv-platform-staging/containers-staging/divine-atbridge
+    newTag: 9a8aec8        # was ef29258
+```
+This is the build that makes provisioning actually work (rsky mints the DID; no more
+activateAccount rejection). Do this together with the §Change below so the recovery key
+is present on the very first account this image provisions.
 
 ## Why
 The rsky-native provisioning change (divine-sky branch `feat/atbridge-rsky-native-provisioning`)
