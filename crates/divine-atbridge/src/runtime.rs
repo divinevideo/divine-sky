@@ -23,15 +23,12 @@ use crate::backfill_planner::{BackfillPlanner, BackfillRelayConnector};
 use crate::config::BridgeConfig;
 use crate::config::{DEFAULT_BACKFILL_BATCH_SIZE, DEFAULT_BACKFILL_PLANNER_INTERVAL_SECS};
 use crate::health::RuntimeHealthState;
-use crate::nostr_consumer::{
-    parse_relay_message, NostrConsumer, RelayConnection, RelayMessage, WebSocketRelayConnection,
-};
+use crate::nostr_consumer::WebSocketRelayConnection;
 use crate::pipeline::{
     AccountLink, AccountStore, AssetManifestRecord, BridgePipeline, HttpBlobFetcher,
     PublishJobEnvelope, QueueDecision, RecordMapping, RecordStore,
 };
 use crate::publisher::PdsClient;
-use crate::runtime_filter;
 use crate::video_service::VideoServiceUploader;
 
 pub type SharedConnection = Arc<Mutex<PgConnection>>;
@@ -317,6 +314,117 @@ where
     persist_relay_cursor(connection, relay_source_name, &event.id, event.created_at)
 }
 
+/// Outcome of a single REST ingest poll.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct RestIngestOutcome {
+    /// Number of new events handed to the publish pipeline this poll.
+    pub processed: usize,
+    /// True if this poll only seeded the cold-start cursor (no history replay).
+    pub cold_start_seeded: bool,
+}
+
+/// From a batch of fetched events, pick the ones newer than `cursor`, dedup by
+/// id, and return them sorted oldest-first so the per-event cursor advances
+/// monotonically (a mid-batch failure then resumes, never skips).
+fn select_new_events(events: Vec<NostrEvent>, cursor: Option<i64>) -> Vec<NostrEvent> {
+    let mut seen = std::collections::HashSet::new();
+    let mut selected: Vec<NostrEvent> = events
+        .into_iter()
+        .filter(|ev| cursor.map(|c| ev.created_at > c).unwrap_or(true))
+        .filter(|ev| seen.insert(ev.id.clone()))
+        .collect();
+    selected.sort_by(|a, b| {
+        a.created_at
+            .cmp(&b.created_at)
+            .then_with(|| a.id.cmp(&b.id))
+    });
+    selected
+}
+
+/// Run one REST live-ingest poll: fetch recent video events for each kind
+/// (newest-first, paginating backward until we reach the stored cursor or hit
+/// `max_pages`), then enqueue the genuinely-new ones oldest-first.
+///
+/// Cold start (no stored cursor): seed the cursor to the newest existing event
+/// and process nothing, so we never replay all history as "live" crossposts.
+#[allow(clippy::too_many_arguments)]
+pub async fn run_rest_ingest_once<A, R, F, U, P>(
+    rest: &crate::funnelcake_rest::FunnelcakeRestClient,
+    connection: &SharedConnection,
+    relay_source_name: &str,
+    pipeline: &BridgePipeline<A, R, F, U, P>,
+    kinds: &[u64],
+    limit: u32,
+    max_pages: usize,
+) -> Result<RestIngestOutcome>
+where
+    A: AccountStore,
+    R: RecordStore,
+    F: crate::pipeline::BlobFetcher,
+    U: crate::pipeline::BlobUploader,
+    P: crate::pipeline::PdsPublisher,
+{
+    let cursor = load_relay_cursor(connection, relay_source_name)?;
+    let cold_start = cursor.is_none();
+
+    let mut fetched: Vec<NostrEvent> = Vec::new();
+    let mut newest: Option<(i64, String)> = None;
+
+    for &kind in kinds {
+        let mut before: Option<i64> = None;
+        for _ in 0..max_pages.max(1) {
+            let page = rest.fetch_video_events(kind, before, limit).await?;
+            if page.events.is_empty() {
+                break;
+            }
+
+            let mut reached_cursor = false;
+            for ev in &page.events {
+                if newest
+                    .as_ref()
+                    .map(|(c, _)| ev.created_at > *c)
+                    .unwrap_or(true)
+                {
+                    newest = Some((ev.created_at, ev.id.clone()));
+                }
+                if let Some(c) = cursor {
+                    if ev.created_at <= c {
+                        reached_cursor = true;
+                    }
+                }
+            }
+            fetched.extend(page.events.iter().cloned());
+
+            // Cold start only needs the newest event to seed; one page per kind.
+            if cold_start || reached_cursor || !page.has_more || page.next_cursor.is_none() {
+                break;
+            }
+            before = page.next_cursor;
+        }
+    }
+
+    if cold_start {
+        if let Some((created_at, id)) = &newest {
+            persist_relay_cursor(connection, relay_source_name, id, *created_at)?;
+        }
+        return Ok(RestIngestOutcome {
+            processed: 0,
+            cold_start_seeded: newest.is_some(),
+        });
+    }
+
+    let new_events = select_new_events(fetched, cursor);
+    let processed = new_events.len();
+    for ev in &new_events {
+        enqueue_live_event(connection, relay_source_name, pipeline, ev).await?;
+    }
+
+    Ok(RestIngestOutcome {
+        processed,
+        cold_start_seeded: false,
+    })
+}
+
 pub async fn run_publish_worker_once<A, R, F, U, P>(
     connection: &SharedConnection,
     pipeline: &BridgePipeline<A, R, F, U, P>,
@@ -368,13 +476,6 @@ where
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum RelayReadOutcome {
-    Message,
-    Closed,
-    Reconnect,
-}
-
 #[derive(Clone, Copy, Debug, Default)]
 struct RuntimeBackfillRelayConnector;
 
@@ -384,65 +485,6 @@ impl BackfillRelayConnector for RuntimeBackfillRelayConnector {
 
     async fn connect(&self, relay_url: &str) -> Result<Self::Connection> {
         WebSocketRelayConnection::connect(relay_url).await
-    }
-}
-
-async fn establish_relay_session<C>(
-    relay_result: Result<C>,
-    req: String,
-    relay_url: &str,
-    health: &RuntimeHealthState,
-) -> Option<C>
-where
-    C: RelayConnection,
-{
-    let mut relay = match relay_result {
-        Ok(relay) => relay,
-        Err(error) => {
-            tracing::warn!(
-                error = %error,
-                relay_url = %relay_url,
-                "failed to connect to relay; retrying"
-            );
-            health.record_relay_failure(error.to_string());
-            return None;
-        }
-    };
-
-    if let Err(error) = relay.send(req).await {
-        tracing::warn!(
-            error = %error,
-            relay_url = %relay_url,
-            "failed to send relay subscription; reconnecting"
-        );
-        health.record_relay_failure(error.to_string());
-        return None;
-    }
-
-    health.record_success();
-    Some(relay)
-}
-
-async fn read_relay_frame<C>(
-    relay: &mut C,
-    relay_url: &str,
-    health: &RuntimeHealthState,
-) -> (RelayReadOutcome, Option<String>)
-where
-    C: RelayConnection,
-{
-    match relay.recv().await {
-        Ok(Some(raw)) => (RelayReadOutcome::Message, Some(raw)),
-        Ok(None) => (RelayReadOutcome::Closed, None),
-        Err(error) => {
-            tracing::warn!(
-                error = %error,
-                relay_url = %relay_url,
-                "failed to read relay frame; reconnecting"
-            );
-            health.record_relay_failure(error.to_string());
-            (RelayReadOutcome::Reconnect, None)
-        }
     }
 }
 
@@ -567,193 +609,105 @@ pub async fn run_service_with_state(
         health.clone(),
     ));
 
-    loop {
-        let mut consumer = NostrConsumer::new(config.relay_url.clone());
-        consumer.last_seen_timestamp =
-            match load_relay_cursor(&connection, &config.relay_source_name) {
-                Ok(cursor) => cursor,
-                Err(error) => {
-                    tracing::error!(
-                        error = %error,
-                        source = %config.relay_source_name,
-                        "failed to load relay replay cursor"
-                    );
-                    health.record_runtime_failure(error.to_string());
-                    tokio::time::sleep(health.next_retry_delay()).await;
-                    continue;
-                }
-            };
+    // Live ingest: poll the Funnelcake REST API for new video events instead of
+    // holding a WebSocket firehose. The REST endpoint returns the same full,
+    // signed Nostr events; we reuse the publish pipeline + ingest_offsets cursor.
+    // (Author-history backfill still uses the WS path via BackfillPlanner.)
+    let rest = crate::funnelcake_rest::FunnelcakeRestClient::new(config.relay_rest_url.clone());
+    const REST_INGEST_KINDS: [u64; 2] = [34236, 34235];
+    const REST_INGEST_LIMIT: u32 = 100;
+    const REST_INGEST_MAX_PAGES: usize = 5;
 
-        tracing::info!(
-            relay_url = %config.relay_url,
-            source = %config.relay_source_name,
-            "connecting bridge runtime"
-        );
-        let req = consumer.build_req(&runtime_filter());
-        let mut relay = match establish_relay_session(
-            crate::nostr_consumer::WebSocketRelayConnection::connect(&config.relay_url).await,
-            req,
-            &config.relay_url,
-            &health,
+    tracing::info!(
+        rest_url = %config.relay_rest_url,
+        source = %config.relay_source_name,
+        poll_interval_secs = config.relay_poll_interval_secs,
+        "starting REST live-ingest poll loop"
+    );
+
+    let mut ticker =
+        tokio::time::interval(Duration::from_secs(config.relay_poll_interval_secs.max(1)));
+    loop {
+        ticker.tick().await;
+        match run_rest_ingest_once(
+            &rest,
+            &connection,
+            &config.relay_source_name,
+            pipeline.as_ref(),
+            &REST_INGEST_KINDS,
+            REST_INGEST_LIMIT,
+            REST_INGEST_MAX_PAGES,
         )
         .await
         {
-            Some(relay) => relay,
-            None => {
-                tokio::time::sleep(health.next_retry_delay()).await;
-                continue;
-            }
-        };
-
-        let mut reconnect = false;
-        loop {
-            let (outcome, raw) = read_relay_frame(&mut relay, &config.relay_url, &health).await;
-            match outcome {
-                RelayReadOutcome::Message => {}
-                RelayReadOutcome::Closed => break,
-                RelayReadOutcome::Reconnect => {
-                    reconnect = true;
-                    break;
-                }
-            }
-            let raw = match raw {
-                Some(raw) => raw,
-                None => continue,
-            };
-
-            match parse_relay_message(&raw) {
-                Ok(RelayMessage::Event { event, .. }) => {
-                    let created_at = event.created_at;
-                    let event_id = event.id.clone();
-                    match enqueue_live_event(
-                        &connection,
-                        &config.relay_source_name,
-                        pipeline.as_ref(),
-                        &event,
-                    )
-                    .await
-                    {
-                        Ok(()) => {
-                            consumer.last_seen_timestamp = Some(created_at);
-                            health.record_success();
-                        }
-                        Err(error) => {
-                            tracing::error!(
-                                error = %error,
-                                event_id = %event_id,
-                                "bridge scheduler rejected relay event"
-                            );
-                            health.record_runtime_failure(error.to_string());
-                        }
-                    }
-                }
-                Ok(RelayMessage::Eose { .. }) => {}
-                Ok(RelayMessage::Notice(message)) => {
-                    tracing::warn!("relay NOTICE: {message}");
-                }
-                Ok(RelayMessage::Unknown(_)) => {}
-                Err(error) => {
-                    tracing::warn!(
-                        error = %error,
-                        relay_url = %config.relay_url,
-                        "failed to parse relay frame; continuing"
+            Ok(outcome) => {
+                if outcome.cold_start_seeded {
+                    tracing::info!(
+                        source = %config.relay_source_name,
+                        "seeded REST ingest cursor (cold start); no history replayed"
                     );
-                    health.record_processing_failure(error.to_string());
-                    continue;
+                } else if outcome.processed > 0 {
+                    tracing::info!(
+                        processed = outcome.processed,
+                        "REST ingest enqueued new live events"
+                    );
                 }
+                health.record_success();
+            }
+            Err(error) => {
+                tracing::warn!(
+                    error = %error,
+                    rest_url = %config.relay_rest_url,
+                    "REST ingest poll failed; will retry next tick"
+                );
+                health.record_runtime_failure(error.to_string());
             }
         }
-
-        relay.close().await.ok();
-        if !reconnect {
-            tracing::warn!("relay connection closed; reconnecting");
-            health.record_relay_failure("relay connection closed");
-        }
-
-        let delay = health.next_retry_delay();
-        tracing::warn!(
-            delay_secs = delay.as_secs(),
-            "sleeping before relay reconnect"
-        );
-        tokio::time::sleep(delay).await;
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use anyhow::{anyhow, Result};
-    use async_trait::async_trait;
-
     use super::*;
 
-    struct MockRelayConnection {
-        send_error: Option<anyhow::Error>,
-        recv_results: Vec<std::result::Result<Option<String>, anyhow::Error>>,
-    }
-
-    #[async_trait]
-    impl RelayConnection for MockRelayConnection {
-        async fn send(&mut self, _msg: String) -> Result<()> {
-            match self.send_error.take() {
-                Some(error) => Err(error),
-                None => Ok(()),
-            }
-        }
-
-        async fn recv(&mut self) -> Result<Option<String>> {
-            if self.recv_results.is_empty() {
-                Ok(None)
-            } else {
-                self.recv_results.remove(0)
-            }
-        }
-
-        async fn close(&mut self) -> Result<()> {
-            Ok(())
+    fn sample_event(id: &str, created_at: i64) -> NostrEvent {
+        NostrEvent {
+            id: id.to_string(),
+            pubkey: "pubkey".to_string(),
+            created_at,
+            kind: 34236,
+            tags: vec![],
+            content: String::new(),
+            sig: "sig".to_string(),
         }
     }
 
-    #[tokio::test]
-    async fn establish_relay_session_retries_connect_failures_without_crashing() {
-        let health = RuntimeHealthState::new();
-
-        for _ in 0..2 {
-            let relay = establish_relay_session::<MockRelayConnection>(
-                Err(anyhow!("connect failed")),
-                "REQ".to_string(),
-                "wss://relay.example",
-                &health,
-            )
-            .await;
-
-            assert!(relay.is_none());
-            assert!(health.is_ready());
-        }
-
-        let relay = establish_relay_session::<MockRelayConnection>(
-            Err(anyhow!("connect failed")),
-            "REQ".to_string(),
-            "wss://relay.example",
-            &health,
-        )
-        .await;
-
-        assert!(relay.is_none());
-        assert!(!health.is_ready());
+    #[test]
+    fn select_new_events_filters_dedups_and_sorts_oldest_first() {
+        let events = vec![
+            sample_event("c", 30),
+            sample_event("a", 10),
+            sample_event("b", 20),
+            sample_event("a", 10), // duplicate id
+            sample_event("old", 5),
+        ];
+        // cursor=10 keeps strictly-newer events; 10 and 5 are excluded.
+        let out = select_new_events(events, Some(10));
+        let ids: Vec<&str> = out.iter().map(|e| e.id.as_str()).collect();
+        assert_eq!(ids, vec!["b", "c"]);
     }
 
-    #[tokio::test]
-    async fn read_relay_frame_requests_reconnect_on_read_error() {
-        let health = RuntimeHealthState::new();
-        let mut relay = MockRelayConnection {
-            send_error: None,
-            recv_results: vec![Err(anyhow!("socket dropped"))],
-        };
-
-        let (outcome, raw) = read_relay_frame(&mut relay, "wss://relay.example", &health).await;
-
-        assert_eq!(outcome, RelayReadOutcome::Reconnect);
-        assert!(raw.is_none());
-        assert!(health.is_ready(), "single read failure should stay ready");
+    #[test]
+    fn select_new_events_without_cursor_keeps_all_sorted() {
+        let out = select_new_events(
+            vec![
+                sample_event("c", 30),
+                sample_event("a", 10),
+                sample_event("b", 20),
+            ],
+            None,
+        );
+        let ids: Vec<&str> = out.iter().map(|e| e.id.as_str()).collect();
+        assert_eq!(ids, vec!["a", "b", "c"]);
     }
 }

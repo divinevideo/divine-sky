@@ -104,6 +104,8 @@ async fn configured_internal_api_provisions_pending_link() {
 
     let app = app_with_config(BridgeConfig {
         relay_url: "wss://relay.example.com".into(),
+        relay_rest_url: "https://relay.example.com/api".into(),
+        relay_poll_interval_secs: 15,
         pds_url: pds_server.url(),
         pds_auth_token: "admin-token".into(),
         blossom_url: "https://blossom.example.com".into(),
@@ -169,6 +171,8 @@ async fn configured_internal_api_provisions_pending_link() {
 fn configured_internal_api_requires_provisioning_token() {
     let result = app_with_config(BridgeConfig {
         relay_url: "wss://relay.example.com".into(),
+        relay_rest_url: "https://relay.example.com/api".into(),
+        relay_poll_interval_secs: 15,
         pds_url: "https://pds.example.com".into(),
         pds_auth_token: "admin-token".into(),
         blossom_url: "https://blossom.example.com".into(),

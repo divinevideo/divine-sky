@@ -12,8 +12,15 @@ pub const DEFAULT_BACKFILL_PLANNER_INTERVAL_SECS: u64 = 30;
 /// Configuration for the ATBridge service.
 #[derive(Debug, Clone)]
 pub struct BridgeConfig {
-    /// Funnelcake relay WebSocket URL (RELAY_URL).
+    /// Funnelcake relay WebSocket URL (RELAY_URL). Retained for the WS-based
+    /// author-history backfill path; live ingest uses the REST API below.
     pub relay_url: String,
+    /// Funnelcake REST API base URL (RELAY_REST_URL), e.g.
+    /// `https://relay.staging.dvines.org/api`. Defaults to a value derived from
+    /// `relay_url` (scheme→http(s), path stripped, `/api` appended).
+    pub relay_rest_url: String,
+    /// Poll cadence for the REST live-ingest loop, seconds (RELAY_POLL_INTERVAL_SECS).
+    pub relay_poll_interval_secs: u64,
     /// rsky-pds XRPC base URL (PDS_URL).
     pub pds_url: String,
     /// Bearer token used for PDS XRPC writes (PDS_AUTH_TOKEN).
@@ -63,6 +70,13 @@ impl BridgeConfig {
     pub fn from_env() -> Result<Self> {
         Ok(Self {
             relay_url: env::var("RELAY_URL").context("RELAY_URL must be set")?,
+            relay_rest_url: env::var("RELAY_REST_URL")
+                .ok()
+                .unwrap_or_else(|| derive_rest_base(&env::var("RELAY_URL").unwrap_or_default())),
+            relay_poll_interval_secs: env::var("RELAY_POLL_INTERVAL_SECS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(15),
             pds_url: env::var("PDS_URL").context("PDS_URL must be set")?,
             pds_auth_token: env::var("PDS_AUTH_TOKEN").context("PDS_AUTH_TOKEN must be set")?,
             blossom_url: env::var("BLOSSOM_URL").context("BLOSSOM_URL must be set")?,
@@ -123,6 +137,26 @@ impl BridgeConfig {
     }
 }
 
+/// Derive the Funnelcake REST API base URL from the relay WebSocket URL:
+/// swap the scheme to http(s), drop any path, and append `/api`.
+fn derive_rest_base(relay_url: &str) -> String {
+    let trimmed = relay_url.trim();
+    let (scheme, rest) = if let Some(rest) = trimmed.strip_prefix("wss://") {
+        ("https://", rest)
+    } else if let Some(rest) = trimmed.strip_prefix("ws://") {
+        ("http://", rest)
+    } else if let Some(rest) = trimmed.strip_prefix("https://") {
+        ("https://", rest)
+    } else if let Some(rest) = trimmed.strip_prefix("http://") {
+        ("http://", rest)
+    } else {
+        ("https://", trimmed)
+    };
+    // authority is everything up to the first '/'
+    let authority = rest.split('/').next().unwrap_or("");
+    format!("{scheme}{authority}/api")
+}
+
 /// Parse the comma-separated `PLC_RECOVERY_ROTATION_DID_KEYS` env value into a
 /// validated, deduplicated list of `did:key` recovery rotation keys.
 ///
@@ -166,6 +200,8 @@ mod tests {
         // Instead we just verify the struct can be constructed manually.
         let config = BridgeConfig {
             relay_url: "wss://relay.example.com".into(),
+            relay_rest_url: "https://relay.example.com/api".into(),
+            relay_poll_interval_secs: 15,
             pds_url: "https://pds.example.com".into(),
             pds_auth_token: "test-token".into(),
             blossom_url: "https://blossom.example.com".into(),
@@ -194,6 +230,8 @@ mod tests {
     fn provisioning_pds_url_prefers_production_host_for_divine_video() {
         let config = BridgeConfig {
             relay_url: "wss://relay.example.com".into(),
+            relay_rest_url: "https://relay.example.com/api".into(),
+            relay_poll_interval_secs: 15,
             pds_url: "https://pds.staging.dvines.org".into(),
             pds_auth_token: "test-token".into(),
             blossom_url: "https://blossom.example.com".into(),
@@ -216,6 +254,28 @@ mod tests {
         };
 
         assert_eq!(config.provisioning_pds_url(), "https://pds.divine.video");
+    }
+
+    #[test]
+    fn derives_rest_base_from_ws_relay_url() {
+        assert_eq!(
+            derive_rest_base("wss://relay.staging.dvines.org"),
+            "https://relay.staging.dvines.org/api"
+        );
+        assert_eq!(
+            derive_rest_base("ws://localhost:7777"),
+            "http://localhost:7777/api"
+        );
+        // path on the relay URL is stripped before appending /api
+        assert_eq!(
+            derive_rest_base("wss://relay.example.com/nostr"),
+            "https://relay.example.com/api"
+        );
+        // already-http base is normalised the same way
+        assert_eq!(
+            derive_rest_base("https://relay.example.com/"),
+            "https://relay.example.com/api"
+        );
     }
 
     #[test]
@@ -267,6 +327,8 @@ mod tests {
     fn provisioning_pds_url_keeps_local_dev_pds_url() {
         let config = BridgeConfig {
             relay_url: "wss://relay.example.com".into(),
+            relay_rest_url: "https://relay.example.com/api".into(),
+            relay_poll_interval_secs: 15,
             pds_url: "http://pds:2583".into(),
             pds_auth_token: "test-token".into(),
             blossom_url: "https://blossom.example.com".into(),
