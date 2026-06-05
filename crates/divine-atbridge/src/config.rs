@@ -34,6 +34,13 @@ pub struct BridgeConfig {
     pub plc_directory_url: String,
     /// Handle domain accepted for provisioning (HANDLE_DOMAIN).
     pub handle_domain: String,
+    /// Offline recovery PLC rotation public keys, as did:key values, listed first
+    /// (highest priority) in every minted DID's rotation_keys
+    /// (PLC_RECOVERY_ROTATION_DID_KEYS).
+    pub plc_recovery_rotation_did_keys: Vec<String>,
+    /// Email domain used to synthesize per-account addresses for createAccount
+    /// (ACCOUNT_EMAIL_DOMAIN, default `divine.video`).
+    pub account_email_domain: String,
     /// Shared bearer token for the internal provisioning API (ATPROTO_PROVISIONING_TOKEN).
     pub provisioning_bearer_token: String,
     /// Base URL for the Bluesky video transcoding service (VIDEO_SERVICE_URL).
@@ -69,6 +76,11 @@ impl BridgeConfig {
             plc_directory_url: env::var("PLC_DIRECTORY_URL")
                 .context("PLC_DIRECTORY_URL must be set")?,
             handle_domain: env::var("HANDLE_DOMAIN").context("HANDLE_DOMAIN must be set")?,
+            plc_recovery_rotation_did_keys: parse_recovery_rotation_did_keys(
+                env::var("PLC_RECOVERY_ROTATION_DID_KEYS").ok().as_deref(),
+            )?,
+            account_email_domain: env::var("ACCOUNT_EMAIL_DOMAIN")
+                .unwrap_or_else(|_| "divine.video".to_string()),
             provisioning_bearer_token: env::var("ATPROTO_PROVISIONING_TOKEN")
                 .context("ATPROTO_PROVISIONING_TOKEN must be set")?,
             video_service_url: env::var("VIDEO_SERVICE_URL")
@@ -111,6 +123,38 @@ impl BridgeConfig {
     }
 }
 
+/// Parse the comma-separated `PLC_RECOVERY_ROTATION_DID_KEYS` env value into a
+/// validated, deduplicated list of `did:key` recovery rotation keys.
+///
+/// PLC allows at most 5 rotation keys total; rsky always appends its own
+/// operational rotation key, so we cap recovery keys at 4.
+fn parse_recovery_rotation_did_keys(value: Option<&str>) -> Result<Vec<String>> {
+    let mut keys = Vec::new();
+    for key in value
+        .unwrap_or_default()
+        .split(',')
+        .map(str::trim)
+        .filter(|key| !key.is_empty())
+    {
+        anyhow::ensure!(
+            key.starts_with("did:key:"),
+            "PLC_RECOVERY_ROTATION_DID_KEYS entries must be did:key values"
+        );
+        anyhow::ensure!(
+            !keys.iter().any(|existing| existing == key),
+            "duplicate PLC recovery rotation key: {key}"
+        );
+        keys.push(key.to_string());
+    }
+
+    anyhow::ensure!(
+        keys.len() <= 4,
+        "PLC_RECOVERY_ROTATION_DID_KEYS supports at most 4 recovery keys"
+    );
+
+    Ok(keys)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -132,6 +176,8 @@ mod tests {
             health_bind_addr: "0.0.0.0:8080".into(),
             plc_directory_url: "https://plc.directory".into(),
             handle_domain: "divine.video".into(),
+            plc_recovery_rotation_did_keys: Vec::new(),
+            account_email_domain: "divine.video".into(),
             provisioning_bearer_token: "test-token".into(),
             video_service_url: "https://video.bsky.app".into(),
             video_service_enabled: false,
@@ -158,6 +204,8 @@ mod tests {
             health_bind_addr: "0.0.0.0:8080".into(),
             plc_directory_url: "https://plc.directory".into(),
             handle_domain: "divine.video".into(),
+            plc_recovery_rotation_did_keys: Vec::new(),
+            account_email_domain: "divine.video".into(),
             provisioning_bearer_token: "test-token".into(),
             video_service_url: "https://video.bsky.app".into(),
             video_service_enabled: false,
@@ -168,6 +216,51 @@ mod tests {
         };
 
         assert_eq!(config.provisioning_pds_url(), "https://pds.divine.video");
+    }
+
+    #[test]
+    fn parses_recovery_rotation_did_keys_from_comma_separated_env() {
+        let keys =
+            parse_recovery_rotation_did_keys(Some(" did:key:zRecovery1 ,did:key:zRecovery2,, "))
+                .expect("valid recovery keys should parse");
+
+        assert_eq!(
+            keys,
+            vec![
+                "did:key:zRecovery1".to_string(),
+                "did:key:zRecovery2".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn recovery_rotation_did_keys_default_empty_when_unset() {
+        let keys = parse_recovery_rotation_did_keys(None).expect("unset is allowed");
+        assert!(keys.is_empty());
+    }
+
+    #[test]
+    fn rejects_non_did_key_recovery_rotation_entries() {
+        let err = parse_recovery_rotation_did_keys(Some("did:plc:abc123"))
+            .expect_err("recovery rotation keys must be did:key values");
+        assert!(err.to_string().contains("did:key"));
+    }
+
+    #[test]
+    fn rejects_too_many_recovery_rotation_did_keys() {
+        let err = parse_recovery_rotation_did_keys(Some(
+            "did:key:z1,did:key:z2,did:key:z3,did:key:z4,did:key:z5",
+        ))
+        .expect_err("five recovery keys plus the operational key would exceed PLC max");
+
+        assert!(err.to_string().contains("at most 4"));
+    }
+
+    #[test]
+    fn rejects_duplicate_recovery_rotation_did_keys() {
+        let err = parse_recovery_rotation_did_keys(Some("did:key:z1,did:key:z1"))
+            .expect_err("duplicate recovery keys should fail");
+        assert!(err.to_string().contains("duplicate"));
     }
 
     #[test]
@@ -184,6 +277,8 @@ mod tests {
             health_bind_addr: "0.0.0.0:8080".into(),
             plc_directory_url: "https://plc.directory".into(),
             handle_domain: "divine.video".into(),
+            plc_recovery_rotation_did_keys: Vec::new(),
+            account_email_domain: "divine.video".into(),
             provisioning_bearer_token: "test-token".into(),
             video_service_url: "https://video.bsky.app".into(),
             video_service_enabled: false,
