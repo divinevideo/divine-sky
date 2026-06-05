@@ -129,13 +129,34 @@ impl PdsClient {
     ///
     /// Calls `POST /xrpc/com.atproto.repo.uploadBlob` with raw bytes.
     pub async fn upload_blob(&self, data: &[u8], mime_type: &str) -> Result<BlobRef> {
+        self.upload_blob_with_token(data, mime_type, &self.auth_token)
+            .await
+    }
+
+    /// Upload a blob authenticated as `did`'s account (per-account session token).
+    pub async fn upload_blob_for_did(
+        &self,
+        data: &[u8],
+        mime_type: &str,
+        did: &str,
+    ) -> Result<BlobRef> {
+        let token = self.auth_token_for(did).await?;
+        self.upload_blob_with_token(data, mime_type, &token).await
+    }
+
+    async fn upload_blob_with_token(
+        &self,
+        data: &[u8],
+        mime_type: &str,
+        auth_token: &str,
+    ) -> Result<BlobRef> {
         let url = format!("{}/xrpc/com.atproto.repo.uploadBlob", self.base_url);
 
         let resp = self
             .client
             .post(&url)
             .header("Content-Type", mime_type)
-            .header("Authorization", format!("Bearer {}", self.auth_token))
+            .header("Authorization", format!("Bearer {auth_token}"))
             .body(data.to_vec())
             .send()
             .await
@@ -284,6 +305,15 @@ impl PdsClient {
 impl BlobUploader for PdsClient {
     async fn upload_blob(&self, data: &[u8], mime_type: &str) -> Result<BlobRef> {
         PdsClient::upload_blob(self, data, mime_type).await
+    }
+
+    async fn upload_blob_for_user(
+        &self,
+        data: &[u8],
+        mime_type: &str,
+        user_did: &str,
+    ) -> Result<BlobRef> {
+        PdsClient::upload_blob_for_did(self, data, mime_type, user_did).await
     }
 }
 
@@ -469,6 +499,41 @@ mod tests {
             .await
             .unwrap();
         mock.assert_async().await; // fails if it sent the shared token instead
+    }
+
+    #[tokio::test]
+    async fn upload_blob_for_user_uses_per_account_session_token() {
+        // Video crossposts upload the blob as the account; it must use the
+        // account's session token, not the shared one.
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("POST", "/xrpc/com.atproto.repo.uploadBlob")
+            .match_header("Authorization", "Bearer account-session-jwt")
+            .with_status(200)
+            .with_header("Content-Type", "application/json")
+            .with_body(
+                serde_json::json!({
+                    "blob": {
+                        "ref": {"$link": "bafblob"},
+                        "mimeType": "video/mp4",
+                        "size": 3
+                    }
+                })
+                .to_string(),
+            )
+            .create_async()
+            .await;
+
+        let client = PdsClient::new(server.url(), "shared-admin-token").with_session_provider(
+            Arc::new(StaticSessionProvider {
+                token: "account-session-jwt".to_string(),
+            }),
+        );
+        client
+            .upload_blob_for_did(b"abc", "video/mp4", "did:plc:abc123")
+            .await
+            .unwrap();
+        mock.assert_async().await;
     }
 
     #[tokio::test]
