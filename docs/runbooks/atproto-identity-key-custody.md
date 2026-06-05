@@ -74,6 +74,24 @@ quota wall hold regardless.)
   via `PLC_RECOVERY_ROTATION_DID_KEYS`), or a secret-level IAM policy excluding app/ESO/argocd
   SAs (break-glass only). Also still pending: offline BACKUP of the operational rotation key.
 
+
+- **Prod recovery key CREATED 2026-06-05** (fresh, not reused from staging): private →
+  `divine-atproto-plc-recovery-key-private-production`; public did:key →
+  `divine-atproto-plc-recovery-key-did-production` =
+  `did:key:zQ3shqtkyxqEpU468PfA6nKHpFbKwGx6oaao6jEs5cpxerjv1`.
+- **⚠️ PROD ISOLATION NOT DONE — BLOCKED ON PERMISSIONS.** Attempted an IAM deny policy
+  excluding the cluster SAs (`argocd-production`, `external-secrets-production`,
+  `keycast-migration`) from `versions.access` on the private recovery secret →
+  `denypolicies.create denied` (rabble@divine.video lacks `iam.googleapis.com/denypolicies.create`).
+  Because those SAs hold PROJECT-level `secretAccessor` (additive, can't be subtracted by a
+  secret-level allow), the prod private recovery key is currently readable by the same accounts
+  that read the operational rotation key → NO real recovery isolation yet.
+  REQUIRES an IAM/org admin to either: (a) apply the deny policy, (b) CMEK-encrypt the secret
+  with a KMS key the cluster SAs can't decrypt (keyrings exist: app-keys-production,
+  prod-proofsign), or (c) move the private half cold/offline out of the cluster-readable project
+  (preferred — cluster only needs the public did:key). Until one is done, treat the recovery
+  key as NOT providing isolation.
+
 ## Bottom line
 Day-to-day safety is reasonable (SM + tight workload IAM). "Long-lasting" is **not yet true**
 until the recovery key is in every DID (config/wiring, Task 1–2 of the Option-B plan),
