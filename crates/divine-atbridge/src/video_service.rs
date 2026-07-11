@@ -347,7 +347,14 @@ impl BlobUploader for VideoServiceUploader {
         user_did: &str,
     ) -> Result<BlobRef> {
         if !mime_type.starts_with("video/") {
-            return self.pds_client.upload_blob(data, mime_type).await;
+            // Non-video blobs (captions, avatars, banners) still go straight to
+            // the PDS — but as the ACCOUNT, not the shared admin token: rsky
+            // authorizes repo writes per-DID and rejects the admin token with
+            // `BadJwt` (it isn't a JWT at all).
+            return self
+                .pds_client
+                .upload_blob_for_did(data, mime_type, user_did)
+                .await;
         }
 
         tracing::info!(
