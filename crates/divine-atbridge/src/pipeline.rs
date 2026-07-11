@@ -18,7 +18,7 @@ use crate::profile_sync::{
     build_profile_record, parse_kind0_profile, profile_assets, PROFILE_COLLECTION, PROFILE_RKEY,
 };
 use crate::signature::verify_nostr_event;
-use crate::translator::translate_nip71_to_post;
+use crate::translator::{get_text_tracks, translate_nip71_to_post, VideoCaption};
 
 // ---------------------------------------------------------------------------
 // Types
@@ -594,6 +594,96 @@ where
         })
     }
 
+    /// Fetch, validate, and upload the event's NIP-71 `text-track` WebVTT
+    /// files, returning caption entries for the video embed. Best-effort:
+    /// every failure is logged and skipped so captions can never block a
+    /// video publish.
+    async fn resolve_video_captions(&self, event: &NostrEvent) -> Vec<VideoCaption> {
+        // app.bsky.embed.video lexicon limits.
+        const MAX_VIDEO_CAPTIONS: usize = 20;
+        const MAX_CAPTION_VTT_BYTES: usize = 20_000;
+
+        let mut captions = Vec::new();
+        for track in get_text_tracks(event) {
+            if captions.len() >= MAX_VIDEO_CAPTIONS {
+                tracing::warn!(
+                    nostr_event_id = %event.id,
+                    "more than {MAX_VIDEO_CAPTIONS} text-tracks; ignoring the rest"
+                );
+                break;
+            }
+
+            // Divine's text-track URLs are content-addressed: verify when the
+            // last path segment looks like a sha256.
+            let expected_sha256 = track
+                .url
+                .rsplit('/')
+                .next()
+                .filter(|s| s.len() == 64 && s.bytes().all(|b| b.is_ascii_hexdigit()))
+                .map(str::to_ascii_lowercase);
+
+            let fetched = match self
+                .blob_fetcher
+                .fetch_blob_verified(&track.url, expected_sha256.as_deref())
+                .await
+            {
+                Ok(fetched) => fetched,
+                Err(error) => {
+                    tracing::warn!(
+                        nostr_event_id = %event.id,
+                        url = %track.url,
+                        error = %format!("{error:#}"),
+                        "failed to fetch text-track; skipping caption"
+                    );
+                    continue;
+                }
+            };
+
+            let body = fetched
+                .data
+                .strip_prefix(&[0xEF, 0xBB, 0xBF][..])
+                .unwrap_or(&fetched.data);
+            if !body.starts_with(b"WEBVTT") {
+                tracing::warn!(
+                    nostr_event_id = %event.id,
+                    url = %track.url,
+                    "text-track is not WebVTT; skipping caption"
+                );
+                continue;
+            }
+            if fetched.data.len() > MAX_CAPTION_VTT_BYTES {
+                tracing::warn!(
+                    nostr_event_id = %event.id,
+                    url = %track.url,
+                    size = fetched.data.len(),
+                    "text-track exceeds the {MAX_CAPTION_VTT_BYTES}-byte caption limit; skipping"
+                );
+                continue;
+            }
+
+            match self
+                .blob_uploader
+                .upload_blob(&fetched.data, "text/vtt")
+                .await
+            {
+                Ok(file) => captions.push(VideoCaption {
+                    type_: "app.bsky.embed.video#caption".to_string(),
+                    lang: track.lang,
+                    file,
+                }),
+                Err(error) => {
+                    tracing::warn!(
+                        nostr_event_id = %event.id,
+                        url = %track.url,
+                        error = %format!("{error:#}"),
+                        "failed to upload caption blob; skipping caption"
+                    );
+                }
+            }
+        }
+        captions
+    }
+
     async fn handle_video_event(
         &self,
         event: &NostrEvent,
@@ -624,8 +714,14 @@ where
             .context("failed to upload blob to PDS")?;
 
         // Translate event to ATProto post
-        let post = translate_nip71_to_post(event, &blob_ref)
+        let mut post = translate_nip71_to_post(event, &blob_ref)
             .context("failed to translate event to ATProto post")?;
+
+        // Attach WebVTT captions from NIP-71 text-track tags (best-effort:
+        // caption problems must never block the video publish).
+        if let Some(embed) = post.embed.as_mut() {
+            embed.captions = self.resolve_video_captions(event).await;
+        }
 
         let record_value =
             serde_json::to_value(&post).context("failed to serialize ATProto post")?;
@@ -1084,6 +1180,102 @@ mod tests {
         )
     }
 
+    /// Serves the video payload for video URLs and a configurable body (or an
+    /// error) for `.vtt` URLs.
+    struct CaptionScenarioFetcher {
+        vtt: Option<Vec<u8>>,
+    }
+
+    #[async_trait]
+    impl BlobFetcher for CaptionScenarioFetcher {
+        async fn fetch_blob(&self, url: &str) -> Result<(Vec<u8>, String)> {
+            if url.ends_with(".vtt") {
+                match &self.vtt {
+                    Some(body) => Ok((body.clone(), "text/vtt".to_string())),
+                    None => anyhow::bail!("vtt fetch failed"),
+                }
+            } else {
+                Ok((vec![0xDE, 0xAD, 0xBE, 0xEF], "video/mp4".to_string()))
+            }
+        }
+    }
+
+    /// Captures every record JSON handed to the publisher.
+    struct RecordCapturingPublisher {
+        records: Mutex<Vec<serde_json::Value>>,
+    }
+
+    impl RecordCapturingPublisher {
+        fn new() -> Self {
+            Self {
+                records: Mutex::new(vec![]),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl PdsPublisher for RecordCapturingPublisher {
+        async fn create_record(
+            &self,
+            did: &str,
+            collection: &str,
+            record: &serde_json::Value,
+        ) -> Result<String> {
+            self.records.lock().unwrap().push(record.clone());
+            Ok(format!("at://{}/{}/3capturedrkey", did, collection))
+        }
+
+        async fn put_record(
+            &self,
+            did: &str,
+            collection: &str,
+            rkey: &str,
+            record: &serde_json::Value,
+        ) -> Result<String> {
+            self.records.lock().unwrap().push(record.clone());
+            Ok(format!("at://{}/{}/{}", did, collection, rkey))
+        }
+
+        async fn delete_record(&self, _did: &str, _collection: &str, _rkey: &str) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    fn make_captioned_video_event(vtt_url: &str) -> NostrEvent {
+        let payload = [0xDE, 0xAD, 0xBE, 0xEF];
+        let source_sha256 = hex::encode(Sha256::digest(payload));
+        make_signed_event(
+            34235,
+            "",
+            vec![
+                vec!["title".into(), "Captioned Video".into()],
+                vec!["url".into(), "https://blossom.example/video.mp4".into()],
+                vec!["x".into(), source_sha256],
+                vec!["d".into(), "captioned-video".into()],
+                vec!["text-track".into(), vtt_url.into(), "wss://relay".into()],
+                vec!["L".into(), "ISO-639-1".into()],
+                vec!["l".into(), "pt".into(), "ISO-639-1".into()],
+            ],
+        )
+    }
+
+    async fn run_caption_scenario(vtt: Option<Vec<u8>>) -> (ProcessResult, Vec<serde_json::Value>) {
+        let event = make_captioned_video_event("https://media.example/captions.vtt");
+        let accounts = MockAccountStore {
+            links: vec![account_for(&event.pubkey)],
+        };
+        let pipeline = BridgePipeline::new(
+            accounts,
+            MockRecordStore::new(),
+            CaptionScenarioFetcher { vtt },
+            MockBlobUploader,
+            RecordCapturingPublisher::new(),
+        );
+        let result = pipeline.process_event(&event).await;
+        let records = pipeline.pds_publisher.records.lock().unwrap().clone();
+        (result, records)
+    }
+
     fn account_for(pubkey: &str) -> AccountLink {
         AccountLink {
             nostr_pubkey: pubkey.to_string(),
@@ -1095,6 +1287,46 @@ mod tests {
     // -----------------------------------------------------------------------
     // Tests
     // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn video_with_text_track_publishes_captions() {
+        let vtt = b"WEBVTT\n\n00:00.000 --> 00:02.000\nhello".to_vec();
+        let (result, records) = run_caption_scenario(Some(vtt)).await;
+
+        assert!(matches!(result, ProcessResult::Published { .. }));
+        let captions = &records[0]["embed"]["captions"];
+        assert_eq!(captions.as_array().unwrap().len(), 1);
+        assert_eq!(captions[0]["$type"], "app.bsky.embed.video#caption");
+        assert_eq!(captions[0]["lang"], "pt");
+        assert_eq!(captions[0]["file"]["ref"]["$link"], "bafkreiuploadedblob");
+    }
+
+    #[tokio::test]
+    async fn caption_fetch_failure_still_publishes_post() {
+        let (result, records) = run_caption_scenario(None).await;
+
+        assert!(matches!(result, ProcessResult::Published { .. }));
+        // Empty captions are skipped during serialization entirely.
+        assert!(records[0]["embed"].get("captions").is_none());
+    }
+
+    #[tokio::test]
+    async fn non_vtt_text_track_is_skipped_but_post_publishes() {
+        let (result, records) = run_caption_scenario(Some(b"<html>not vtt</html>".to_vec())).await;
+
+        assert!(matches!(result, ProcessResult::Published { .. }));
+        assert!(records[0]["embed"].get("captions").is_none());
+    }
+
+    #[tokio::test]
+    async fn oversized_vtt_is_skipped_but_post_publishes() {
+        let mut vtt = b"WEBVTT\n".to_vec();
+        vtt.resize(20_001, b' ');
+        let (result, records) = run_caption_scenario(Some(vtt)).await;
+
+        assert!(matches!(result, ProcessResult::Published { .. }));
+        assert!(records[0]["embed"].get("captions").is_none());
+    }
 
     #[tokio::test]
     async fn happy_path_video_event_published() {
