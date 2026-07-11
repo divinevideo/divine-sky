@@ -92,6 +92,37 @@ fn get_tags<'a>(event: &'a NostrEvent, name: &str) -> Vec<&'a str> {
         .collect()
 }
 
+/// A NIP-71 `text-track` caption reference. Divine emits
+/// `["text-track", "<vtt url>", "<relay hint>"]`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TextTrack {
+    pub url: String,
+    pub lang: String,
+}
+
+/// Extract WebVTT caption candidates from a NIP-71 event.
+///
+/// Only entries whose first value is an http(s) URL are returned. NIP-71
+/// text-track tags carry no per-track language, so every track gets the
+/// event's ISO-639-1 `l` tag, defaulting to "en".
+pub fn get_text_tracks(event: &NostrEvent) -> Vec<TextTrack> {
+    let lang = event
+        .tags
+        .iter()
+        .find(|t| t.len() >= 3 && t[0] == "l" && t[2] == "ISO-639-1")
+        .map(|t| t[1].clone())
+        .unwrap_or_else(|| "en".to_string());
+
+    get_tags(event, "text-track")
+        .into_iter()
+        .filter(|url| url.starts_with("https://") || url.starts_with("http://"))
+        .map(|url| TextTrack {
+            url: url.to_string(),
+            lang: lang.clone(),
+        })
+        .collect()
+}
+
 /// Parse an `imeta` tag to extract a named field.
 /// imeta tags look like: ["imeta", "url https://...", "dim 1920x1080", ...]
 fn get_imeta_field<'a>(event: &'a NostrEvent, field: &str) -> Option<&'a str> {
@@ -309,6 +340,67 @@ mod tests {
             "video/mp4".to_string(),
             1024000,
         )
+    }
+
+    #[test]
+    fn text_track_extraction_uses_event_language() {
+        let event = make_event(
+            "",
+            vec![
+                vec!["text-track", "https://media.example/abc.vtt", "wss://relay"],
+                vec!["L", "ISO-639-1"],
+                vec!["l", "pt", "ISO-639-1"],
+            ],
+        );
+        let tracks = get_text_tracks(&event);
+        assert_eq!(
+            tracks,
+            vec![TextTrack {
+                url: "https://media.example/abc.vtt".to_string(),
+                lang: "pt".to_string(),
+            }]
+        );
+    }
+
+    #[test]
+    fn text_track_extraction_defaults_to_english() {
+        let event = make_event(
+            "",
+            vec![vec!["text-track", "https://media.example/abc.vtt"]],
+        );
+        assert_eq!(get_text_tracks(&event)[0].lang, "en");
+    }
+
+    #[test]
+    fn text_track_extraction_skips_non_url_entries() {
+        let event = make_event(
+            "",
+            vec![
+                vec!["text-track", "not-a-url"],
+                vec!["text-track", "https://media.example/ok.vtt"],
+            ],
+        );
+        let tracks = get_text_tracks(&event);
+        assert_eq!(tracks.len(), 1);
+        assert_eq!(tracks[0].url, "https://media.example/ok.vtt");
+    }
+
+    #[test]
+    fn no_text_track_yields_no_tracks() {
+        let event = make_event("", vec![vec!["title", "No captions here"]]);
+        assert!(get_text_tracks(&event).is_empty());
+    }
+
+    #[test]
+    fn text_track_extraction_returns_all_tracks() {
+        let event = make_event(
+            "",
+            vec![
+                vec!["text-track", "https://media.example/a.vtt"],
+                vec!["text-track", "https://media.example/b.vtt"],
+            ],
+        );
+        assert_eq!(get_text_tracks(&event).len(), 2);
     }
 
     #[test]
