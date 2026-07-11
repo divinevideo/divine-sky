@@ -27,8 +27,15 @@ struct UploadVideoResponse {
     job_id: Option<String>,
     #[allow(dead_code)]
     state: Option<String>,
+    blob: Option<JobBlob>,
     error: Option<String>,
     message: Option<String>,
+}
+
+#[derive(Debug)]
+enum VideoUploadOutcome {
+    Job(String),
+    Blob(BlobRef),
 }
 
 #[derive(Debug, Deserialize)]
@@ -171,13 +178,13 @@ impl VideoServiceUploader {
         Ok(resp.did)
     }
 
-    /// Upload the raw video bytes to the video service and return the job ID.
+    /// Upload the raw video bytes and return either a new job or a reusable blob.
     async fn upload_to_video_service(
         &self,
         data: &[u8],
         service_token: &str,
         user_did: &str,
-    ) -> Result<String> {
+    ) -> Result<VideoUploadOutcome> {
         let url = format!(
             "{}/xrpc/app.bsky.video.uploadVideo?did={}&name=divine-video.mp4",
             self.video_service_url, user_did
@@ -204,6 +211,17 @@ impl VideoServiceUploader {
             )
         })?;
 
+        // The service reports a previously processed video as `already_exists`
+        // (usually HTTP 409) while still returning the reusable BlobRef. Bluesky's
+        // contract says clients must prefer a present blob regardless of job state.
+        if let Some(blob) = upload.blob {
+            return Ok(VideoUploadOutcome::Blob(BlobRef::new(
+                blob.blob_ref.link,
+                blob.mime_type,
+                blob.size,
+            )));
+        }
+
         if !status.is_success() {
             bail!(
                 "uploadVideo failed ({}): {}",
@@ -213,7 +231,7 @@ impl VideoServiceUploader {
         }
 
         match upload.job_id {
-            Some(id) => Ok(id),
+            Some(id) => Ok(VideoUploadOutcome::Job(id)),
             None => bail!(
                 "uploadVideo returned no jobId: {}",
                 upload
@@ -318,10 +336,22 @@ impl BlobUploader for VideoServiceUploader {
             .await
             .context("failed to get service auth for video upload")?;
 
-        let job_id = self
+        let upload = self
             .upload_to_video_service(data, &service_token, user_did)
             .await
             .context("failed to upload to video service")?;
+
+        let job_id = match upload {
+            VideoUploadOutcome::Blob(blob) => {
+                tracing::info!(
+                    did = %user_did,
+                    cid = %blob.cid(),
+                    "video was already processed; reusing existing blob"
+                );
+                return Ok(blob);
+            }
+            VideoUploadOutcome::Job(job_id) => job_id,
+        };
 
         tracing::info!(
             job_id = %job_id,
@@ -342,6 +372,116 @@ impl BlobUploader for VideoServiceUploader {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mockito::Matcher;
+
+    #[tokio::test]
+    async fn upload_video_reuses_blob_when_video_was_already_processed() {
+        let mut server = mockito::Server::new_async().await;
+        let upload = server
+            .mock("POST", "/xrpc/app.bsky.video.uploadVideo")
+            .match_query(Matcher::AllOf(vec![
+                Matcher::UrlEncoded("did".into(), "did:plc:alice".into()),
+                Matcher::UrlEncoded("name".into(), "divine-video.mp4".into()),
+            ]))
+            .with_status(409)
+            .with_header("content-type", "application/json")
+            .with_body(
+                serde_json::json!({
+                    "jobId": "existing-job",
+                    "state": "JOB_STATE_FAILED",
+                    "error": "already_exists",
+                    "message": "video has already been processed",
+                    "blob": {
+                        "$type": "blob",
+                        "ref": { "$link": "bafkreiexistingvideo" },
+                        "mimeType": "video/mp4",
+                        "size": 1_866_809
+                    }
+                })
+                .to_string(),
+            )
+            .create_async()
+            .await;
+
+        let uploader = VideoServiceUploader::new(
+            PdsClient::new("http://127.0.0.1:9", "unused"),
+            "http://127.0.0.1:9".to_string(),
+            server.url(),
+            Duration::from_secs(1),
+            Duration::ZERO,
+        );
+
+        let outcome = uploader
+            .upload_to_video_service(b"video", "service-token", "did:plc:alice")
+            .await
+            .expect("an already-processed video should reuse its blob");
+
+        match outcome {
+            VideoUploadOutcome::Blob(blob) => {
+                assert_eq!(blob.cid(), "bafkreiexistingvideo");
+                assert_eq!(blob.mime_type, "video/mp4");
+                assert_eq!(blob.size, 1_866_809);
+            }
+            VideoUploadOutcome::Job(job_id) => {
+                panic!("expected an existing blob, got job {job_id}")
+            }
+        }
+        upload.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn upload_video_returns_job_for_new_video() {
+        let mut server = mockito::Server::new_async().await;
+        let upload = server
+            .mock("POST", "/xrpc/app.bsky.video.uploadVideo")
+            .match_query(Matcher::Any)
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"jobId":"new-job","state":"JOB_STATE_CREATED"}"#)
+            .create_async()
+            .await;
+        let uploader = test_uploader(server.url());
+
+        let outcome = uploader
+            .upload_to_video_service(b"video", "service-token", "did:plc:alice")
+            .await
+            .expect("a new video should return its job");
+
+        assert!(matches!(outcome, VideoUploadOutcome::Job(id) if id == "new-job"));
+        upload.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn upload_video_rejects_already_exists_without_reusable_blob() {
+        let mut server = mockito::Server::new_async().await;
+        let upload = server
+            .mock("POST", "/xrpc/app.bsky.video.uploadVideo")
+            .match_query(Matcher::Any)
+            .with_status(409)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"error":"already_exists","message":"blob unavailable"}"#)
+            .create_async()
+            .await;
+        let uploader = test_uploader(server.url());
+
+        let error = uploader
+            .upload_to_video_service(b"video", "service-token", "did:plc:alice")
+            .await
+            .expect_err("already_exists without a blob is not reusable");
+
+        assert!(error.to_string().contains("already_exists"));
+        upload.assert_async().await;
+    }
+
+    fn test_uploader(video_service_url: String) -> VideoServiceUploader {
+        VideoServiceUploader::new(
+            PdsClient::new("http://127.0.0.1:9", "unused"),
+            "http://127.0.0.1:9".to_string(),
+            video_service_url,
+            Duration::from_secs(1),
+            Duration::ZERO,
+        )
+    }
 
     #[test]
     fn upload_video_response_deserializes_with_job_id() {
