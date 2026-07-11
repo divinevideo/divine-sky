@@ -1329,6 +1329,47 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn captions_capped_at_lexicon_limit_of_twenty() {
+        // 25 text-tracks, all fetchable, must be capped to the lexicon's 20.
+        let payload = [0xDE, 0xAD, 0xBE, 0xEF];
+        let source_sha256 = hex::encode(Sha256::digest(payload));
+        let mut tags = vec![
+            vec!["title".into(), "Many Captions".into()],
+            vec!["url".into(), "https://blossom.example/video.mp4".into()],
+            vec!["x".into(), source_sha256],
+            vec!["d".into(), "many-captions".into()],
+        ];
+        for i in 0..25 {
+            tags.push(vec![
+                "text-track".into(),
+                format!("https://media.example/captions-{i}.vtt"),
+            ]);
+        }
+        let event = make_signed_event(34235, "", tags);
+        let accounts = MockAccountStore {
+            links: vec![account_for(&event.pubkey)],
+        };
+        let pipeline = BridgePipeline::new(
+            accounts,
+            MockRecordStore::new(),
+            CaptionScenarioFetcher {
+                vtt: Some(b"WEBVTT\n".to_vec()),
+            },
+            MockBlobUploader,
+            RecordCapturingPublisher::new(),
+        );
+
+        let result = pipeline.process_event(&event).await;
+        assert!(matches!(result, ProcessResult::Published { .. }));
+
+        let records = pipeline.pds_publisher.records.lock().unwrap();
+        assert_eq!(
+            records[0]["embed"]["captions"].as_array().map(Vec::len),
+            Some(20)
+        );
+    }
+
+    #[tokio::test]
     async fn happy_path_video_event_published() {
         let event = make_video_event("ignored"); // pubkey comes from signing
         let accounts = MockAccountStore {
