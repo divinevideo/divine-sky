@@ -261,6 +261,41 @@ impl PdsAccountCreator for PdsAccountsClient {
 
         Err(last_error.unwrap_or_else(|| anyhow::anyhow!("createAccount failed")))
     }
+
+    async fn create_initial_profile(
+        &self,
+        did: &str,
+        session: &PdsSession,
+        display_name: &str,
+    ) -> Result<()> {
+        let url = format!(
+            "{}/xrpc/com.atproto.repo.putRecord",
+            self.base_url.trim_end_matches('/')
+        );
+        let body = serde_json::json!({
+            "repo": did,
+            "collection": "app.bsky.actor.profile",
+            "rkey": "self",
+            "record": {
+                "$type": "app.bsky.actor.profile",
+                "displayName": display_name,
+            },
+        });
+        let response = self
+            .client
+            .post(url)
+            .header("Authorization", format!("Bearer {}", session.access_jwt))
+            .json(&body)
+            .send()
+            .await
+            .context("sending initial profile putRecord request")?;
+        let status = response.status();
+        if !status.is_success() {
+            let text = response.text().await.unwrap_or_default();
+            anyhow::bail!("initial profile putRecord failed ({status}): {text}");
+        }
+        Ok(())
+    }
 }
 
 /// Generate a 32-byte random account password (hex). Not persisted — rsky admin
