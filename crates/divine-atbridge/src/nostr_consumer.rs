@@ -11,6 +11,15 @@ use tokio::net::TcpStream;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::{connect_async, MaybeTlsStream, WebSocketStream};
 
+/// Product retention policy for initial ATProto publication.
+///
+/// Divine profiles can have years of Nostr history (including large proof
+/// metadata). The bridge intentionally publishes only the newest 100 relevant
+/// profile/video/deletion events when an account first opts in; subsequent
+/// events are handled by live ingest. A finite relay limit is also required for
+/// Funnelcake to terminate the stored-event stream with EOSE.
+pub const MAX_AUTHOR_HISTORY_EVENTS: u64 = 100;
+
 // ---------------------------------------------------------------------------
 // Nostr protocol types
 // ---------------------------------------------------------------------------
@@ -23,6 +32,8 @@ pub struct NostrFilter {
     pub authors: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub since: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub limit: Option<u64>,
 }
 
 impl NostrFilter {
@@ -32,6 +43,7 @@ impl NostrFilter {
             kinds: vec![34235, 34236, 5],
             authors: None,
             since: None,
+            limit: None,
         }
     }
 }
@@ -41,6 +53,7 @@ pub fn author_history_filter(author: String) -> NostrFilter {
         kinds: vec![0, 5, 34235, 34236],
         authors: Some(vec![author]),
         since: None,
+        limit: Some(MAX_AUTHOR_HISTORY_EVENTS),
     }
 }
 
@@ -368,6 +381,15 @@ mod tests {
         // Optional fields should be absent
         assert!(json.get("authors").is_none());
         assert!(json.get("since").is_none());
+        assert!(json.get("limit").is_none());
+    }
+
+    #[test]
+    fn author_history_filter_is_bounded() {
+        let filter = author_history_filter("deadbeef".to_string());
+        let json = serde_json::to_value(&filter).unwrap();
+        assert_eq!(json["authors"], serde_json::json!(["deadbeef"]));
+        assert_eq!(json["limit"], serde_json::json!(MAX_AUTHOR_HISTORY_EVENTS));
     }
 
     #[test]
@@ -376,6 +398,7 @@ mod tests {
             kinds: vec![34235],
             authors: None,
             since: Some(1700000000),
+            limit: None,
         };
         let json = serde_json::to_value(&filter).unwrap();
         assert_eq!(json["since"], serde_json::json!(1700000000));
