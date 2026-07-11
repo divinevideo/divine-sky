@@ -235,9 +235,9 @@ impl VideoServiceUploader {
         }
 
         if !status.is_success() {
-            // A 409 means this (did, video) pair was uploaded before. The body
-            // still carries the existing job ID, so reuse it: polling
-            // getJobStatus resolves a completed cached job to its blob ref.
+            // A 409 without a blob can still carry the existing job ID; reuse
+            // it — polling getJobStatus resolves a completed cached job to its
+            // blob ref. (A 409 with a blob was already handled above.)
             if status == reqwest::StatusCode::CONFLICT {
                 if let Some(id) = upload.job_id.as_deref().filter(|id| !id.is_empty()) {
                     tracing::info!(
@@ -245,7 +245,7 @@ impl VideoServiceUploader {
                         did = %user_did,
                         "video already has a transcoding job; reusing it"
                     );
-                    return Ok(id.to_string());
+                    return Ok(VideoUploadOutcome::Job(id.to_string()));
                 }
             }
             bail!(
