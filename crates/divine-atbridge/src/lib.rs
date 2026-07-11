@@ -34,6 +34,7 @@ pub fn runtime_filter() -> NostrFilter {
         kinds: vec![0, 5, 34235, 34236],
         authors: None,
         since: None,
+        limit: None,
     }
 }
 
