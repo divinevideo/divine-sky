@@ -658,7 +658,12 @@ fn claim_next_job(
             FROM publish_jobs
             WHERE job_source = $1
               AND (
-                state IN ('pending', 'failed')
+                state = 'pending'
+                OR (
+                    state = 'failed'
+                    AND completed_at IS NULL
+                    AND (lease_expires_at IS NULL OR lease_expires_at <= NOW())
+                )
                 OR (state = 'in_progress' AND lease_expires_at IS NOT NULL AND lease_expires_at <= NOW())
               )
             ORDER BY {order_by}
@@ -734,20 +739,53 @@ pub fn mark_publish_job_completed(
     Ok(result)
 }
 
-/// Mark a publish job as failed and release any lease.
+/// Maximum failed attempts before a publish job is terminally failed.
+const MAX_PUBLISH_JOB_ATTEMPTS: i32 = 20;
+/// Upper bound on the exponential retry backoff for failed publish jobs.
+const MAX_PUBLISH_JOB_BACKOFF_SECS: i64 = 600;
+
+/// Mark a publish job attempt as failed.
+///
+/// Retryable failures keep a backoff lease: `lease_expires_at` is pushed to
+/// `now + min(2^attempt, 600)` seconds so the claim query skips the job until
+/// the backoff elapses instead of hot-looping on a permanently failing job.
+/// After `MAX_PUBLISH_JOB_ATTEMPTS` the job fails terminally: `completed_at`
+/// is set and the claim query never returns it again.
 pub fn mark_publish_job_failed(
     conn: &mut PgConnection,
     nostr_event_id: &str,
     error_msg: &str,
 ) -> Result<PublishJob> {
+    let existing = get_publish_job(conn, nostr_event_id)?
+        .ok_or_else(|| anyhow!("publish job missing for {nostr_event_id}"))?;
+    let attempt = existing.attempt.saturating_add(1);
     let now = Utc::now();
+
+    if attempt >= MAX_PUBLISH_JOB_ATTEMPTS {
+        let result = diesel::update(publish_jobs::table.find(nostr_event_id))
+            .set((
+                publish_jobs::state.eq(PublishState::Failed.as_str()),
+                publish_jobs::attempt.eq(attempt),
+                publish_jobs::error.eq(Some(error_msg.to_string())),
+                publish_jobs::lease_owner.eq(None::<String>),
+                publish_jobs::lease_expires_at.eq(None::<DateTime<Utc>>),
+                publish_jobs::completed_at.eq(Some(now)),
+                publish_jobs::updated_at.eq(now),
+            ))
+            .get_result::<PublishJob>(conn)?;
+        return Ok(result);
+    }
+
+    let backoff_secs = 2i64
+        .checked_pow(attempt.clamp(0, 30) as u32)
+        .unwrap_or(MAX_PUBLISH_JOB_BACKOFF_SECS)
+        .min(MAX_PUBLISH_JOB_BACKOFF_SECS);
     let result = diesel::update(publish_jobs::table.find(nostr_event_id))
         .set((
             publish_jobs::state.eq(PublishState::Failed.as_str()),
-            publish_jobs::attempt.eq(publish_jobs::attempt + 1),
+            publish_jobs::attempt.eq(attempt),
             publish_jobs::error.eq(Some(error_msg.to_string())),
-            publish_jobs::lease_owner.eq(None::<String>),
-            publish_jobs::lease_expires_at.eq(None::<DateTime<Utc>>),
+            publish_jobs::lease_expires_at.eq(Some(now + chrono::Duration::seconds(backoff_secs))),
             publish_jobs::completed_at.eq(None::<DateTime<Utc>>),
             publish_jobs::updated_at.eq(now),
         ))

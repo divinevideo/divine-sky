@@ -1,3 +1,5 @@
+use std::sync::{Mutex, OnceLock};
+
 use chrono::{DateTime, Duration, Utc};
 use diesel::Connection;
 use diesel::PgConnection;
@@ -44,6 +46,13 @@ fn reset_database(database_url: &str) {
     );
 }
 
+// Tests in this binary share the database, so they serialize on a
+// process-wide marker lock (same pattern as runtime_resilience.rs).
+fn test_db_lock() -> &'static Mutex<()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+}
+
 // Test fixture builder mirrors the account_links columns; the arg count is
 // inherent to the schema, not a design smell.
 #[allow(clippy::too_many_arguments)]
@@ -77,6 +86,9 @@ fn seed_account(
 
 #[test]
 fn queue_and_backfill_queries_follow_scheduler_contract() {
+    let _guard = test_db_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let database_url = test_database_url();
     reset_database(&database_url);
     let mut conn =
@@ -358,4 +370,95 @@ fn queue_and_backfill_queries_follow_scheduler_contract() {
         .expect("get should succeed")
         .expect("job should exist");
     assert_eq!(loaded.state, "published");
+}
+
+#[test]
+fn failed_jobs_back_off_and_terminalize_after_max_attempts() {
+    let _guard = test_db_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let database_url = test_database_url();
+    reset_database(&database_url);
+    let mut conn =
+        PgConnection::establish(&database_url).expect("test database should be reachable");
+
+    let created_at = DateTime::parse_from_rfc3339("2024-01-01T00:00:00Z")
+        .unwrap()
+        .with_timezone(&Utc);
+    enqueue_publish_job(
+        &mut conn,
+        &NewPublishJob {
+            nostr_event_id: "evt-backoff",
+            nostr_pubkey: "npub1alice",
+            event_created_at: created_at,
+            event_payload: json!({"id": "evt-backoff"}),
+            job_source: PublishJobSource::Live.as_str(),
+            state: "pending",
+        },
+    )
+    .expect("job should enqueue");
+
+    let lease_expiry = Utc::now() + Duration::minutes(5);
+    let claimed = claim_next_live_job(&mut conn, "worker-a", lease_expiry)
+        .expect("claim should work")
+        .expect("pending job should be claimable");
+    assert_eq!(claimed.nostr_event_id, "evt-backoff");
+
+    // A failed attempt keeps a backoff lease in the future so the claim
+    // query skips the job instead of hot-looping on it.
+    let before_failure = Utc::now();
+    let failed = mark_publish_job_failed(&mut conn, "evt-backoff", "pds timeout")
+        .expect("failed marker should work");
+    assert_eq!(failed.state, "failed");
+    let backoff_lease = failed
+        .lease_expires_at
+        .expect("failed job should keep a backoff lease");
+    assert!(
+        backoff_lease > before_failure,
+        "backoff lease should be in the future"
+    );
+    assert!(
+        backoff_lease <= before_failure + Duration::seconds(601),
+        "backoff lease should be capped at 600 seconds"
+    );
+
+    // The backed-off job must not be claimable while the lease holds.
+    let skipped =
+        claim_next_live_job(&mut conn, "worker-a", lease_expiry).expect("claim should work");
+    assert!(skipped.is_none(), "backed-off job should be skipped");
+
+    // Once the backoff lease expires the job becomes claimable again.
+    diesel::sql_query(
+        "UPDATE publish_jobs
+         SET lease_expires_at = NOW() - INTERVAL '1 second'
+         WHERE nostr_event_id = 'evt-backoff'",
+    )
+    .execute(&mut conn)
+    .expect("backoff lease should be forced expired");
+    let reclaimed = claim_next_live_job(&mut conn, "worker-a", lease_expiry)
+        .expect("claim should work")
+        .expect("job with expired backoff should be reclaimable");
+    assert_eq!(reclaimed.nostr_event_id, "evt-backoff");
+
+    // Once the attempt cap is reached the job fails terminally and the
+    // claim query never returns it again.
+    diesel::sql_query("UPDATE publish_jobs SET attempt = 19 WHERE nostr_event_id = 'evt-backoff'")
+        .execute(&mut conn)
+        .expect("attempt count should be forced to the cap");
+    let terminal = mark_publish_job_failed(&mut conn, "evt-backoff", "pds timeout")
+        .expect("failed marker should work");
+    assert_eq!(terminal.state, "failed");
+    assert_eq!(terminal.attempt, 20);
+    assert!(
+        terminal.completed_at.is_some(),
+        "terminally failed job should record completed_at"
+    );
+    assert!(terminal.lease_owner.is_none());
+    assert!(terminal.lease_expires_at.is_none());
+    let after_terminal =
+        claim_next_live_job(&mut conn, "worker-a", lease_expiry).expect("claim should work");
+    assert!(
+        after_terminal.is_none(),
+        "terminally failed job must never be reclaimed"
+    );
 }

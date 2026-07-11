@@ -223,6 +223,19 @@ impl VideoServiceUploader {
         }
 
         if !status.is_success() {
+            // A 409 means this (did, video) pair was uploaded before. The body
+            // still carries the existing job ID, so reuse it: polling
+            // getJobStatus resolves a completed cached job to its blob ref.
+            if status == reqwest::StatusCode::CONFLICT {
+                if let Some(id) = upload.job_id.as_deref().filter(|id| !id.is_empty()) {
+                    tracing::info!(
+                        job_id = %id,
+                        did = %user_did,
+                        "video already has a transcoding job; reusing it"
+                    );
+                    return Ok(id.to_string());
+                }
+            }
             bail!(
                 "uploadVideo failed ({}): {}",
                 status.as_u16(),
@@ -488,6 +501,125 @@ mod tests {
         let json = r#"{"jobId":"job123","state":"JOB_STATE_CREATED"}"#;
         let resp: UploadVideoResponse = serde_json::from_str(json).unwrap();
         assert_eq!(resp.job_id.as_deref(), Some("job123"));
+    }
+
+    #[test]
+    fn upload_video_response_deserializes_409_already_exists() {
+        let json = r#"{"jobId":"jobX","error":"already_exists","state":"JOB_STATE_COMPLETED","did":"did:plc:user"}"#;
+        let resp: UploadVideoResponse = serde_json::from_str(json).unwrap();
+        assert_eq!(resp.job_id.as_deref(), Some("jobX"));
+        assert_eq!(resp.error.as_deref(), Some("already_exists"));
+    }
+
+    #[tokio::test]
+    async fn upload_409_already_exists_with_job_id_resolves_via_job_status() {
+        let mut server = mockito::Server::new_async().await;
+
+        let describe = server
+            .mock("GET", "/xrpc/com.atproto.server.describeServer")
+            .with_status(200)
+            .with_body(r#"{"did":"did:web:pds.example"}"#)
+            .create_async()
+            .await;
+        let service_auth = server
+            .mock("GET", "/xrpc/com.atproto.server.getServiceAuth")
+            .match_query(mockito::Matcher::Any)
+            .with_status(200)
+            .with_body(r#"{"token":"service-token"}"#)
+            .create_async()
+            .await;
+        let upload = server
+            .mock("POST", "/xrpc/app.bsky.video.uploadVideo")
+            .match_query(mockito::Matcher::Any)
+            .with_status(409)
+            .with_body(
+                r#"{"jobId":"jobX","error":"already_exists","state":"JOB_STATE_COMPLETED","did":"did:plc:user"}"#,
+            )
+            .create_async()
+            .await;
+        let job_status = server
+            .mock("GET", "/xrpc/app.bsky.video.getJobStatus")
+            .match_query(mockito::Matcher::UrlEncoded("jobId".into(), "jobX".into()))
+            .with_status(200)
+            .with_body(
+                r#"{
+                    "jobStatus": {
+                        "state": "JOB_STATE_COMPLETED",
+                        "blob": {
+                            "ref": {"$link": "bafkreicachedvideo"},
+                            "mimeType": "video/mp4",
+                            "size": 2048
+                        }
+                    }
+                }"#,
+            )
+            .create_async()
+            .await;
+
+        let uploader = VideoServiceUploader::new(
+            PdsClient::new(server.url(), "tok"),
+            server.url(),
+            server.url(),
+            Duration::from_secs(5),
+            Duration::from_millis(10),
+        );
+
+        let blob = uploader
+            .upload_blob_for_user(b"video-bytes", "video/mp4", "did:plc:user")
+            .await
+            .expect("409 already_exists with jobId should resolve to the cached job's blob");
+
+        assert_eq!(blob.cid(), "bafkreicachedvideo");
+        assert_eq!(blob.mime_type, "video/mp4");
+        assert_eq!(blob.size, 2048);
+        describe.assert_async().await;
+        service_auth.assert_async().await;
+        upload.assert_async().await;
+        job_status.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn upload_409_without_job_id_fails() {
+        let mut server = mockito::Server::new_async().await;
+
+        server
+            .mock("GET", "/xrpc/com.atproto.server.describeServer")
+            .with_status(200)
+            .with_body(r#"{"did":"did:web:pds.example"}"#)
+            .create_async()
+            .await;
+        server
+            .mock("GET", "/xrpc/com.atproto.server.getServiceAuth")
+            .match_query(mockito::Matcher::Any)
+            .with_status(200)
+            .with_body(r#"{"token":"service-token"}"#)
+            .create_async()
+            .await;
+        server
+            .mock("POST", "/xrpc/app.bsky.video.uploadVideo")
+            .match_query(mockito::Matcher::Any)
+            .with_status(409)
+            .with_body(r#"{"error":"already_exists","message":"video already exists"}"#)
+            .create_async()
+            .await;
+
+        let uploader = VideoServiceUploader::new(
+            PdsClient::new(server.url(), "tok"),
+            server.url(),
+            server.url(),
+            Duration::from_secs(5),
+            Duration::from_millis(10),
+        );
+
+        let err = uploader
+            .upload_blob_for_user(b"video-bytes", "video/mp4", "did:plc:user")
+            .await
+            .expect_err("409 without a jobId should fail");
+
+        assert!(
+            format!("{err:#}").contains("uploadVideo failed (409)"),
+            "unexpected error: {err:#}"
+        );
     }
 
     #[test]
