@@ -598,7 +598,7 @@ where
     /// files, returning caption entries for the video embed. Best-effort:
     /// every failure is logged and skipped so captions can never block a
     /// video publish.
-    async fn resolve_video_captions(&self, event: &NostrEvent) -> Vec<VideoCaption> {
+    async fn resolve_video_captions(&self, event: &NostrEvent, did: &str) -> Vec<VideoCaption> {
         // app.bsky.embed.video lexicon limits.
         const MAX_VIDEO_CAPTIONS: usize = 20;
         const MAX_CAPTION_VTT_BYTES: usize = 20_000;
@@ -663,7 +663,7 @@ where
 
             match self
                 .blob_uploader
-                .upload_blob(&fetched.data, "text/vtt")
+                .upload_blob_for_user(&fetched.data, "text/vtt", did)
                 .await
             {
                 Ok(file) => captions.push(VideoCaption {
@@ -720,7 +720,7 @@ where
         // Attach WebVTT captions from NIP-71 text-track tags (best-effort:
         // caption problems must never block the video publish).
         if let Some(embed) = post.embed.as_mut() {
-            embed.captions = self.resolve_video_captions(event).await;
+            embed.captions = self.resolve_video_captions(event, &account.did).await;
         }
 
         let record_value =
@@ -797,7 +797,7 @@ where
                 .context("failed to prepare avatar")?;
                 Some(
                     self.blob_uploader
-                        .upload_blob(&prepared.data, &prepared.mime_type)
+                        .upload_blob_for_user(&prepared.data, &prepared.mime_type, &account.did)
                         .await
                         .context("failed to upload avatar")?,
                 )
@@ -820,7 +820,7 @@ where
                 .context("failed to prepare banner")?;
                 Some(
                     self.blob_uploader
-                        .upload_blob(&prepared.data, &prepared.mime_type)
+                        .upload_blob_for_user(&prepared.data, &prepared.mime_type, &account.did)
                         .await
                         .context("failed to upload banner")?,
                 )
@@ -934,7 +934,7 @@ mod tests {
     use secp256k1::rand::rngs::OsRng;
     use secp256k1::{Keypair, Secp256k1};
     use sha2::{Digest, Sha256};
-    use std::sync::Mutex;
+    use std::sync::{Arc, Mutex};
 
     // -----------------------------------------------------------------------
     // Test helpers: create signed Nostr events
@@ -1200,6 +1200,35 @@ mod tests {
         }
     }
 
+    /// Records the (mime_type, did) of every per-account blob upload.
+    struct AccountUploadRecordingUploader {
+        calls: Arc<Mutex<Vec<(String, String)>>>,
+    }
+
+    #[async_trait]
+    impl BlobUploader for AccountUploadRecordingUploader {
+        async fn upload_blob(&self, _data: &[u8], _mime_type: &str) -> Result<BlobRef> {
+            anyhow::bail!("shared-token upload_blob must not be used for account blobs")
+        }
+
+        async fn upload_blob_for_user(
+            &self,
+            _data: &[u8],
+            mime_type: &str,
+            user_did: &str,
+        ) -> Result<BlobRef> {
+            self.calls
+                .lock()
+                .unwrap()
+                .push((mime_type.to_string(), user_did.to_string()));
+            Ok(BlobRef::new(
+                "bafkreiuploadedblob".to_string(),
+                mime_type.to_string(),
+                4,
+            ))
+        }
+    }
+
     /// Captures every record JSON handed to the publisher.
     struct RecordCapturingPublisher {
         records: Mutex<Vec<serde_json::Value>>,
@@ -1299,6 +1328,38 @@ mod tests {
         assert_eq!(captions[0]["$type"], "app.bsky.embed.video#caption");
         assert_eq!(captions[0]["lang"], "pt");
         assert_eq!(captions[0]["file"]["ref"]["$link"], "bafkreiuploadedblob");
+    }
+
+    #[tokio::test]
+    async fn caption_blobs_upload_as_the_account_not_the_shared_token() {
+        // rsky authorizes repo writes per-DID: uploading a caption with the
+        // shared admin token fails with `BadJwt` (it isn't a JWT at all).
+        let event = make_captioned_video_event("https://media.example/captions.vtt");
+        let calls = Arc::new(Mutex::new(vec![]));
+        let pipeline = BridgePipeline::new(
+            MockAccountStore {
+                links: vec![account_for(&event.pubkey)],
+            },
+            MockRecordStore::new(),
+            CaptionScenarioFetcher {
+                vtt: Some(b"WEBVTT\n\n00:00.000 --> 00:02.000\nhi".to_vec()),
+            },
+            AccountUploadRecordingUploader {
+                calls: calls.clone(),
+            },
+            RecordCapturingPublisher::new(),
+        );
+
+        let result = pipeline.process_event(&event).await;
+        assert!(matches!(result, ProcessResult::Published { .. }));
+
+        let calls = calls.lock().unwrap();
+        assert!(
+            calls
+                .iter()
+                .any(|(mime, did)| mime == "text/vtt" && did == "did:plc:testuser"),
+            "caption blob must upload as the account, got {calls:?}"
+        );
     }
 
     #[tokio::test]
