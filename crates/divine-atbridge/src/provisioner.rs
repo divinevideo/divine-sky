@@ -147,6 +147,20 @@ pub trait PdsAccountCreator: Send + Sync {
         handle: &str,
         recovery_keys: &[String],
     ) -> Result<CreatedAccount>;
+
+    /// Write the initial minimal `app.bsky.actor.profile` record for a freshly
+    /// created account, authenticated as the account via its session.
+    /// video.bsky.app rejects uploads (`401 profile_not_found`) for accounts
+    /// without a profile record, and live ingest only polls video kinds, so
+    /// the record must exist before the first kind-0 profile sync.
+    async fn create_initial_profile(
+        &self,
+        _did: &str,
+        _session: &PdsSession,
+        _display_name: &str,
+    ) -> Result<()> {
+        Ok(())
+    }
 }
 
 /// Stores lifecycle-aware account-link state.
@@ -391,6 +405,24 @@ where
                 .store_pds_session(nostr_pubkey, session)
                 .await
                 .context("persisting PDS session for account")?;
+
+            // Seed a minimal app.bsky.actor.profile: video.bsky.app rejects
+            // uploads (401 profile_not_found) for accounts without one, and
+            // live ingest only polls video kinds so the kind-0 sync may come
+            // much later. Best-effort: a failure here must not fail
+            // provisioning (the kind-0 profile sync repairs it).
+            let display_name = handle.split('.').next().unwrap_or(handle);
+            if let Err(error) = self
+                .pds_creator
+                .create_initial_profile(&created.did, session, display_name)
+                .await
+            {
+                tracing::warn!(
+                    did = %created.did,
+                    error = %format!("{error:#}"),
+                    "failed to write initial profile record; continuing"
+                );
+            }
         }
 
         let record = self
@@ -495,9 +527,12 @@ mod tests {
 
     struct MockPdsCreator {
         fail: bool,
+        profile_fail: bool,
         /// Records each call as (handle, recovery_keys) so tests can assert the
         /// rsky-native shape: rsky mints the DID, recovery keys are passed through.
         calls: Arc<Mutex<Vec<(String, Vec<String>)>>>,
+        /// Records each profile write as (did, access_jwt, display_name).
+        profile_calls: Arc<Mutex<Vec<(String, String, String)>>>,
     }
 
     #[async_trait]
@@ -523,6 +558,23 @@ mod tests {
                 }),
                 did,
             })
+        }
+
+        async fn create_initial_profile(
+            &self,
+            did: &str,
+            session: &PdsSession,
+            display_name: &str,
+        ) -> Result<()> {
+            self.profile_calls.lock().unwrap().push((
+                did.to_string(),
+                session.access_jwt.clone(),
+                display_name.to_string(),
+            ));
+            if self.profile_fail {
+                bail!("profile putRecord failed");
+            }
+            Ok(())
         }
     }
 
@@ -624,12 +676,23 @@ mod tests {
         generated: Arc<Mutex<Vec<String>>>,
         plc_calls: Arc<Mutex<Vec<PlcOperation>>>,
         pds_calls: Arc<Mutex<Vec<(String, Vec<String>)>>>,
+        profile_calls: Arc<Mutex<Vec<(String, String, String)>>>,
     }
 
     fn make_provisioner(links: SharedLinks, plc_fail: bool, pds_fail: bool) -> ProvisionerHarness {
+        make_provisioner_with_profile_fail(links, plc_fail, pds_fail, false)
+    }
+
+    fn make_provisioner_with_profile_fail(
+        links: SharedLinks,
+        plc_fail: bool,
+        pds_fail: bool,
+        profile_fail: bool,
+    ) -> ProvisionerHarness {
         let generated = Arc::new(Mutex::new(Vec::new()));
         let plc_calls = Arc::new(Mutex::new(Vec::new()));
         let pds_calls = Arc::new(Mutex::new(Vec::new()));
+        let profile_calls = Arc::new(Mutex::new(Vec::new()));
 
         let provisioner = AccountProvisioner {
             key_store: MockKeyStore {
@@ -642,7 +705,9 @@ mod tests {
             },
             pds_creator: MockPdsCreator {
                 fail: pds_fail,
+                profile_fail,
                 calls: pds_calls.clone(),
+                profile_calls: profile_calls.clone(),
             },
             link_store: MockLinkStore { links },
             pds_endpoint: "https://pds.divine.video".to_string(),
@@ -655,6 +720,7 @@ mod tests {
             generated,
             plc_calls,
             pds_calls,
+            profile_calls,
         }
     }
 
@@ -723,6 +789,50 @@ mod tests {
             .expect("a PDS session must be persisted after provisioning");
         assert!(session.access_jwt.starts_with("access-"));
         assert!(session.refresh_jwt.starts_with("refresh-"));
+    }
+
+    #[tokio::test]
+    async fn successful_provisioning_writes_initial_profile() {
+        // video.bsky.app 401s (profile_not_found) for accounts with no
+        // app.bsky.actor.profile record, and live ingest only polls video
+        // kinds, so provisioning must seed a minimal profile itself.
+        let links = SharedLinks::default();
+        let harness = make_provisioner(links.clone(), false, false);
+
+        harness
+            .provisioner
+            .provision_account("npub_profile", "frank.divine.video")
+            .await
+            .expect("provisioning should succeed");
+
+        let profile_calls = harness.profile_calls.lock().unwrap();
+        assert_eq!(profile_calls.len(), 1, "one initial profile write expected");
+        let (did, access_jwt, display_name) = &profile_calls[0];
+        assert_eq!(did, "did:plc:testaccount");
+        assert_eq!(access_jwt, "access-did:plc:testaccount");
+        // Display name is the handle's first label.
+        assert_eq!(display_name, "frank");
+    }
+
+    #[tokio::test]
+    async fn profile_write_failure_does_not_fail_provisioning() {
+        // The initial profile write is best-effort: the kind-0 profile sync
+        // repairs it later, so provisioning must still succeed and mark ready.
+        let links = SharedLinks::default();
+        let harness = make_provisioner_with_profile_fail(links.clone(), false, false, true);
+
+        let result = harness
+            .provisioner
+            .provision_account("npub_profile_fail", "grace.divine.video")
+            .await
+            .expect("provisioning must succeed even when the profile write fails");
+
+        assert_eq!(result.did, "did:plc:testaccount");
+        let stored = links.get("npub_profile_fail");
+        assert_eq!(stored.provisioning_state, ProvisioningState::Ready);
+        assert!(stored.provisioning_error.is_none());
+        // The write was still attempted.
+        assert_eq!(harness.profile_calls.lock().unwrap().len(), 1);
     }
 
     #[tokio::test]

@@ -67,6 +67,16 @@ struct JobBlobLink {
     link: String,
 }
 
+/// Lifetime requested for the service-auth token. video.bsky.app holds the
+/// token across the transcode and then uses it to upload the finished blob
+/// back to the PDS, so the PDS default of 60s is too short.
+const SERVICE_AUTH_TOKEN_TTL_SECS: i64 = 1800;
+
+/// Unix-epoch expiry for a fresh service-auth token (now + 30 minutes).
+fn service_auth_exp_epoch() -> i64 {
+    chrono::Utc::now().timestamp() + SERVICE_AUTH_TOKEN_TTL_SECS
+}
+
 // ---------------------------------------------------------------------------
 // VideoServiceUploader
 // ---------------------------------------------------------------------------
@@ -123,8 +133,10 @@ impl VideoServiceUploader {
         let pds_service_did = self.resolve_pds_service_did().await?;
 
         let url = format!(
-            "{}/xrpc/com.atproto.server.getServiceAuth?aud={}&lxm=com.atproto.repo.uploadBlob",
-            self.pds_url, pds_service_did
+            "{}/xrpc/com.atproto.server.getServiceAuth?aud={}&lxm=com.atproto.repo.uploadBlob&exp={}",
+            self.pds_url,
+            pds_service_did,
+            service_auth_exp_epoch()
         );
 
         // getServiceAuth issues a token for the *authenticated* account (rsky uses
@@ -504,6 +516,17 @@ mod tests {
     }
 
     #[test]
+    fn service_auth_exp_is_thirty_minutes_out() {
+        let now = chrono::Utc::now().timestamp();
+        let exp = service_auth_exp_epoch();
+        assert!(
+            (exp - now - 1800).abs() <= 5,
+            "exp should be ~now+1800s, got now+{}s",
+            exp - now
+        );
+    }
+
+    #[test]
     fn upload_video_response_deserializes_409_already_exists() {
         let json = r#"{"jobId":"jobX","error":"already_exists","state":"JOB_STATE_COMPLETED","did":"did:plc:user"}"#;
         let resp: UploadVideoResponse = serde_json::from_str(json).unwrap();
@@ -521,9 +544,15 @@ mod tests {
             .with_body(r#"{"did":"did:web:pds.example"}"#)
             .create_async()
             .await;
+        // The service-auth token must request a 30-minute expiry: video.bsky.app
+        // holds it across the transcode and uses it to upload the blob back to
+        // the PDS, so the default 60s would 401 the callback.
         let service_auth = server
             .mock("GET", "/xrpc/com.atproto.server.getServiceAuth")
-            .match_query(mockito::Matcher::Any)
+            .match_query(mockito::Matcher::AllOf(vec![
+                mockito::Matcher::UrlEncoded("lxm".into(), "com.atproto.repo.uploadBlob".into()),
+                mockito::Matcher::Regex(r"exp=\d{10}".into()),
+            ]))
             .with_status(200)
             .with_body(r#"{"token":"service-token"}"#)
             .create_async()
