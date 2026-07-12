@@ -26,6 +26,32 @@ pub trait SessionProvider: Send + Sync {
     async fn store_session(&self, did: &str, access_jwt: &str, refresh_jwt: &str) -> Result<()>;
 }
 
+/// Seconds of headroom required before an access token counts as usable: a
+/// token about to expire mid-flight is treated as already expired.
+const ACCESS_TOKEN_MIN_REMAINING_SECS: i64 = 60;
+
+/// Read the `exp` (NumericDate, seconds) from a JWT payload without verifying
+/// the signature — the PDS is the authority on validity; here we only need to
+/// know when to refresh.
+fn jwt_exp_epoch_secs(token: &str) -> Option<i64> {
+    let payload = token.split('.').nth(1)?;
+    let decoded = data_encoding::BASE64URL_NOPAD
+        .decode(payload.trim_end_matches('=').as_bytes())
+        .ok()?;
+    let claims: serde_json::Value = serde_json::from_slice(&decoded).ok()?;
+    claims.get("exp")?.as_i64()
+}
+
+/// An access token is usable while its `exp` is comfortably in the future. A
+/// token whose expiry cannot be parsed is treated as usable: refreshing on
+/// every unparseable token would hammer the PDS for no benefit.
+fn access_token_is_usable(token: &str) -> bool {
+    match jwt_exp_epoch_secs(token) {
+        Some(exp) => exp - chrono::Utc::now().timestamp() > ACCESS_TOKEN_MIN_REMAINING_SECS,
+        None => true,
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Response types
 // ---------------------------------------------------------------------------
@@ -135,6 +161,25 @@ impl PdsClient {
     pub async fn auth_token_for(&self, did: &str) -> Result<String> {
         if let Some(provider) = &self.session_provider {
             if let Some(token) = provider.access_token(did).await? {
+                // Refresh BEFORE using an expired (or nearly expired) token.
+                // Reacting to a 401 is not enough: rsky answers an expired
+                // access token with 400 BadJwt — its bearer check falls back to
+                // the repo signing key and reports that key's signature failure
+                // instead of the expiry — so a purely reactive refresh never
+                // fires and the account goes dark ~2h after provisioning.
+                if !access_token_is_usable(&token) {
+                    match self.refresh_session_for(did).await {
+                        Ok(Some(fresh)) => return Ok(fresh),
+                        Ok(None) => {}
+                        Err(error) => {
+                            tracing::warn!(
+                                did = %did,
+                                error = %format!("{error:#}"),
+                                "proactive session refresh failed; using the stored token"
+                            );
+                        }
+                    }
+                }
                 return Ok(token);
             }
         }
@@ -535,6 +580,30 @@ mod tests {
     }
 
     /// Records refresh + store calls so tests can assert the 401-refresh-retry flow.
+    /// Session provider whose access token is supplied by the test (so it can
+    /// hand out an expired one).
+    struct ExpiringSessionProvider {
+        access: String,
+        stored: std::sync::Mutex<Vec<(String, String)>>,
+    }
+
+    #[async_trait::async_trait]
+    impl SessionProvider for ExpiringSessionProvider {
+        async fn access_token(&self, _did: &str) -> Result<Option<String>> {
+            Ok(Some(self.access.clone()))
+        }
+        async fn refresh_token(&self, _did: &str) -> Result<Option<String>> {
+            Ok(Some("refresh-jwt".to_string()))
+        }
+        async fn store_session(&self, _did: &str, access: &str, refresh: &str) -> Result<()> {
+            self.stored
+                .lock()
+                .unwrap()
+                .push((access.to_string(), refresh.to_string()));
+            Ok(())
+        }
+    }
+
     #[derive(Default)]
     struct RefreshingSessionProvider {
         stored: std::sync::Mutex<Vec<(String, String)>>,
@@ -555,6 +624,74 @@ mod tests {
                 .push((access.to_string(), refresh.to_string()));
             Ok(())
         }
+    }
+
+    /// Build an unsigned JWT whose payload carries `exp` (the only claim the
+    /// bridge reads); the signature is irrelevant to expiry checking.
+    fn jwt_with_exp(exp: i64) -> String {
+        let payload = data_encoding::BASE64URL_NOPAD
+            .encode(serde_json::json!({ "exp": exp }).to_string().as_bytes());
+        format!("header.{payload}.signature")
+    }
+
+    #[test]
+    fn expired_and_nearly_expired_tokens_are_not_usable() {
+        let now = chrono::Utc::now().timestamp();
+        assert!(!access_token_is_usable(&jwt_with_exp(now - 1)));
+        assert!(!access_token_is_usable(&jwt_with_exp(now + 30)));
+        assert!(access_token_is_usable(&jwt_with_exp(now + 3600)));
+        // Unparseable tokens are left to the PDS to reject.
+        assert!(access_token_is_usable("not-a-jwt"));
+    }
+
+    #[tokio::test]
+    async fn expired_access_token_refreshes_without_waiting_for_a_401() {
+        // rsky answers an expired access token with 400 BadJwt, not 401, so the
+        // bridge must refresh proactively rather than react to a status code.
+        let mut server = mockito::Server::new_async().await;
+        let refresh = server
+            .mock("POST", "/xrpc/com.atproto.server.refreshSession")
+            .match_header("Authorization", "Bearer refresh-jwt")
+            .with_status(200)
+            .with_body(
+                serde_json::json!({"accessJwt": "new-access-jwt", "refreshJwt": "new-refresh-jwt"})
+                    .to_string(),
+            )
+            .expect(1)
+            .create_async()
+            .await;
+        // The write must go out with the refreshed token on the FIRST attempt.
+        let ok = server
+            .mock("POST", "/xrpc/com.atproto.repo.createRecord")
+            .match_header("Authorization", "Bearer new-access-jwt")
+            .with_status(200)
+            .with_header("Content-Type", "application/json")
+            .with_body(
+                serde_json::json!({
+                    "uri": "at://did:plc:x/app.bsky.feed.post/rk",
+                    "cid": "bafyreiexample"
+                })
+                .to_string(),
+            )
+            .expect(1)
+            .create_async()
+            .await;
+
+        let expired = jwt_with_exp(chrono::Utc::now().timestamp() - 10);
+        let provider = Arc::new(ExpiringSessionProvider {
+            access: expired,
+            stored: std::sync::Mutex::new(vec![]),
+        });
+        let client =
+            PdsClient::new(server.url(), "admin-token").with_session_provider(provider.clone());
+
+        client
+            .create_record("did:plc:x", "app.bsky.feed.post", &serde_json::json!({}))
+            .await
+            .expect("write should succeed with a proactively refreshed token");
+
+        refresh.assert_async().await;
+        ok.assert_async().await;
     }
 
     #[tokio::test]
