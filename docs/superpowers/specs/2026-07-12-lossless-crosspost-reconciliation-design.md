@@ -1,7 +1,8 @@
 # Lossless Divine-to-ATProto Crosspost Reconciliation RFC
 
 **Date:** 2026-07-12
-**Status:** Approved product direction; design-review revision 2
+**Status:** Execution authorized by product owner after design-gate escalation;
+remaining gate findings are mandatory implementation prerequisites below
 
 ## Problem
 
@@ -238,12 +239,15 @@ Cloud migration requirements.
 Lawful vanish/erasure is the retention exception. Before payload purge,
 Funnelcake sends a durable purge command containing affected IDs/coordinates to
 the bridge; the bridge fences them, converges AT deletion, and acknowledges.
-Funnelcake then removes payload rows from `events_local`,
-`bridge_source_events_v1`, and every derived raw/read model using its bounded
-purge workflow. A minimal access-controlled erasure tombstone/digest remains so
-replay cannot recreate content. If remote deletion cannot complete, the purge is
-attention-required and follows the disconnect hard-deadline policy. Adding the
-new table to `vanish.rs` and testing the cascade is a release gate.
+The bridge acknowledgement requires AT deletion status plus scrubbing PostgreSQL
+source payload/prepared records, media caches/artifacts, operational exports, and
+encrypted data keys. Backups use bounded expiry or cryptographic erasure; only a
+minimal access-controlled anti-replay digest/tombstone remains. Funnelcake then
+removes payload rows from `events_local`, `bridge_source_events_v1`, and every
+derived raw/read model using its bounded purge workflow. If remote deletion
+cannot complete, the purge is attention-required and follows the disconnect
+hard-deadline policy. Adding the new table to `vanish.rs` and testing the full
+bridge/Funnelcake/PDS cascade is a release gate.
 
 ### Versioned pagination protocol
 
@@ -267,8 +271,10 @@ it before zero-loss/caught-up evidence is accepted.
 
 The token binds a random scan ID, author, kinds, ascending direction, after
 tuple, upper tuple, page-limit ceiling, issued time, expiry, and signing-key ID.
-Parallel timestamp/ID fields are not accepted. The current signing key and one
-bounded previous key are accepted; signatures are checked in constant time.
+Parallel timestamp/ID fields are not accepted. Verification keys are retained
+for at least token TTL plus renewal grace plus clock skew (minimum 55 days under
+the defaults); signatures are checked in constant time. Earlier key retirement
+returns `SOURCE_RESTART_REQUIRED`, not a renewable-expiry response.
 
 Every page executes the exact ascending predicate:
 
@@ -381,12 +387,19 @@ translation_states
   PK (account_id, nostr_event_id)
 ```
 
-Funnelcake's moderation action/audit stream is the authoritative moderation
-input. `GET /internal/v1/bridge/moderation-decisions` uses the same workload
-identity/error envelope and exposes append-only block/unblock decisions by
-monotonic `moderation_version`, event/coordinate, policy reason, and effective
-time. It has resumable opaque paging and a finite upper version. Divine-sky
-persists `moderation_states` plus a durable
+Funnelcake adds an authoritative append-only moderation log with a transactional
+monotonic version allocator. Every current mutation path dual-writes before
+acknowledgement. The log covers event, coordinate, pubkey ban/suspension,
+privacy, tag policy, NSFW hard block, quarantine, and vanished-author scopes;
+configuration distinguishes hard crosspost blocks from transferable labels.
+Bootstrap snapshots all effective tables/sets into a finite version and proves
+subject/action count and digest equality before ready.
+
+`GET /internal/v1/bridge/moderation-decisions` uses the source workload identity
+and exposes apply/clear decisions by version, action ID, scope, subject, reason,
+and effective time. It reuses the full source cursor renewal/error contract with
+`(moderation_version,action_id)` ordering. Same-version ties use action ID and
+hard-block uncertainty fails closed. Divine-sky persists `moderation_states` plus a durable
 checkpoint, increments every affected event/coordinate `desired_state_version`,
 and deep reconciliation compares its checkpoint with Funnelcake. Missed
 notifications therefore self-repair; block schedules deletion and unblock
@@ -454,8 +467,8 @@ For each source page, one PostgreSQL transaction:
 2. inserts immutable `source_events` and every deletion target;
 3. recomputes affected coordinate, tombstone, moderation, and eligibility
    states, incrementing only affected desired-state versions;
-4. inserts/cancels derived jobs idempotently; archive publish jobs are blocked
-   by this scan ID and cannot be claimed yet;
+4. inserts/cancels derived jobs idempotently; every publish claim path checks the
+   account archive-epoch gate, while compensating deletes remain claimable;
 5. records shadow differences when in shadow mode;
 6. updates the scan's after tuple and per-run counters;
 7. commits.
@@ -464,10 +477,12 @@ No source mutation, job, or cursor becomes visible alone. A crash before commit
 replays the page; a crash after commit resumes after it. Reaching the captured
 upper tuple promotes the account high-water in a separate compare-and-swap that
 requires the same scan ID, upper tuple, completed status, and account lifecycle
-epoch. For an archive, the same completion transaction
-unblocks only jobs whose desired-state version still matches after all pages,
-then starts publication convergence. A later-page deletion can therefore never
-race an earlier-page archive publish.
+epoch. Archive completion does not open the account gate. It first runs a
+settlement overlap traversal after the indexing-delay window, then a full deep
+proof traversal for initial import, each including the required moderation
+checkpoint. Only a CAS over lifecycle epoch, archive epoch, source build,
+moderation upper version, and zero unresolved behind-cursor facts opens
+publication for every path. Late deletion therefore cannot race archive publish.
 
 Fault injection covers a crash after every numbered write and before/after both
 transaction commits. In the page `A,B,C` case, a crash after deriving work for
@@ -505,39 +520,50 @@ Before any media upload or PDS record call, one PostgreSQL transaction inserts:
 ```text
 publication_intents
   account_id
+  lifecycle_epoch
   nostr_event_id
   repo_did
   collection          app.bsky.feed.post
   rkey                standards-compliant TID allocated once
-  expected_record_hash
+  source_fingerprint
+  prepared_record     nullable canonical DAG-JSON after media resolution
+  expected_record_hash nullable until prepared_record is persisted
   desired_state_version
-  status              reserved | written | mapped | delete_pending | deleted
-  UNIQUE (account_id, nostr_event_id)
+  status              reserved | media_ready | prepared | written | mapped |
+                      delete_pending | deleted
+  UNIQUE (account_id, lifecycle_epoch, nostr_event_id)
   UNIQUE (repo_did, collection, rkey)
 ```
 
 The standard TID generator runs under the uniqueness constraint and the intent
 commits before the remote side effect. Original Nostr time remains in record
-`createdAt`; the TID represents bridge publication time. All retries use
-`putRecord` with the persisted TID. Queue deletion cannot erase the intent.
+`createdAt`; the TID represents bridge publication time. Media job ID, resulting
+blob/CID, and caption outcomes are persisted idempotently in `media_ready`.
+Only then does a CAS persist the exact canonical record plus its hash and advance
+to `prepared`; `written` is impossible without both. Queue deletion cannot erase
+the intent or prepared artifact.
 
-Before first `putRecord`, `getRecord` must be absent; an unexpected existing
-record is `REMOTE_RKEY_CONFLICT` / `needs_review` and is not overwritten. A
-crash after PDS commit but before local mapping calls `getRecord` at the reserved
-URI and compares canonical DAG-JSON with a fresh deterministic translation and
-the stored expected hash. Equality advances intent/mapping atomically; absence
-retries `putRecord`; different content is `REMOTE_RECORD_DIVERGED` /
-`needs_review` and is not automatically overwritten/deleted.
+The compatibility release must prove the deployed rsky PDS atomically supports
+`com.atproto.repo.createRecord` with a caller-supplied TID rkey. The first remote
+write uses that create-only operation, not a `getRecord`/`putRecord` TOCTOU
+sequence. `RecordAlreadyExists` and a lost response recover with `getRecord` at
+the reserved URI and equality against the persisted exact record/hash. Absence
+retries the same supplied-rkey create. Different content is
+`REMOTE_RECORD_DIVERGED` / `needs_review` and is not overwritten or deleted.
+If rsky fails this contract test, intent publication remains disabled until an
+atomic create-only or equivalent `swapRecord` CAS is implemented and tested.
 
 Existing TID mappings remain valid and are materialized as already-mapped
 intents. Reconciliation never allocates a second intent for a mapped event.
 
-Legacy `createRecord` and intent-based writers are never active concurrently.
+Unfenced legacy auto-rkey `createRecord` and supplied-TID intent writers are never
+active concurrently.
 Accounts carry `publication_mode = legacy | draining | intent_v1`. During
-dual-read/write rollout every account remains legacy. Cutover sets `draining`,
-stops legacy claims, drains/expires every legacy lease, verifies zero in-flight
-legacy writes, scales old pods to zero, deploys only fence-aware binaries, then
-atomically sets `intent_v1`. Rollback may use only a compatible binary preserving
+dual-read/write rollout every account remains legacy. First deploy a compatibility
+release whose legacy claim SQL enforces a DB-backed global/account writer epoch,
+verify zero unfenced replicas remain, then set `draining`, stop claims, drain or
+expire every old lease/side effect, and atomically set `intent_v1`. Rollback may
+use only a compatible binary preserving
 reserved intents; rolling back to unfenced `createRecord` is forbidden. A
 mixed-version fault test pauses after PDS commit and proves a legacy claimer
 cannot create a second TID record.
@@ -572,7 +598,17 @@ continues to permit it. Backoff is exponential with full jitter, honors
 per-PDS circuit breaking and per-account fairness. Attempt count never changes
 the disposition.
 
-Authentication/session refresh CAS compares account ID, DID, session version,
+Opt-in/provision/disable/disconnect accept identity only from a Keycast-signed,
+short-lived lifecycle assertion whose claims bind full Nostr pubkey, account ID,
+operation, nonce, audience, and expiry. Gateway and atbridge verify issuer/JWKS,
+signature, claims, and nonce, and derive identity from claims rather than request
+bodies. Provisioning verifies the returned PDS session DID equals the account
+mapping. Caller-selected identities and replayed assertions fail closed.
+
+Per-repo writes require the verified per-account session; shared-token fallback
+is removed. Create/refresh response DID and token subject must match the account;
+absence is retryable and mismatch is `needs_review`. Authentication/session
+refresh CAS compares account ID, DID, session version,
 active-session tombstone, and account lifecycle epoch. Disconnect tombstones and
 increments the lifecycle epoch in one transaction before cleanup, so an
 in-flight refresh cannot recreate credentials. Sessions are envelope-encrypted
@@ -581,9 +617,11 @@ at rest with GCP KMS through workload identity and never logged.
 Disconnect states are `active -> disconnecting -> disconnected` or
 `cleanup_incomplete`. Entering `disconnecting` immediately fences new work,
 cancels scans, tombstones refresh, and queues deletion of every bridge-created
-record. A narrowly scoped encrypted cleanup session may remain for at most seven
-days and can only execute `getRecord`/`deleteRecord`; publishing code cannot read
-it. Successful deletion destroys it and reports `disconnected`. Revoked
+record. A cleanup session may remain for at most seven days encrypted under a
+distinct KMS key and exposed only to a separate DB role/view, workload identity,
+delete-only worker image, and client implementing only `getRecord`/`deleteRecord`;
+publication pods cannot decrypt it. Successful deletion destroys it and reports
+`disconnected`. Revoked
 credentials or PDS outage keep retrying and report `disconnecting`; after seven
 days the account becomes `cleanup_incomplete` for operator/PDS-admin recovery.
 A hard 30-day deadline destroys remaining credential ciphertext even if remote
@@ -596,7 +634,8 @@ new archive can publish.
 Production media retrieval is restricted to configured Divine Blossom HTTPS
 origins and the exact `x`-tag object path. It permits no URL credentials, query
 override, arbitrary port, or noncanonical hash. Every DNS resolution and at most
-three redirects are revalidated; loopback, link-local, RFC1918, metadata, and
+three same-origin redirects are revalidated; the client connects to the validated
+pinned IP and verifies the peer address. Loopback, link-local, RFC1918, metadata, and
 other private ranges are blocked. Defaults are a 2,048-byte URL, 256-KiB event,
 256 tags, 16 values/tag, 8-KiB tag value, five-second connect timeout, 120-second
 total timeout, and byte/decompression ceiling of the lesser of 100 MiB and the
@@ -753,7 +792,10 @@ team, severity, and safe repair operation.
 3. **Dual-read/write:** new binaries materialize source/state for all new work
    while preserving legacy queue behavior. Feature flags keep intent-based
    writes, scans, and repair disabled.
-4. **Session encryption expand:** add ciphertext, encrypted data-key, KMS key
+4. **Session compatibility fence:** deploy a release whose refresh/store query
+   requires session version, lifecycle epoch, active tombstone, and writer epoch;
+   verify zero unconditional plaintext writers/pods remain before backfill.
+5. **Session encryption expand:** add ciphertext, encrypted data-key, KMS key
    version, session version, lifecycle epoch, and tombstone columns. New binaries
    dual-read plaintext/ciphertext but write encrypted form plus legacy plaintext
    only while legacy pods remain. Drain/fence old writers; then a resumable KMS
@@ -764,18 +806,18 @@ team, severity, and safe repair operation.
    binary; afterward only encryption-aware rollback is allowed. Key rotation
    writes a new version by CAS and retains the prior KMS decrypt version until
    all rows and backups pass verification.
-5. **Explicit data migration job:** a separately invoked command acquires a
+6. **Explicit data migration job:** a separately invoked command acquires a
    migration lease, reads a stable key range in bounded transactions, checkpoints
    by queue primary key, and writes classification results idempotently. It never
    runs during pod startup.
-6. **Shadow:** run complete source/state comparisons without repair, validate
+7. **Shadow:** run complete source/state comparisons without repair, validate
    digests, pagination, SLO metrics, and capacity.
-7. **Enable by slice:** intent-based AT writes, lossless live discovery, one
+8. **Enable by slice:** intent-based AT writes, lossless live discovery, one
    test archive, Rabble archive/repair, scheduled reconciliation, then cohorts.
-8. **Validate constraints:** after all writers are compatible and backfill is
+9. **Validate constraints:** after all writers are compatible and backfill is
    complete, validate foreign keys/checks/NOT NULL constraints without coupling
    rollout availability to data volume.
-9. **Contract:** remove legacy cursor/job interpretation only after a full deep
+10. **Contract:** remove legacy cursor/job interpretation only after a full deep
    reconciliation and rollback window.
 
 Old and new binaries may overlap only in explicitly dual-compatible phases.
@@ -839,12 +881,11 @@ The workspace standardizes on `cargo-llvm-cov` and CI runs
 target/llvm-cov/lcov.info`, followed by `scripts/check-coverage-thresholds`.
 `.coverage-thresholds.json` is versioned as
 `{"version":1,"global":{"lines":N,"functions":N,"regions":N},"modules":{...}}`.
-The initial global values are the measured pre-change baseline and may not
-decrease; newly introduced reconciliation/state modules require at least 85%
-lines/functions/regions. The repository AGENTS policy requires coverage for
-non-trivial changes but does not state a 100% numeric threshold, so this RFC does
-not invent one. Narrow generated/unreachable-code exclusions require an inline
-justification and explicit JSON entry. Coverage supplements fault/integration
+The first implementation prerequisite creates the checker, threshold file, and
+CI wiring. The active repository AGENTS policy requires 100% coverage, so every
+changed/new Rust module must report 100% lines/functions/regions; generated or
+provably unreachable-code exclusions require an inline justification and
+explicit reviewed JSON entry. Coverage supplements fault/integration
 tests. PostgreSQL tests create isolated per-test schemas/databases; ClickHouse
 tests use isolated table names and deterministic cleanup.
 
