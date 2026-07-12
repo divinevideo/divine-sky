@@ -60,7 +60,10 @@ if [[ -z "$diff_path" ]]; then
   [[ -n "$base_ref" ]] || { echo "--base or --diff is required" >&2; exit 2; }
   tmp_diff="$(mktemp)"
   trap 'rm -f "$tmp_diff"' EXIT
-  git -C "$repo_root" diff --unified=0 "$base_ref"...HEAD -- '*.rs' >"$tmp_diff"
+  # CI provides the exact pull-request base SHA. Compare the two trees
+  # directly so the gate also works with actions/checkout's depth-1 clone,
+  # where a three-dot merge-base walk is unavailable.
+  git -C "$repo_root" diff --unified=0 "$base_ref" HEAD -- '*.rs' >"$tmp_diff"
   diff_path="$tmp_diff"
 fi
 
