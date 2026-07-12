@@ -373,6 +373,71 @@ fn queue_and_backfill_queries_follow_scheduler_contract() {
 }
 
 #[test]
+fn upload_quota_errors_defer_without_spending_attempts() {
+    // Bluesky's video service caps uploads per DID per day. A catalog backfill
+    // larger than the cap must park and resume next window, not burn its retry
+    // budget and terminally fail.
+    let _guard = test_db_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let database_url = test_database_url();
+    reset_database(&database_url);
+    let mut conn =
+        PgConnection::establish(&database_url).expect("test database should be reachable");
+
+    let created_at = DateTime::parse_from_rfc3339("2024-01-01T00:00:00Z")
+        .unwrap()
+        .with_timezone(&Utc);
+    enqueue_publish_job(
+        &mut conn,
+        &NewPublishJob {
+            nostr_event_id: "evt-quota",
+            nostr_pubkey: "npub1alice",
+            event_created_at: created_at,
+            event_payload: json!({"id": "evt-quota"}),
+            job_source: PublishJobSource::Live.as_str(),
+            state: "pending",
+        },
+    )
+    .expect("job should enqueue");
+
+    let claimed = claim_next_live_job(&mut conn, "worker-a", Utc::now() + Duration::minutes(5))
+        .expect("claim should work")
+        .expect("pending job should be claimable");
+    let attempt_after_claim = claimed.attempt;
+
+    let quota_error = "failed to upload to video service: uploadVideo failed (401): \
+{\"jobStatus\":{\"error\":\"daily_vid_limit_exceeded\"}}";
+    let before = Utc::now();
+    let deferred = mark_publish_job_failed(&mut conn, "evt-quota", quota_error)
+        .expect("quota failure should be recorded");
+
+    // Parked, not counted: the attempt budget is untouched...
+    assert_eq!(
+        deferred.attempt, attempt_after_claim,
+        "a quota throttle must not spend an attempt"
+    );
+    // ...the job stays reclaimable (never terminal)...
+    assert!(deferred.completed_at.is_none());
+    // ...and it is held off for hours rather than seconds.
+    let lease = deferred
+        .lease_expires_at
+        .expect("quota deferral must set a lease");
+    assert!(
+        lease > before + Duration::hours(2),
+        "quota deferral should park the job for hours, got {lease}"
+    );
+
+    // Until the lease expires it must not be claimed again.
+    assert!(
+        claim_next_live_job(&mut conn, "worker-b", Utc::now() + Duration::minutes(5))
+            .expect("claim should work")
+            .is_none(),
+        "a quota-deferred job must not be reclaimed before its window"
+    );
+}
+
+#[test]
 fn failed_jobs_back_off_and_terminalize_after_max_attempts() {
     let _guard = test_db_lock()
         .lock()
