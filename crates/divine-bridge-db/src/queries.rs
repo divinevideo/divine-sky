@@ -742,6 +742,17 @@ pub fn mark_publish_job_completed(
 /// Maximum failed attempts before a publish job is terminally failed.
 const MAX_PUBLISH_JOB_ATTEMPTS: i32 = 20;
 /// Upper bound on the exponential retry backoff for failed publish jobs.
+/// How long to park a job that hit the video service's per-DID daily upload
+/// quota. Comfortably inside a day so a job retries in the next window without
+/// hammering the service meanwhile.
+const UPLOAD_QUOTA_RETRY_SECS: i64 = 3 * 60 * 60;
+
+/// The video service reports its per-DID daily cap as `daily_vid_limit_exceeded`
+/// (inside an HTTP 401 body, confusingly). Treat it as a throttle, not a defect.
+fn is_upload_quota_error(error_msg: &str) -> bool {
+    error_msg.contains("daily_vid_limit_exceeded")
+}
+
 const MAX_PUBLISH_JOB_BACKOFF_SECS: i64 = 600;
 
 /// Mark a publish job attempt as failed.
@@ -758,8 +769,29 @@ pub fn mark_publish_job_failed(
 ) -> Result<PublishJob> {
     let existing = get_publish_job(conn, nostr_event_id)?
         .ok_or_else(|| anyhow!("publish job missing for {nostr_event_id}"))?;
-    let attempt = existing.attempt.saturating_add(1);
     let now = Utc::now();
+
+    // A throttle is not a failure: Bluesky's video service caps uploads per DID
+    // per day, and past the cap every upload is rejected. Counting those toward
+    // the attempt budget would terminally fail a large catalog long before the
+    // quota resets. Park the job until the next window WITHOUT spending an
+    // attempt, so backfills drain themselves across days.
+    if is_upload_quota_error(error_msg) {
+        let result = diesel::update(publish_jobs::table.find(nostr_event_id))
+            .set((
+                publish_jobs::state.eq(PublishState::Failed.as_str()),
+                publish_jobs::error.eq(Some(error_msg.to_string())),
+                publish_jobs::lease_expires_at.eq(Some(
+                    now + chrono::Duration::seconds(UPLOAD_QUOTA_RETRY_SECS),
+                )),
+                publish_jobs::completed_at.eq(None::<DateTime<Utc>>),
+                publish_jobs::updated_at.eq(now),
+            ))
+            .get_result::<PublishJob>(conn)?;
+        return Ok(result);
+    }
+
+    let attempt = existing.attempt.saturating_add(1);
 
     if attempt >= MAX_PUBLISH_JOB_ATTEMPTS {
         let result = diesel::update(publish_jobs::table.find(nostr_event_id))
