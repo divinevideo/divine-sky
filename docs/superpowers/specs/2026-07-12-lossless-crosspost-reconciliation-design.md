@@ -26,7 +26,7 @@ The authoritative chain is:
 ```text
 verified Nostr source facts
         -> resolved source/eligibility state
-        -> deterministic AT record
+        -> durably reserved AT record identity
 ```
 
 `publish_jobs` is a rebuildable execution queue. It is never authoritative
@@ -39,21 +39,44 @@ When a Divine user connects ATProto distribution:
 - connection completes immediately and archive import begins automatically;
 - the account exposes importing, caught-up, or attention-required state to
   authorized support tooling;
-- the user's complete retained Divine video archive imports asynchronously;
+- every eligible, currently effective video in the user's retained Divine
+  archive imports asynchronously;
 - AT feed records use the original Nostr `created_at` as the record's
   `createdAt`; AT repository commit and AppView index times remain later and are
   not backdated;
 - every future eligible post eventually publishes without manual replay;
 - deleted, superseded, disabled, opted-out, or moderation-blocked posts do not
   remain published;
-- disabling or disconnecting crosspost deletes existing bridge-created AT
-  records, clears bridge credentials, and prevents resurrection;
+- disabling or disconnecting crosspost fences publication immediately, then
+  deletes existing bridge-created AT records and clears bridge credentials
+  through the disconnect state machine below;
 - recovery continues across bridge, database, PDS, media-service, and source
   API outages.
 
-Archive completeness is bounded by the canonical source's retention contract.
-The new bridge source retains all verified relevant signed events indefinitely;
-if that contract ever changes, the product and SLO language must change first.
+Archive completeness is bounded by the canonical source's retention contract
+and the supported-media envelope. Funnelcake's existing `nostr.events_local`
+table is the pre-deployment historical source: it stores one raw signed row per
+event ID without a TTL. The new bridge table is an optimized read model backfilled
+from that raw table, not a replacement source of truth. Live relay ingestion
+dual-writes through the same verified-event path after cutover.
+
+The retained boundary begins with the earliest row present in `events_local`;
+Divine does not claim recovery for events never ingested there. The source
+backfill re-verifies signatures/IDs and compares per-author/kind/day counts plus
+deterministic ID digests between `events_local` and the new table.
+Unverifiable rows are quarantined by ID and reported; any count/digest gap marks
+the source build incomplete and blocks archive rollout/caught-up claims. The
+bridge-source retention contract is indefinite except for lawful erasure, which
+uses the explicit purge protocol below. If source retention changes, product and
+SLO language must change first.
+
+The initial supported-media envelope is a valid kind `34235`/`34236` event with
+one canonical media reference on a configured Divine Blossom HTTPS origin, a
+valid lowercase SHA-256 `x` tag matching fetched bytes, and a source MIME in the
+reviewed transcoder allowlist (`video/mp4`, `video/quicktime`, or `video/webm`).
+The target video service transcodes accepted input to its supported AT format.
+Other otherwise-valid videos are typed `UNSUPPORTED_MEDIA`, visible as archive
+exceptions, and become reconsiderable when `eligibility_policy_version` changes.
 
 ### Effective archive semantics
 
@@ -69,7 +92,7 @@ not every historical edit as a separate Bluesky post:
   not published;
 - all valid kind `5` `e` and `a` targets are processed, not only the first tag.
 
-Archive discovery resolves the entire finite snapshot, including deletions and
+Archive discovery resolves the entire finite bounded traversal, including deletions and
 supersession, before publication convergence begins. Historical content that was
 already deleted therefore does not briefly appear during import.
 
@@ -91,7 +114,7 @@ uses the same versioned `EligibilityDecision` function. A source event is
 8. its media passes immutable origin, type, size, hash, and safety policy.
 
 The result stores `eligibility_policy_version`, a stable machine reason code,
-and an account `eligibility_generation`.
+the account lifecycle epoch, and a per-event/coordinate desired-state version.
 
 Outcomes are:
 
@@ -129,7 +152,7 @@ or user media URLs.
 
 1. Every verified source fact remains queryable from the canonical append-only
    source and is eventually compared with bridge state.
-2. Every eligible effective event has exactly one deterministic AT record or a
+2. Every eligible effective event has exactly one durably reserved AT record or a
    durable non-terminal retry.
 3. A source checkpoint advances only in the same PostgreSQL transaction that
    persists every source fact, deletion edge, resolution change, and derived
@@ -157,9 +180,9 @@ deletion and replacement are separate facts, not ClickHouse mutations.
 
 The additive `nostr.bridge_source_events_v1` table contains typed columns for
 `pubkey FixedString(64)`, `kind UInt32`, `created_at DateTime`,
-`event_id FixedString(64)`, verified signed payload, ingestion time, and
-verification version. It uses a SharedMergeTree-compatible MergeTree family
-engine and:
+`event_id FixedString(64)`, verified signed payload, `source_indexed_at`, a
+monotonic per-copy `ingest_version`, and verification version. It uses
+`ReplacingMergeTree(ingest_version)` and:
 
 ```sql
 ORDER BY (pubkey, kind, created_at, event_id)
@@ -181,11 +204,46 @@ validated with `EXPLAIN indexes = 1` and representative production-shaped data.
 
 Funnelcake ingestion appends every verified kind `34235`, `34236`, and `5`
 event before public moderation/deletion filtering. Existing deduplicated video
-snapshots are neither the source nor a backfill input. The migration is
-additive/idempotent, uses one logical object per DDL statement, does not use
-`ON CLUSTER` or multi-table rename, and uses `SET alter_sync = 2` for metadata
-ALTERs and `SET mutations_sync = 2` for any bounded materialization. This is
-consistent with the repository's ClickHouse Cloud migration requirements.
+snapshots are neither the source nor a backfill input. Exact event-ID audits use
+the existing `relay_events_by_id` model; the new table receives a benchmarked
+event-ID bloom index only if `EXPLAIN indexes = 1` demonstrates a need.
+
+Cutover deliberately tolerates duplicate copies without losing writes:
+
+1. create the target table;
+2. create its materialized view from `events_local` for new relevant rows;
+3. capture a finite backfill upper `indexed_at`/ID tuple;
+4. copy raw rows through that upper in resumable batches;
+5. verify per-author/kind/day ID counts and digests while the view remains live;
+6. mark the source API ready only after verification succeeds.
+
+`bridge_source_builds` durably stores build ID, captured raw upper tuple, last
+raw ID checkpoint, rows copied/quarantined, source/target counts and digests,
+verification version, completion time, and ready flag. Each copy batch and its
+checkpoint are one acknowledged operation; replay is idempotent by event ID.
+
+The API deduplicates every narrowed author/kind page by event ID using the latest
+`ingest_version` (`argMax` or an equivalent tested query). MV/backfill overlap
+and replay therefore return one response row even before background merges.
+Conflicting bytes for one ID fail verification and quarantine the ID. Live
+inserts are batched, or use `async_insert=1` with
+`wait_for_async_insert=1`; unacknowledged insertion is forbidden.
+
+The migration is additive/idempotent, uses one logical object per DDL statement,
+does not use `ON CLUSTER`, `OPTIMIZE ... FINAL`, or multi-table rename, and uses
+`SET alter_sync = 2` for metadata ALTERs and `SET mutations_sync = 2` for any
+bounded materialization. This is consistent with the repository's ClickHouse
+Cloud migration requirements.
+
+Lawful vanish/erasure is the retention exception. Before payload purge,
+Funnelcake sends a durable purge command containing affected IDs/coordinates to
+the bridge; the bridge fences them, converges AT deletion, and acknowledges.
+Funnelcake then removes payload rows from `events_local`,
+`bridge_source_events_v1`, and every derived raw/read model using its bounded
+purge workflow. A minimal access-controlled erasure tombstone/digest remains so
+replay cannot recreate content. If remote deletion cannot complete, the purge is
+attention-required and follows the disconnect hard-deadline policy. Adding the
+new table to `vanish.rs` and testing the cascade is a release gate.
 
 ### Versioned pagination protocol
 
@@ -200,12 +258,17 @@ It requires service identity, an authorized bridge audience, a full lowercase
 within `1..=500`. It returns complete signed events only after source
 verification.
 
-The first request omits `cursor`. The server atomically determines the greatest
-available `(created_at,event_id)` for the author/kinds and returns it inside an
-opaque, signed/versioned `v1` cursor token. That tuple defines a finite snapshot.
-The token binds author, kinds, ascending direction, after tuple, upper tuple,
-page limit ceiling, and expiry. Parallel timestamp/ID fields are not accepted;
-malformed, mixed-author, expired, or partially supplied state is rejected.
+The first request omits `cursor`. The server determines the greatest available
+`(created_at,event_id)` for the author/kinds and returns it inside an opaque,
+signed/versioned `v1` cursor token. That tuple defines a finite **bounded
+traversal**, not a ClickHouse MVCC snapshot. A row arriving later behind the page
+cursor may be absent from this traversal; overlap and deep traversal must find
+it before zero-loss/caught-up evidence is accepted.
+
+The token binds a random scan ID, author, kinds, ascending direction, after
+tuple, upper tuple, page-limit ceiling, issued time, expiry, and signing-key ID.
+Parallel timestamp/ID fields are not accepted. The current signing key and one
+bounded previous key are accepted; signatures are checked in constant time.
 
 Every page executes the exact ascending predicate:
 
@@ -219,24 +282,41 @@ ORDER BY created_at ASC, event_id ASC
 LIMIT requested_limit + 1
 ```
 
-For an initial scan, `after` is negative infinity. The response contains:
+For an initial scan, `after` is negative infinity. Continuation repeats author,
+kinds, `limit`, and the returned cursor. `limit` may decrease but cannot exceed
+the token ceiling. The response contains:
 
 ```text
 events             at most requested_limit events
-next_cursor        opaque v1 token, absent only at snapshot completion
+next_cursor        opaque v1 token, absent only at traversal completion
 snapshot_upper     diagnostic tuple, constant for the scan
 has_more           true iff the extra row exists within the upper bound
 ```
 
-`next_cursor.after` is the last returned tuple. An empty page with `has_more`
-false terminates. Returning an empty page with `has_more` true is a protocol
-error and retryable. Legacy public timestamp cursors remain unchanged and are
-never mixed with the internal protocol.
+`next_cursor.after` is the last returned tuple. For an empty archive, `events`
+is empty, `snapshot_upper` and `next_cursor` are absent, and `has_more=false`.
+An empty non-initial page with `has_more=false` terminates. Empty plus
+`has_more=true` is `SOURCE_PROTOCOL_ERROR` and retryable.
+
+Tokens normally expire after 24 hours and are persisted with the bridge scan.
+`POST /internal/v1/bridge/source-scans/{scan_id}/renew` accepts a valid expired
+token within a 30-day renewal grace plus the last persisted token. It reissues
+only the same author/kinds/direction/upper tuple and the signed token's after
+tuple; callers cannot supply raw tuples. Beyond grace, the traversal restarts
+idempotently and must still meet the archive completion bound.
+
+Invalid service token is `401 SOURCE_UNAUTHENTICATED`; unauthorized identity is
+`403 SOURCE_FORBIDDEN`; malformed/binding mismatch is
+`400 SOURCE_CURSOR_INVALID`; normal expiry is `409 SOURCE_CURSOR_EXPIRED` with
+`retryable=true`; rate limit is `429` with `Retry-After`; source failure is
+`503`, retryable. JSON errors are
+`{code,message,retryable,request_id}` with safe messages. Legacy public timestamp
+cursors remain unchanged and are never mixed with the internal protocol.
 
 The raw source is updated continuously rather than through the five-minute
 public snapshot refresh/cache path, so it can support the five-minute live SLO.
 API and ClickHouse integration tests prove the tuple predicates, token binding,
-same-second behavior, late arrivals, and finite upper bound.
+same-second behavior, late arrivals, cursor renewal, and finite upper bound.
 
 ## Divine-Sky Durable State
 
@@ -265,11 +345,27 @@ source_event_targets
   PK (deletion_event_id, target_type, target identity)
 ```
 
+Complete payload columns are readable only by the atbridge workload DB role;
+support APIs never return them. Database/ClickHouse backups containing payloads
+remain inside the production trust boundary with the same encrypted retention
+and lawful-erasure process. Logs, traces, metrics, and audit samples contain
+full event IDs but no payload/media URL/session ciphertext.
+
 An existing event ID with different bytes/pubkey is a security error and cannot
 overwrite the stored fact. All `e` and syntactically valid `a` tags are expanded
 into target rows. A deletion is effective only when its verified signer owns the
 target event/coordinate. Unknown targets remain durable and are resolved when
 the target later arrives.
+
+An `e` target cancels that exact event regardless of arrival order. An `a`
+target cancels same-author coordinate revisions with
+`revision.created_at <= deletion.created_at`; a later signed revision recreates
+the coordinate. For multiple coordinate deletions, each revision is cancelled
+when any owned tombstone is at or after its timestamp. At equal timestamps the
+deletion wins, independent of event-ID ordering. Late arrival recomputes the
+coordinate from all revisions and tombstones, so observation order cannot change
+the result. Every syntactically valid target is retained even when its kind is
+not yet translatable, allowing later policy versions to resolve it.
 
 Resolved state is separate from immutable facts:
 
@@ -280,14 +376,29 @@ translation_states
   state
   reason_code
   eligibility_policy_version
-  eligibility_generation
+  desired_state_version
   last_evaluated_at
   PK (account_id, nostr_event_id)
 ```
 
+Funnelcake's moderation action/audit stream is the authoritative moderation
+input. `GET /internal/v1/bridge/moderation-decisions` uses the same workload
+identity/error envelope and exposes append-only block/unblock decisions by
+monotonic `moderation_version`, event/coordinate, policy reason, and effective
+time. It has resumable opaque paging and a finite upper version. Divine-sky
+persists `moderation_states` plus a durable
+checkpoint, increments every affected event/coordinate `desired_state_version`,
+and deep reconciliation compares its checkpoint with Funnelcake. Missed
+notifications therefore self-repair; block schedules deletion and unblock
+re-evaluates eligibility under the current policy.
+
 `record_mappings` has `UNIQUE(account_id, nostr_event_id)` and `UNIQUE(at_uri)`.
 `publish_jobs` has `UNIQUE(account_id, nostr_event_id)`, references the state it
-executes, and can be regenerated from eligible states without a mapping.
+executes, and stores desired operation `publish | delete`, claimed
+`desired_state_version`, and an optional blocking archive scan ID. It can be
+regenerated from eligible states without a mapping. Converting a completed
+publish into deletion increments the desired-state version and atomically
+upserts the row as runnable `delete` work.
 
 ### Scan state and atomic page commits
 
@@ -303,19 +414,48 @@ per-run counters, and status.
 discovery_state       pending | scanning | caught_up | attention_required
 convergence_state     pending | publishing | caught_up | attention_required
 last_scanned_created_at / last_scanned_event_id
-last_published_created_at / last_published_event_id
+last_published_created_at / last_published_event_id (diagnostic, not a watermark)
 last_reconciled_at
 lifetime_scan/publish counters
 last safe reason code and bounded diagnostic
-eligibility_generation
+account_lifecycle_epoch
 ```
+
+State transitions are derived from persisted counts, never from the greatest
+published tuple:
+
+- discovery is `pending` before a scan exists, `scanning` while a valid scan is
+  incomplete, and `caught_up` only after its upper-bound CAS plus a subsequent
+  overlap pass finds no behind-cursor arrivals;
+- convergence is `pending` before archive release, `publishing` while any
+  snapshot-scoped eligible item lacks a mapping or any publish/delete work is
+  retryable, and `caught_up` only when eligible-unmapped, runnable publish, and
+  runnable delete counts are all zero;
+- either dimension becomes `attention_required` for `needs_review`, source
+  digest gaps, an expired scan beyond renewal grace, cleanup-incomplete state,
+  or retryable work older than the configured operator threshold (default 30
+  minutes live, 24 hours archive); a successful scan/repair plus zero remaining
+  triggering rows clears it;
+- rejected and cancelled rows are durable completed outcomes and do not prevent
+  caught-up. Rejected rows produce `caught_up_with_exceptions` in the combined
+  support status; cancelled rows do not;
+- combined status priority is `disconnecting/cleanup_incomplete`, then
+  `attention_required`, then `importing` if either dimension is not caught up,
+  then `caught_up_with_exceptions`, else `caught_up`;
+- an empty archive reaches both caught-up states with zero totals.
+
+Support progress includes snapshot/scan ID and discovered, effective, eligible,
+mapped, retryable, rejected, cancelled, needs-review, deletion-pending, and
+remaining counts, separated into current-run and lifetime totals.
 
 For each source page, one PostgreSQL transaction:
 
-1. locks the scan row and verifies lease/generation;
+1. locks the scan row and verifies lease/account lifecycle epoch;
 2. inserts immutable `source_events` and every deletion target;
-3. recomputes affected coordinate, tombstone, and eligibility states;
-4. inserts/cancels derived jobs idempotently;
+3. recomputes affected coordinate, tombstone, moderation, and eligibility
+   states, incrementing only affected desired-state versions;
+4. inserts/cancels derived jobs idempotently; archive publish jobs are blocked
+   by this scan ID and cannot be claimed yet;
 5. records shadow differences when in shadow mode;
 6. updates the scan's after tuple and per-run counters;
 7. commits.
@@ -323,8 +463,11 @@ For each source page, one PostgreSQL transaction:
 No source mutation, job, or cursor becomes visible alone. A crash before commit
 replays the page; a crash after commit resumes after it. Reaching the captured
 upper tuple promotes the account high-water in a separate compare-and-swap that
-requires the same scan ID, upper tuple, completed status, and eligibility
-generation. It then starts publication convergence for archive scans.
+requires the same scan ID, upper tuple, completed status, and account lifecycle
+epoch. For an archive, the same completion transaction
+unblocks only jobs whose desired-state version still matches after all pages,
+then starts publication convergence. A later-page deletion can therefore never
+race an earlier-page archive publish.
 
 Fault injection covers a crash after every numbered write and before/after both
 transaction commits. In the page `A,B,C` case, a crash after deriving work for
@@ -352,34 +495,70 @@ and configurable budgets, not an unverified account-count assumption.
 
 ## Exactly-Once AT Record Identity
 
-New bridge-created video records use `com.atproto.repo.putRecord` with a
-deterministic rkey derived from the complete Nostr event ID. The encoding is a
-versioned, ATProto-valid, collision-resistant textual representation of all 32
-event-ID bytes; the implementation must not truncate the ID. The repository is
-the connected account's verified DID, never a value from event content.
+The official [`app.bsky.feed.post` Lexicon](https://github.com/bluesky-social/atproto/blob/main/lexicons/app/bsky/feed/post.json)
+declares `key: "tid"`; generic record-key syntax alone is insufficient. A full
+Nostr event ID cannot be its rkey. Exactly-once identity therefore uses a durable
+publication intent, not a truncated/rehashed event ID.
 
-Therefore `(account DID, collection, deterministic rkey)` is the remote
-idempotency key. Retrying after a timeout or crash overwrites the same logical
-record with identical translated content. A crash after PDS commit but before
-the local mapping commit recovers by reading that deterministic record,
-verifying its embedded/source event identity, and inserting the missing mapping.
+Before any media upload or PDS record call, one PostgreSQL transaction inserts:
 
-Existing mappings with PDS-generated TID rkeys remain valid and are not moved.
-Before deterministic publication, the worker first checks for an existing local
-mapping. Migration/reconciliation never creates a deterministic replacement for
-an already mapped legacy event.
+```text
+publication_intents
+  account_id
+  nostr_event_id
+  repo_did
+  collection          app.bsky.feed.post
+  rkey                standards-compliant TID allocated once
+  expected_record_hash
+  desired_state_version
+  status              reserved | written | mapped | delete_pending | deleted
+  UNIQUE (account_id, nostr_event_id)
+  UNIQUE (repo_did, collection, rkey)
+```
+
+The standard TID generator runs under the uniqueness constraint and the intent
+commits before the remote side effect. Original Nostr time remains in record
+`createdAt`; the TID represents bridge publication time. All retries use
+`putRecord` with the persisted TID. Queue deletion cannot erase the intent.
+
+Before first `putRecord`, `getRecord` must be absent; an unexpected existing
+record is `REMOTE_RKEY_CONFLICT` / `needs_review` and is not overwritten. A
+crash after PDS commit but before local mapping calls `getRecord` at the reserved
+URI and compares canonical DAG-JSON with a fresh deterministic translation and
+the stored expected hash. Equality advances intent/mapping atomically; absence
+retries `putRecord`; different content is `REMOTE_RECORD_DIVERGED` /
+`needs_review` and is not automatically overwritten/deleted.
+
+Existing TID mappings remain valid and are materialized as already-mapped
+intents. Reconciliation never allocates a second intent for a mapped event.
+
+Legacy `createRecord` and intent-based writers are never active concurrently.
+Accounts carry `publication_mode = legacy | draining | intent_v1`. During
+dual-read/write rollout every account remains legacy. Cutover sets `draining`,
+stops legacy claims, drains/expires every legacy lease, verifies zero in-flight
+legacy writes, scales old pods to zero, deploys only fence-aware binaries, then
+atomically sets `intent_v1`. Rollback may use only a compatible binary preserving
+reserved intents; rolling back to unfenced `createRecord` is forbidden. A
+mixed-version fault test pauses after PDS commit and proves a legacy claimer
+cannot create a second TID record.
 
 ### Publication/deletion race protocol
 
-Every account eligibility change increments `eligibility_generation`. A worker
-claims work at generation `G`, then immediately before media upload and again
-before `putRecord` locks/re-reads account, source resolution, and tombstone state.
-If the current generation/state differs, it cancels without publication.
+Account lifecycle changes increment `account_lifecycle_epoch`; deletion,
+supersession, moderation, or policy resolution increments only the affected
+event/coordinate `desired_state_version`. A worker claims both values, then
+immediately before media upload and again before `putRecord` locks/re-reads
+account, source resolution, moderation, and tombstone state. If either differs
+or state/policy is not currently eligible, it cancels. Unrelated posts do not
+invalidate each other.
 
 The remote side effect cannot share a PostgreSQL transaction. After `putRecord`,
-mapping finalization performs a compare-and-swap against generation `G`. If it
-fails, it durably schedules deletion of the deterministic AT record. Deletion
-work is idempotent and remains pending until both mapping and deterministic
+mapping finalization atomically requires the claimed lifecycle epoch,
+desired-state version, current policy version, `state=eligible`, and absence of
+an effective tombstone/moderation block. If any predicate fails, it durably
+schedules deletion of the reserved AT record even without a local mapping.
+Deletion
+work is idempotent and remains pending until both mapping and reserved
 record absence are confirmed. Thus a publication that races deletion may appear
 briefly due to external consistency, but cannot survive reconciliation or be
 resurrected by retry.
@@ -393,39 +572,84 @@ continues to permit it. Backoff is exponential with full jitter, honors
 per-PDS circuit breaking and per-account fairness. Attempt count never changes
 the disposition.
 
-Authentication/session refresh uses compare-and-swap session versions so two
-workers cannot overwrite a newer rotation. Sessions are envelope-encrypted at
-rest with GCP KMS through workload identity, never logged, and removed on
-disconnect/account deletion. PDS account/session/DID are derived only from the
-verified account mapping.
+Authentication/session refresh CAS compares account ID, DID, session version,
+active-session tombstone, and account lifecycle epoch. Disconnect tombstones and
+increments the lifecycle epoch in one transaction before cleanup, so an
+in-flight refresh cannot recreate credentials. Sessions are envelope-encrypted
+at rest with GCP KMS through workload identity and never logged.
 
-Media retrieval uses an allowlisted Divine media service or an equivalent
-SSRF-safe fetcher: HTTPS only; allowed ports/origins; DNS resolution and every
-redirect revalidated; loopback, link-local, RFC1918, metadata, and other private
-ranges blocked; strict redirect, byte, duration, decompression, MIME, and
-dimension limits; content hash verification where supplied. Fetch failures that
-may recover are retryable; immutable policy violations are rejected.
+Disconnect states are `active -> disconnecting -> disconnected` or
+`cleanup_incomplete`. Entering `disconnecting` immediately fences new work,
+cancels scans, tombstones refresh, and queues deletion of every bridge-created
+record. A narrowly scoped encrypted cleanup session may remain for at most seven
+days and can only execute `getRecord`/`deleteRecord`; publishing code cannot read
+it. Successful deletion destroys it and reports `disconnected`. Revoked
+credentials or PDS outage keep retrying and report `disconnecting`; after seven
+days the account becomes `cleanup_incomplete` for operator/PDS-admin recovery.
+A hard 30-day deadline destroys remaining credential ciphertext even if remote
+cleanup is impossible, retaining only safe record URIs and audit state. The
+product reports that remote cleanup could not be confirmed rather than claiming
+success. Reconnect is rejected while cleanup is pending; after completion it
+creates a new lifecycle epoch. A changed DID always cleans the old DID before a
+new archive can publish.
+
+Production media retrieval is restricted to configured Divine Blossom HTTPS
+origins and the exact `x`-tag object path. It permits no URL credentials, query
+override, arbitrary port, or noncanonical hash. Every DNS resolution and at most
+three redirects are revalidated; loopback, link-local, RFC1918, metadata, and
+other private ranges are blocked. Defaults are a 2,048-byte URL, 256-KiB event,
+256 tags, 16 values/tag, 8-KiB tag value, five-second connect timeout, 120-second
+total timeout, and byte/decompression ceiling of the lesser of 100 MiB and the
+target PDS-advertised limit. MIME/dimensions are validated and SHA-256 must
+match. Recoverable fetch failures are retryable; immutable violations rejected.
 
 ## Operator and Support Interfaces
 
-Detailed account status and repair are not public metrics. An authenticated
-admin API behind the existing operator identity/access layer provides:
+The source API uses short-lived Google-signed GKE Workload Identity OIDC tokens.
+Funnelcake validates Google JWKS signature, exact issuer, exact per-environment
+audience `divine-funnelcake-bridge-source`, `exp`/`nbf` with bounded skew, and an
+allowlist containing only the environment's divine-atbridge service-account
+subject. Tokens live at most five minutes. Missing/unverifiable claims fail
+closed; the current shared provisioning bearer is never accepted.
 
-- per-account discovery/convergence state, safe cursors, last scanned and last
-  published event IDs, reason codes, and lag;
-- dry-run reconciliation and legacy-migration reports;
-- bounded revival by account/event and allowlisted retryable reason;
-- deep-scan requests with maximum accounts/pages/events and explicit expiry.
+The operator API is exposed only through the existing Cloudflare Access-protected
+internal hostname. The service independently validates the Access JWT against
+the configured team issuer/JWKS, exact application audience, `exp`/`nbf`, and
+derives actor from immutable `sub` plus email. A bridge DB role binding grants
+`support_viewer`, `repair_operator`, or `migration_admin`; absent/disabled roles
+fail closed. Per-actor mutation quotas, unique operation IDs, and Access plus
+application audit prevent replay. Forwarded identity headers without a valid JWT
+are ignored.
 
-Mutations default to dry-run and require actor identity, operation ID, reason,
-limits, and confirmation. Every request and result is written to an immutable
-audit table. Controls cannot change event ownership, revive rejected/cancelled
-work without re-evaluation, accept arbitrary payloads/DIDs, or cross accounts.
+Versioned JSON endpoints are:
 
-Provisioning preserves existing response fields and may add an optional
-`archive_sync` status link. The detailed endpoint is operator/support-only in
-this release; a user-facing progress surface is a later compatible product
-decision.
+```text
+GET  /internal/v1/accounts/{account_id}/sync
+GET  /internal/v1/operations/{operation_id}
+POST /internal/v1/reconciliation/operations
+POST /internal/v1/revival/operations
+POST /internal/v1/migration/operations
+POST /internal/v1/disconnect/operations
+```
+
+Account sync returns the combined state, scan/snapshot IDs, safe cursors, reason
+codes, lag, and all progress totals. Collection results use opaque pagination.
+Mutations require `Idempotency-Key`, `{dry_run:true, reason, scope, limits,
+expires_at}` and role-specific maximum accounts/pages/events. The server echoes
+normalized scope and a confirmation digest. Dry-run returns `200`. Execution
+requires a second request with the same key and `confirm_digest`; it returns
+`202 {operation_id,status_url}`. Polling returns queued/running/succeeded/
+partially_failed/failed/cancelled plus safe per-class counts. Errors use
+`{code,message,retryable,request_id,operation_id?}` and stable HTTP semantics.
+
+Every request, normalized scope, actor, confirmation, state transition, and
+result is written to an append-only audit table. Controls cannot change event
+ownership, revive rejected/cancelled work without eligibility re-evaluation,
+accept arbitrary payloads/DIDs, or cross accounts.
+
+Provisioning preserves existing fields and adds optional absolute
+`archive_sync` pointing to the authorized status resource. The detailed surface
+is operator/support-only in this release; a user-facing client is later.
 
 ## Shadow Reconciliation
 
@@ -440,12 +664,14 @@ shadow_differences
   UNIQUE(run_id, account_id, nostr_event_id, difference_type)
 ```
 
-Run summaries retain counts and a deterministic digest. Detailed rows have a
-bounded operational retention; aggregate/audit results persist. Repair promotion
-requires two consecutive full runs over the same finite snapshot with identical
-digests, zero unexplained false positives in sampled accounts, and signed
-operator approval. Promotion thresholds are configuration with reviewed
-defaults, not hidden code constants.
+Run summaries retain counts, source upper bound, and a deterministic digest.
+Detailed rows have bounded operational retention; aggregate/audit results
+persist. Because ClickHouse traversal is not MVCC, repair promotion requires the
+source bootstrap to be verified, then two consecutive deep traversals separated
+by more than the configured indexing-delay settlement window. Each captures a
+new upper bound; promotion requires no source changes/late arrivals between
+runs, identical difference digests, zero unexplained false positives in sampled
+accounts, and signed operator approval. Thresholds are reviewed configuration.
 
 ## Observability, Health, and SLOs
 
@@ -453,8 +679,14 @@ Process liveness and Kubernetes readiness remain limited to whether the process
 can safely serve/consume work and reach mandatory dependencies. Publication SLO
 degradation does not mark every pod unready and trigger an eviction loop.
 
-A separate workload-health endpoint and aggregate bounded-cardinality metrics
-expose:
+Existing `/metrics` remains the backward-compatible JSON watchdog response
+`{expired_leases,failed_backfills}` for one deprecation release. New Prometheus
+OpenMetrics are served as `text/plain; version=0.0.4` at `/metrics/prometheus`.
+`GET /health/workload` returns JSON
+`{status: healthy|degraded, reasons:[code], oldest_eligible_age_seconds,
+source_lag_seconds, checked_at}` with `200` when healthy and `503` when degraded.
+It is explicitly not wired to Kubernetes `/health/ready`; workload degradation
+must not evict all workers. Aggregate bounded-cardinality metrics expose:
 
 - jobs by disposition and stable reason code;
 - oldest eligible-unmapped age and eligible queue depth;
@@ -469,14 +701,21 @@ account detail comes from the support API, avoiding unbounded Prometheus labels.
 
 Initial live SLOs are:
 
-- 95% of eligible live events have their deterministic AT record within five
+- 95% of eligible live events have their reserved AT record within five
   minutes of canonical source ingestion;
 - 99% within thirty minutes;
 - zero eligible source events permanently lost.
 
-Archive SLO/progress is separate. Alerts cover sustained eligible-unmapped age,
-queue growth, failed/expired scans, source lag, KMS/session failures, and
-reconciliation divergence. Alert rules live with the service deployment in
+Archive progress is segmented by effective archive size. Initial cohort rollout
+targets are p95 caught-up/caught-up-with-exceptions within 15 minutes for up to
+100 events, two hours for 101-1,000, and 24 hours above 1,000, with 100% of
+completed accounts showing zero unexplained eligible-unmapped records after a
+deep traversal. Missing-source proof or any unexplained eligible-unmapped row
+halts cohort expansion; intentionally rejected rows are reported exceptions.
+
+Alerts cover sustained eligible-unmapped age, queue growth, failed/expired
+scans, source lag, KMS/session failures, and reconciliation divergence. Alert
+rules live with the service deployment in
 `divine-iac-coreconfig`; divine-sky owns metric contract fixtures, and IaC CI
 tests rule parsing and expected-series evaluation. Runbooks name the owning
 team, severity, and safe repair operation.
@@ -489,38 +728,59 @@ team, severity, and safe repair operation.
 2. Exercise an expired session and verify refresh, media upload, record creation,
    rotated-session persistence, and playback.
 3. Promote the identical digest to production.
-4. Re-evaluate and revive Rabble's missing events and all jobs with the same
-   typed retryable authentication failure.
+4. Run the slice-1 `divine-atbridge repair-legacy-badjwt` command, which works on
+   the current schema. It is dry-run by default; requires explicit full event IDs
+   or an exact escaped `BadJwt: Signature tag didn't verify` error predicate,
+   account scope,
+   maximum rows, operation ID, and `--confirm` digest; selects only terminal
+   failed publish jobs, re-verifies event/account enabled state, stores bounded
+   before-images in an additive `operator_actions` audit row, and atomically
+   resets matching jobs to immediately claimable. `--rollback-operation-id`
+   restores only rows not subsequently claimed/changed. Tests cover selection,
+   bounds, revalidation, rollback, and secret-free output.
 5. Verify source IDs, AT mappings, AppView records, and video playback.
 
 ### Expand/migrate/contract sequence
 
 1. **Funnelcake expand:** add the append-only source table and authenticated v1
-   API without changing public video reads. Backfill/verification is a bounded,
-   resumable job. Old Funnelcake binaries remain compatible.
+   API without changing public video reads. Backfill from `events_local` is a
+   finite, checkpointed job with the count/digest proof above. The source API
+   cannot advertise ready and no archive cohort starts until proof succeeds.
+   Old Funnelcake binaries remain compatible.
 2. **Bridge schema expand:** startup migration creates nullable/additive tables,
    columns, indexes, and constraints only. Old bridge binaries can continue
    writing the legacy queue.
 3. **Dual-read/write:** new binaries materialize source/state for all new work
-   while preserving legacy queue behavior. Feature flags keep deterministic
+   while preserving legacy queue behavior. Feature flags keep intent-based
    writes, scans, and repair disabled.
-4. **Explicit data migration job:** a separately invoked command acquires a
+4. **Session encryption expand:** add ciphertext, encrypted data-key, KMS key
+   version, session version, lifecycle epoch, and tombstone columns. New binaries
+   dual-read plaintext/ciphertext but write encrypted form plus legacy plaintext
+   only while legacy pods remain. Drain/fence old writers; then a resumable KMS
+   job encrypts every active row, verifies decrypt/account/DID binding, rotates a
+   sample, and checkpoints. Null plaintext only after 100% verification; validate
+   constraints after the rollback window, then drop plaintext columns in the
+   contract release. Before plaintext nulling, rollback may restore the old
+   binary; afterward only encryption-aware rollback is allowed. Key rotation
+   writes a new version by CAS and retains the prior KMS decrypt version until
+   all rows and backups pass verification.
+5. **Explicit data migration job:** a separately invoked command acquires a
    migration lease, reads a stable key range in bounded transactions, checkpoints
    by queue primary key, and writes classification results idempotently. It never
    runs during pod startup.
-5. **Shadow:** run complete source/state comparisons without repair, validate
+6. **Shadow:** run complete source/state comparisons without repair, validate
    digests, pagination, SLO metrics, and capacity.
-6. **Enable by slice:** deterministic AT writes, lossless live discovery, one
+7. **Enable by slice:** intent-based AT writes, lossless live discovery, one
    test archive, Rabble archive/repair, scheduled reconciliation, then cohorts.
-7. **Validate constraints:** after all writers are compatible and backfill is
+8. **Validate constraints:** after all writers are compatible and backfill is
    complete, validate foreign keys/checks/NOT NULL constraints without coupling
    rollout availability to data volume.
-8. **Contract:** remove legacy cursor/job interpretation only after a full deep
+9. **Contract:** remove legacy cursor/job interpretation only after a full deep
    reconciliation and rollback window.
 
 Old and new binaries may overlap only in explicitly dual-compatible phases.
 Rollback disables new claimers/scans but retains additive state. It never drops
-source facts or deterministic mappings. Funnelcake migration follows the same
+source facts, publication intents, or mappings. Funnelcake migration follows the same
 additive/read-switch/retire pattern; no atomic multi-table swap is assumed.
 
 ### Legacy classification job
@@ -558,13 +818,15 @@ Every invariant has an executable proof owner:
 | Invariant / failure | Proof |
 |---|---|
 | signature, ID, author/DID binding, all `e`/`a` targets | Rust unit/property tests |
+| raw-source seed count/digest proof, MV/backfill overlap dedupe | Funnelcake ClickHouse integration tests |
 | same-second composite paging, finite upper bound, token binding | Funnelcake ClickHouse integration test against real test table plus API test |
 | page atomicity and scan CAS | isolated PostgreSQL integration fixtures with crash injection after every write boundary |
 | >100 archive, >500 outage catch-up, two interleaved users | cross-service integration tests |
-| PDS commit then bridge crash | mock-PDS fault test; restart proves one deterministic record and recovered mapping |
+| PDS commit then bridge crash | mock-PDS fault test; restart proves one reserved record and recovered mapping |
 | deletion before/after/racing publish; no resurrection | PostgreSQL + mock-PDS concurrency tests |
 | retry beyond old cap, typed rejection, fair scheduling | Rust scheduler tests with deterministic clock |
 | session CAS/encryption/redaction | unit/integration tests with fake KMS and log assertions |
+| plaintext encryption backfill, refresh/disconnect race, key rotation | isolated PostgreSQL + fake-KMS fault tests |
 | SSRF redirects/DNS rebinding/size/decompression/time limits | media-fetcher security tests |
 | legacy classification/resume/partial failure | isolated PostgreSQL migration-command tests |
 | shadow digest and promotion threshold | reconciliation integration tests |
@@ -572,13 +834,19 @@ Every invariant has an executable proof owner:
 | expired session, multi-page archive, restart, dependency outage | staging acceptance |
 | mappings, AppView records, playback, lag | bounded production audit |
 
-The workspace adds `.coverage-thresholds.json` and a CI coverage command using
-the repository's selected Rust coverage tool. Thresholds start at the measured
-baseline and may not decrease; all newly introduced reconciliation/state modules
-require at least 85% line coverage and branch coverage where the tool supports
-it. Coverage supplements, rather than replaces, the fault and integration tests.
-PostgreSQL tests create isolated per-test schemas/databases; ClickHouse tests use
-isolated table names and deterministic cleanup.
+The workspace standardizes on `cargo-llvm-cov` and CI runs
+`cargo llvm-cov --workspace --all-features --lcov --output-path
+target/llvm-cov/lcov.info`, followed by `scripts/check-coverage-thresholds`.
+`.coverage-thresholds.json` is versioned as
+`{"version":1,"global":{"lines":N,"functions":N,"regions":N},"modules":{...}}`.
+The initial global values are the measured pre-change baseline and may not
+decrease; newly introduced reconciliation/state modules require at least 85%
+lines/functions/regions. The repository AGENTS policy requires coverage for
+non-trivial changes but does not state a 100% numeric threshold, so this RFC does
+not invent one. Narrow generated/unreachable-code exclusions require an inline
+justification and explicit JSON entry. Coverage supplements fault/integration
+tests. PostgreSQL tests create isolated per-test schemas/databases; ClickHouse
+tests use isolated table names and deterministic cleanup.
 
 Additional required cases:
 
@@ -591,8 +859,16 @@ Additional required cases:
 - archive discovery sees deletion before publication convergence;
 - a complete second reconciliation creates no new AT records or work;
 - mixed-version deployment and malformed/expired cursor tokens fail safely;
+- an archive survives an outage beyond cursor TTL through bound renewal;
+- delete-before-observation, delete-then-new-revision, equal-time deletion, and
+  out-of-order coordinate facts resolve identically;
+- moderation block/unblock, missed moderation notification, and block racing
+  `putRecord` converge without a lasting record;
+- legacy/intent writer draining plus PDS/local crash creates one record;
 - account disconnect racing publication ends with no AT record or stored
   session;
+- disconnect/reconnect, disconnect with revoked credentials, cleanup deadline,
+  and reconnect to a changed DID follow the declared product states;
 - readiness remains stable while workload health/alerts correctly degrade.
 
 ## Implementation Slices
@@ -602,13 +878,18 @@ Each slice is independently deployable and reversible:
 1. immediate auth deployment and production repair;
 2. Funnelcake append-only source read model and v1 pagination API;
 3. bridge additive authoritative schema and shared eligibility/reason registry;
-4. deterministic AT rkeys, `putRecord`, and crash recovery;
-5. transactional live/archive discovery and bounded scheduling;
-6. durable multi-target deletion and generation-fenced reconciliation;
-7. shadow, incremental, and deep reconciliation plus operator API;
-8. observability, KMS/session hardening, media safety, and SLO alerts;
+4. KMS/session lifecycle fencing, media safety, and authenticated operator/source
+   boundaries;
+5. durable publication intents, writer drain fence, `putRecord`, and crash recovery;
+6. transactional live/archive discovery and bounded scheduling;
+7. durable multi-target deletion, moderation, and version-fenced reconciliation;
+8. shadow/deep reconciliation, operator API, observability, and SLO alerts;
 9. resumable legacy migration and cohort rollout;
 10. production convergence audit and legacy contract retirement.
+
+The implementation plan assigns every slice a repository owner, feature flag,
+schema/API prerequisite, failing tests, promotion evidence, and rollback action.
+No archive cohort can publish before slices 2-7 meet their exit gates.
 
 ## Non-Goals
 
@@ -627,14 +908,18 @@ The work is complete when:
    a full reconciliation with no duplicates.
 2. A connected user with more than 100 retained eligible posts receives the
    complete effective backdated archive without deleted/superseded posts.
-3. Same-second, late, outage, restart, and cursor-token tests prove lossless
+3. The historical source build has a durable verified upper/checkpoint plus
+   matching raw/target counts and ID digests; gaps block rollout.
+4. Same-second, late, outage, restart, and cursor-token tests prove lossless
    finite discovery.
-4. The PDS-commit/local-crash test proves exactly one deterministic AT record.
-5. Retryable work recovers after dependency restoration beyond the old cap.
-6. Every `e`/`a` deletion race test ends without a lasting/resurrected record.
-7. Deep reconciliation repairs an intentionally omitted event and the next run
+5. The PDS-commit/local-crash test proves exactly one reserved AT record.
+6. Retryable work recovers after dependency restoration beyond the old cap.
+7. Every `e`/`a` deletion and moderation race ends without a lasting record.
+8. Deep reconciliation repairs an intentionally omitted event and the next run
    has an identical zero-difference digest.
-8. Operators can audit and safely repair account state, and SLO alerts fire in
+9. Account/archive/disconnect states satisfy their count-based predicates and
+   the archive cohort thresholds.
+10. Operators can audit and safely repair account state, and SLO alerts fire in
    tests before a user report is required.
-9. Staging and production use identical verified image digests per promoted
+11. Staging and production use identical verified image digests per promoted
    service revision.
