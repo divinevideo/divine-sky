@@ -15,6 +15,8 @@ const ACCOUNT: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 const MATCHING_EVENT: &str = "1111111111111111111111111111111111111111111111111111111111111111";
 const NEAR_MISS_EVENT: &str = "2222222222222222222222222222222222222222222222222222222222222222";
 const BADJWT: &str = "BadJwt: Signature tag didn't verify";
+const STORED_BADJWT: &str = "failed to upload blob to PDS: failed to get service auth for video \
+upload: getServiceAuth failed (400) for did:plc:repair-test: BadJwt: Signature tag didn't verify";
 
 fn test_database_url() -> String {
     std::env::var("TEST_DATABASE_URL")
@@ -47,7 +49,7 @@ fn setup() -> PgConnection {
     .execute(&mut conn)
     .expect("account should insert");
 
-    seed_terminal_job(&mut conn, MATCHING_EVENT, BADJWT);
+    seed_terminal_job(&mut conn, MATCHING_EVENT, STORED_BADJWT);
     seed_terminal_job(
         &mut conn,
         NEAR_MISS_EVENT,
@@ -180,10 +182,28 @@ fn rollback_restores_an_unclaimed_repair() {
 }
 
 #[test]
+fn preview_rejects_combining_explicit_ids_with_badjwt_class() {
+    let _guard = test_db_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    drop(setup());
+    let service = LegacyRepairService::new(test_database_url());
+    let result = service.preview(
+        "operator@example.com",
+        LegacyBadJwtRepairFilter {
+            nostr_pubkey: ACCOUNT.to_string(),
+            event_ids: vec![MATCHING_EVENT.to_string()],
+            exact_error: Some(BADJWT.to_string()),
+            after_event_id: None,
+            limit: 100,
+        },
+    );
+    assert!(result.is_err());
+}
+
+#[test]
 fn repair_cli_help_does_not_require_runtime_secrets() {
-    let binary = std::env::var("CARGO_BIN_EXE_repair-legacy-badjwt")
-        .expect("Cargo should expose the repair binary");
-    let output = Command::new(binary)
+    let output = Command::new(repair_binary())
         .arg("--help")
         .output()
         .expect("repair CLI should start");
@@ -193,4 +213,60 @@ fn repair_cli_help_does_not_require_runtime_secrets() {
     assert!(stdout.contains("--confirm-digest"));
     assert!(stdout.contains("--rollback-operation-id"));
     assert!(!stdout.contains("DATABASE_URL="));
+}
+
+fn repair_binary() -> String {
+    std::env::var("CARGO_BIN_EXE_repair-legacy-badjwt")
+        .expect("Cargo should expose the repair binary")
+}
+
+fn run_repair_cli(args: &[&str]) -> std::process::Output {
+    Command::new(repair_binary())
+        .args(args)
+        .env("DATABASE_URL", test_database_url())
+        .output()
+        .expect("repair CLI should run")
+}
+
+#[test]
+fn repair_cli_previews_confirms_and_rolls_back() {
+    let _guard = test_db_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    drop(setup());
+
+    let preview_output = run_repair_cli(&[
+        "--actor",
+        "operator@example.com",
+        "--nostr-pubkey",
+        ACCOUNT,
+        "--exact-badjwt",
+        "--max-rows",
+        "1",
+    ]);
+    assert!(preview_output.status.success());
+    let preview: serde_json::Value =
+        serde_json::from_slice(&preview_output.stdout).expect("preview should be JSON");
+    assert_eq!(preview["matched_event_ids"], json!([MATCHING_EVENT]));
+
+    let operation_id = preview["operation_id"].as_str().expect("operation ID");
+    let digest = preview["confirmation_digest"].as_str().expect("digest");
+    let confirm_output =
+        run_repair_cli(&["--operation-id", operation_id, "--confirm-digest", digest]);
+    assert!(confirm_output.status.success());
+
+    let rollback_output = run_repair_cli(&["--rollback-operation-id", operation_id]);
+    assert!(rollback_output.status.success());
+    let rollback: serde_json::Value =
+        serde_json::from_slice(&rollback_output.stdout).expect("rollback should be JSON");
+    assert_eq!(rollback["status"], "rolled_back");
+}
+
+#[test]
+fn atbridge_image_contains_the_repair_binary() {
+    let dockerfile = include_str!("../../../Dockerfile.atbridge");
+    assert!(dockerfile.contains("--bin repair-legacy-badjwt"));
+    assert!(dockerfile.contains(
+        "COPY --from=builder /app/target/release/repair-legacy-badjwt /usr/local/bin/repair-legacy-badjwt"
+    ));
 }

@@ -629,7 +629,17 @@ const LEGACY_REPAIR_PREDICATE: &str = "
       AND (p.lease_expires_at IS NULL OR p.lease_expires_at <= NOW())
       AND (
         (cardinality($2::text[]) > 0 AND p.nostr_event_id = ANY($2))
-        OR ($3::text IS NOT NULL AND p.error = $3)
+        OR (
+          $3::text IS NOT NULL
+          AND (
+            p.error = $3
+            OR (
+              $3 = 'BadJwt: Signature tag didn''t verify'
+              AND POSITION('getServiceAuth failed (400)' IN p.error) > 0
+              AND POSITION('BadJwt: Signature tag didn''t verify' IN p.error) > 0
+            )
+          )
+        )
       )";
 
 /// Preview an exact, bounded page of terminal legacy BadJwt jobs.
@@ -706,7 +716,17 @@ pub fn revive_legacy_badjwt_jobs(
            AND (p.lease_expires_at IS NULL OR p.lease_expires_at <= NOW())
            AND (
              (cardinality($2::text[]) > 0 AND p.nostr_event_id = ANY($2))
-             OR ($3::text IS NOT NULL AND p.error = $3)
+             OR (
+               $3::text IS NOT NULL
+               AND (
+                 p.error = $3
+                 OR (
+                   $3 = 'BadJwt: Signature tag didn''t verify'
+                   AND POSITION('getServiceAuth failed (400)' IN p.error) > 0
+                   AND POSITION('BadJwt: Signature tag didn''t verify' IN p.error) > 0
+                 )
+               )
+             )
            )
            AND p.nostr_event_id = ANY($4)";
     let changed = sql_query(query)

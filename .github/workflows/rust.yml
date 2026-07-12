@@ -53,6 +53,7 @@ jobs:
         env:
           COVERAGE_BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
         run: |
+          bash scripts/check-coverage-thresholds.sh --self-test
           mkdir -p target/llvm-cov
           cargo llvm-cov --workspace --all-features --lcov --output-path target/llvm-cov/lcov.info
           bash scripts/check-coverage-thresholds.sh \

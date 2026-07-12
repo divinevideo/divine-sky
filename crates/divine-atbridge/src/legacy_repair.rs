@@ -30,6 +30,7 @@ pub struct LegacyRepairPreviewResult {
 pub struct LegacyRepairApplyResult {
     pub operation_id: String,
     pub changed_count: i64,
+    pub skipped_count: i64,
     pub status: String,
 }
 
@@ -47,6 +48,8 @@ struct PersistedScope {
 struct PersistedAction {
     #[diesel(sql_type = Text)]
     operation_id: String,
+    #[diesel(sql_type = Text)]
+    actor: String,
     #[diesel(sql_type = Jsonb)]
     scope: Value,
     #[diesel(sql_type = Text)]
@@ -85,8 +88,10 @@ impl LegacyRepairService {
     pub fn preview(
         &self,
         actor: &str,
-        filter: LegacyBadJwtRepairFilter,
+        mut filter: LegacyBadJwtRepairFilter,
     ) -> Result<LegacyRepairPreviewResult> {
+        filter.event_ids.sort();
+        filter.event_ids.dedup();
         validate_request(actor, &filter)?;
         let mut conn = self.connect()?;
         let preview = preview_legacy_badjwt_repair(&mut conn, &filter)?;
@@ -136,6 +141,7 @@ impl LegacyRepairService {
     pub fn confirm(&self, operation_id: &str, digest: &str) -> Result<LegacyRepairApplyResult> {
         let mut conn = self.connect()?;
         conn.transaction::<_, anyhow::Error, _>(|conn| {
+            diesel::sql_query("SET TRANSACTION ISOLATION LEVEL SERIALIZABLE").execute(conn)?;
             let action = load_action_for_update(conn, operation_id)?;
             if action.confirmation_digest != digest {
                 return Err(anyhow!("confirmation digest does not match preview"));
@@ -144,6 +150,7 @@ impl LegacyRepairService {
                 return Ok(LegacyRepairApplyResult {
                     operation_id: action.operation_id,
                     changed_count: action.changed_count,
+                    skipped_count: 0,
                     status: action.status,
                 });
             }
@@ -166,6 +173,15 @@ impl LegacyRepairService {
                 .map(|job| job.nostr_event_id.clone())
                 .collect::<Vec<_>>();
             let current_before = sanitized_before_images(&current.jobs);
+            let current_digest = confirmation_digest(
+                &action.operation_id,
+                &action.actor,
+                &action.scope,
+                &current_before,
+            )?;
+            if current_digest != action.confirmation_digest {
+                return Err(anyhow!("confirmation digest no longer matches candidates"));
+            }
             if current_ids != scope.matched_event_ids || current_before != action.before_images {
                 return Err(anyhow!("repair candidates changed after preview"));
             }
@@ -187,6 +203,7 @@ impl LegacyRepairService {
             Ok(LegacyRepairApplyResult {
                 operation_id: operation_id.to_string(),
                 changed_count: changed,
+                skipped_count: 0,
                 status: "applied".to_string(),
             })
         })
@@ -200,6 +217,7 @@ impl LegacyRepairService {
                 return Ok(LegacyRepairApplyResult {
                     operation_id: action.operation_id,
                     changed_count: action.changed_count,
+                    skipped_count: 0,
                     status: action.status,
                 });
             }
@@ -209,6 +227,7 @@ impl LegacyRepairService {
             let before: Vec<SanitizedBeforeImage> =
                 serde_json::from_value(action.before_images.clone())?;
             let mut changed = 0i64;
+            let mut skipped = 0i64;
             for job in before {
                 let rows = diesel::sql_query(
                     "UPDATE publish_jobs
@@ -228,26 +247,31 @@ impl LegacyRepairService {
                 .bind::<Timestamptz, _>(job.updated_at)
                 .bind::<Timestamptz, _>(action.updated_at)
                 .execute(conn)?;
-                if rows != 1 {
-                    return Err(anyhow!(
-                        "job {} changed after repair; rollback refused",
-                        job.nostr_event_id
-                    ));
+                if rows == 0 {
+                    skipped += 1;
+                    continue;
                 }
                 changed += 1;
             }
+            let status = if skipped == 0 {
+                "rolled_back"
+            } else {
+                "rollback_partial"
+            };
             diesel::sql_query(
                 "UPDATE operator_actions
-                 SET status = 'rolled_back', changed_count = $2, updated_at = NOW()
+                 SET status = $2, changed_count = $3, updated_at = NOW()
                  WHERE operation_id = $1",
             )
             .bind::<Text, _>(operation_id)
+            .bind::<Text, _>(status)
             .bind::<BigInt, _>(changed)
             .execute(conn)?;
             Ok(LegacyRepairApplyResult {
                 operation_id: operation_id.to_string(),
                 changed_count: changed,
-                status: "rolled_back".to_string(),
+                skipped_count: skipped,
+                status: status.to_string(),
             })
         })
     }
@@ -256,7 +280,7 @@ impl LegacyRepairService {
 fn load_action_for_update(conn: &mut PgConnection, operation_id: &str) -> Result<PersistedAction> {
     diesel::sql_query(
         "SELECT operation_id, scope, confirmation_digest, before_images,
-                changed_count, status, updated_at
+                actor, changed_count, status, updated_at
          FROM operator_actions
          WHERE operation_id = $1
          FOR UPDATE",
@@ -278,6 +302,11 @@ fn validate_request(actor: &str, filter: &LegacyBadJwtRepairFilter) -> Result<()
     }
     if filter.event_ids.is_empty() && filter.exact_error.is_none() {
         return Err(anyhow!("event IDs or exact BadJwt mode are required"));
+    }
+    if !filter.event_ids.is_empty() && filter.exact_error.is_some() {
+        return Err(anyhow!(
+            "explicit event IDs cannot be combined with BadJwt class mode"
+        ));
     }
     if filter.event_ids.iter().any(|id| !is_lower_hex_64(id)) {
         return Err(anyhow!("event IDs must be 64 lowercase hex characters"));

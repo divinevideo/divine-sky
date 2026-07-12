@@ -95,7 +95,7 @@ fn parse_args(raw: &[String]) -> Result<Args> {
         }
         let value = raw
             .get(index + 1)
-            .ok_or_else(|| anyhow!("missing value for {flag}"))?
+            .ok_or_else(|| anyhow!("missing value for option"))?
             .clone();
         match flag {
             "--actor" => parsed.actor = Some(value),
@@ -108,7 +108,7 @@ fn parse_args(raw: &[String]) -> Result<Args> {
             "--operation-id" => parsed.operation_id = Some(value),
             "--confirm-digest" => parsed.confirm_digest = Some(value),
             "--rollback-operation-id" => parsed.rollback_operation_id = Some(value),
-            _ => return Err(anyhow!("unknown argument: {flag}")),
+            _ => return Err(anyhow!("unknown option")),
         }
         index += 2;
     }

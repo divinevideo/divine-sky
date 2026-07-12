@@ -2,6 +2,9 @@
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+if [[ "${1:-}" == "--self-test" ]]; then
+  exec bash "$repo_root/scripts/tests/check-coverage-thresholds.sh"
+fi
 thresholds="$repo_root/.coverage-thresholds.json"
 lcov_path=""
 base_ref=""
@@ -17,7 +20,7 @@ while (($#)); do
   esac
 done
 
-for command_name in jq awk git; do
+for command_name in jq awk git grep cut sort; do
   command -v "$command_name" >/dev/null 2>&1 || {
     echo "missing required command: $command_name" >&2
     exit 2
@@ -50,7 +53,8 @@ fi
 
 changed_path="$(mktemp)"
 uncovered_path="$(mktemp)"
-trap 'rm -f "$tmp_diff" "$changed_path" "$uncovered_path"' EXIT
+covered_files_path="$(mktemp)"
+trap 'rm -f "$tmp_diff" "$changed_path" "$uncovered_path" "$covered_files_path"' EXIT
 
 awk '
   /^\+\+\+ b\// { file = substr($0, 7); next }
@@ -64,6 +68,22 @@ awk '
     for (i = 0; i < count; i++) print file ":" start + i
   }
 ' "$diff_path" >"$changed_path"
+
+awk -v root="$repo_root/" '
+  /^SF:/ {
+    file = substr($0, 4)
+    if (index(file, root) == 1) file = substr(file, length(root) + 1)
+    print file
+  }
+' "$lcov_path" | sort -u >"$covered_files_path"
+
+while IFS= read -r changed_file; do
+  [[ -n "$changed_file" ]] || continue
+  if ! grep -Fqx "$changed_file" "$covered_files_path"; then
+    echo "changed Rust file absent from LCOV: $changed_file" >&2
+    exit 1
+  fi
+done < <(cut -d: -f1 "$changed_path" | sort -u)
 
 awk -v root="$repo_root/" '
   NR == FNR { changed[$0] = 1; next }

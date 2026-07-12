@@ -65,6 +65,22 @@ if "$checker" \
   exit 1
 fi
 
+cat >"$tmp_dir/missing-file.diff" <<'DIFF'
+diff --git a/crates/missing/src/lib.rs b/crates/missing/src/lib.rs
+--- a/crates/missing/src/lib.rs
++++ b/crates/missing/src/lib.rs
+@@ -0,0 +1 @@
++pub fn missing() {}
+DIFF
+
+if "$checker" \
+  --thresholds "$tmp_dir/thresholds.json" \
+  --lcov "$tmp_dir/covered.info" \
+  --diff "$tmp_dir/missing-file.diff"; then
+  echo "expected a changed Rust file absent from LCOV to fail" >&2
+  exit 1
+fi
+
 cat >"$tmp_dir/malformed.json" <<'JSON'
 {"version": 1}
 JSON
