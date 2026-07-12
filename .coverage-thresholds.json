@@ -3,7 +3,7 @@
   "global": {
     "lines": 76.7,
     "functions": 71.0,
-    "regions": 100,
+    "regions": 74.1,
     "non_decreasing": true
   },
   "changed_rust": {

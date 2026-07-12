@@ -49,6 +49,14 @@ BRH:1
 end_of_record
 LCOV
 
+cat >"$tmp_dir/summary.json" <<'JSON'
+{"data":[{"totals":{"lines":{"count":2,"covered":2,"percent":100},"functions":{"count":1,"covered":1,"percent":100},"regions":{"count":2,"covered":2,"percent":100}}}]}
+JSON
+
+cat >"$tmp_dir/low-regions.json" <<'JSON'
+{"data":[{"totals":{"lines":{"count":2,"covered":2,"percent":100},"functions":{"count":1,"covered":1,"percent":100},"regions":{"count":10,"covered":4,"percent":40}}}]}
+JSON
+
 cat >"$tmp_dir/changed.diff" <<'DIFF'
 diff --git a/crates/example/src/lib.rs b/crates/example/src/lib.rs
 --- a/crates/example/src/lib.rs
@@ -61,13 +69,24 @@ DIFF
 "$checker" \
   --thresholds "$tmp_dir/thresholds.json" \
   --lcov "$tmp_dir/covered.info" \
+  --summary-json "$tmp_dir/summary.json" \
   --diff "$tmp_dir/changed.diff"
 
 if "$checker" \
   --thresholds "$tmp_dir/thresholds.json" \
   --lcov "$tmp_dir/uncovered.info" \
+  --summary-json "$tmp_dir/summary.json" \
   --diff "$tmp_dir/changed.diff"; then
   echo "expected uncovered changed line to fail" >&2
+  exit 1
+fi
+
+if "$checker" \
+  --thresholds "$tmp_dir/thresholds.json" \
+  --lcov "$tmp_dir/covered.info" \
+  --summary-json "$tmp_dir/low-regions.json" \
+  --diff "$tmp_dir/changed.diff"; then
+  echo "expected LLVM region coverage below the floor to fail" >&2
   exit 1
 fi
 
@@ -82,6 +101,7 @@ DIFF
 "$checker" \
   --thresholds "$tmp_dir/thresholds.json" \
   --lcov "$tmp_dir/covered.info" \
+  --summary-json "$tmp_dir/summary.json" \
   --diff "$tmp_dir/test-source.diff"
 
 cat >"$tmp_dir/missing-file.diff" <<'DIFF'
@@ -95,6 +115,7 @@ DIFF
 if "$checker" \
   --thresholds "$tmp_dir/thresholds.json" \
   --lcov "$tmp_dir/covered.info" \
+  --summary-json "$tmp_dir/summary.json" \
   --diff "$tmp_dir/missing-file.diff"; then
   echo "expected a changed Rust file absent from LCOV to fail" >&2
   exit 1
@@ -106,6 +127,7 @@ sed 's#crates/missing/src/lib.rs#crates/allowed/src/lib.rs#g' \
 "$checker" \
   --thresholds "$tmp_dir/thresholds.json" \
   --lcov "$tmp_dir/covered.info" \
+  --summary-json "$tmp_dir/summary.json" \
   --diff "$tmp_dir/allowed-file.diff"
 
 cat >"$tmp_dir/malformed.json" <<'JSON'
@@ -115,6 +137,7 @@ JSON
 if "$checker" \
   --thresholds "$tmp_dir/malformed.json" \
   --lcov "$tmp_dir/covered.info" \
+  --summary-json "$tmp_dir/summary.json" \
   --diff "$tmp_dir/changed.diff"; then
   echo "expected malformed thresholds to fail" >&2
   exit 1

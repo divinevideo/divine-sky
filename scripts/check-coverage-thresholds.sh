@@ -9,6 +9,7 @@ if [[ "${1:-}" == "--self-test" ]]; then
 fi
 thresholds="$repo_root/.coverage-thresholds.json"
 lcov_path=""
+summary_json_path=""
 base_ref=""
 diff_path=""
 
@@ -16,6 +17,7 @@ while (($#)); do
   case "$1" in
     --thresholds) thresholds="$2"; shift 2 ;;
     --lcov) lcov_path="$2"; shift 2 ;;
+    --summary-json) summary_json_path="$2"; shift 2 ;;
     --base) base_ref="$2"; shift 2 ;;
     --diff) diff_path="$2"; shift 2 ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
@@ -31,6 +33,7 @@ done
 
 [[ -f "$thresholds" ]] || { echo "missing thresholds: $thresholds" >&2; exit 2; }
 [[ -f "$lcov_path" ]] || { echo "missing LCOV: $lcov_path" >&2; exit 2; }
+[[ -f "$summary_json_path" ]] || { echo "missing LLVM summary JSON: $summary_json_path" >&2; exit 2; }
 
 jq -e '
   .version == 1 and
@@ -128,22 +131,6 @@ if [[ -s "$uncovered_path" ]]; then
   exit 1
 fi
 
-read -r lines_found lines_hit functions_found functions_hit regions_found regions_hit < <(
-  awk -F: '
-    $1 == "LF" { lf += $2 }
-    $1 == "LH" { lh += $2 }
-    $1 == "FNF" { fnf += $2 }
-    $1 == "FNH" { fnh += $2 }
-    $1 == "BRF" { brf += $2 }
-    $1 == "BRH" { brh += $2 }
-    END { print lf+0, lh+0, fnf+0, fnh+0, brf+0, brh+0 }
-  ' "$lcov_path"
-)
-
-percentage() {
-  awk -v hit="$1" -v count="$2" 'BEGIN { if (count == 0) print 100; else print hit * 100 / count }'
-}
-
 check_floor() {
   local name="$1" actual="$2" floor="$3"
   awk -v actual="$actual" -v floor="$floor" 'BEGIN { exit !(actual + 0 >= floor + 0) }' || {
@@ -152,9 +139,18 @@ check_floor() {
   }
 }
 
-line_pct="$(percentage "$lines_hit" "$lines_found")"
-function_pct="$(percentage "$functions_hit" "$functions_found")"
-region_pct="$(percentage "$regions_hit" "$regions_found")"
+read -r line_pct function_pct region_pct < <(
+  jq -er '
+    .data[0].totals as $totals |
+    select(($totals.lines.count | type) == "number") |
+    select(($totals.functions.count | type) == "number") |
+    select(($totals.regions.count | type) == "number" and $totals.regions.count > 0) |
+    "\($totals.lines.percent) \($totals.functions.percent) \($totals.regions.percent)"
+  ' "$summary_json_path"
+) || {
+  echo "invalid LLVM summary JSON or no instrumented regions" >&2
+  exit 2
+}
 
 check_floor lines "$line_pct" "$(jq -r '.global.lines' "$thresholds")"
 check_floor functions "$function_pct" "$(jq -r '.global.functions' "$thresholds")"

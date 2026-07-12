@@ -56,6 +56,8 @@ jobs:
           bash scripts/check-coverage-thresholds.sh --self-test
           mkdir -p target/llvm-cov
           cargo llvm-cov --workspace --all-features --lcov --output-path target/llvm-cov/lcov.info
+          cargo llvm-cov report --json --summary-only --output-path target/llvm-cov/summary.json
           bash scripts/check-coverage-thresholds.sh \
             --lcov target/llvm-cov/lcov.info \
+            --summary-json target/llvm-cov/summary.json \
             --base "$COVERAGE_BASE"
