@@ -1,6 +1,6 @@
 use anyhow::{anyhow, Context, Result};
 use divine_atbridge::legacy_repair::{LegacyRepairService, BADJWT_SIGNATURE_ERROR};
-use divine_bridge_db::LegacyBadJwtRepairFilter;
+use divine_bridge_db::models::LegacyBadJwtRepairFilter;
 
 const HELP: &str = "Usage:
   repair-legacy-badjwt --actor ACTOR --nostr-pubkey HEX [--event-id HEX ... | --exact-badjwt]
@@ -20,6 +20,7 @@ struct Args {
     exact_badjwt: bool,
     after_event_id: Option<String>,
     max_rows: i64,
+    max_rows_supplied: bool,
     operation_id: Option<String>,
     confirm_digest: Option<String>,
     rollback_operation_id: Option<String>,
@@ -35,9 +36,18 @@ fn main() -> Result<()> {
     let database_url = std::env::var("DATABASE_URL").context("DATABASE_URL must be set")?;
     let service = LegacyRepairService::new(database_url);
 
+    let has_preview_options = args.actor.is_some()
+        || args.nostr_pubkey.is_some()
+        || !args.event_ids.is_empty()
+        || args.exact_badjwt
+        || args.after_event_id.is_some()
+        || args.max_rows_supplied;
+
     if let Some(operation_id) = args.rollback_operation_id.as_deref() {
-        if args.operation_id.is_some() || args.confirm_digest.is_some() {
-            return Err(anyhow!("rollback cannot be combined with confirmation"));
+        if args.operation_id.is_some() || args.confirm_digest.is_some() || has_preview_options {
+            return Err(anyhow!(
+                "rollback options cannot be combined with another mode"
+            ));
         }
         let result = service.rollback(operation_id)?;
         println!("{}", serde_json::to_string(&result)?);
@@ -47,6 +57,11 @@ fn main() -> Result<()> {
     if let (Some(operation_id), Some(digest)) =
         (args.operation_id.as_deref(), args.confirm_digest.as_deref())
     {
+        if args.rollback_operation_id.is_some() || has_preview_options {
+            return Err(anyhow!(
+                "confirmation options cannot be combined with another mode"
+            ));
+        }
         let result = service.confirm(operation_id, digest)?;
         println!("{}", serde_json::to_string(&result)?);
         return Ok(());
@@ -103,7 +118,8 @@ fn parse_args(raw: &[String]) -> Result<Args> {
             "--event-id" => parsed.event_ids.push(value),
             "--after-event-id" => parsed.after_event_id = Some(value),
             "--max-rows" => {
-                parsed.max_rows = value.parse().context("--max-rows must be an integer")?
+                parsed.max_rows = value.parse().context("--max-rows must be an integer")?;
+                parsed.max_rows_supplied = true;
             }
             "--operation-id" => parsed.operation_id = Some(value),
             "--confirm-digest" => parsed.confirm_digest = Some(value),

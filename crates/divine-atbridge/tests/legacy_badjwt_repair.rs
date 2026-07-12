@@ -5,9 +5,10 @@ use chrono::{Duration, Utc};
 use diesel::sql_types::{Bool, Jsonb, Nullable, Text, Timestamptz};
 use diesel::{Connection, PgConnection, RunQueryDsl};
 use divine_atbridge::legacy_repair::LegacyRepairService;
+use divine_bridge_db::migrations::run_pending_migrations_on;
+use divine_bridge_db::models::LegacyBadJwtRepairFilter;
 use divine_bridge_db::{
     claim_next_live_job, preview_legacy_badjwt_repair, revive_legacy_badjwt_jobs,
-    run_pending_migrations_on, LegacyBadJwtRepairFilter,
 };
 use serde_json::json;
 
@@ -179,6 +180,87 @@ fn rollback_restores_an_unclaimed_repair() {
     )
     .expect("claim should work");
     assert!(claimed.is_none());
+
+    let repeated = service
+        .rollback(&preview.operation_id)
+        .expect("rollback should be idempotent");
+    assert_eq!(repeated.status, "rolled_back");
+    assert!(service
+        .confirm(&preview.operation_id, &preview.confirmation_digest)
+        .is_err());
+}
+
+#[test]
+fn confirmation_rejects_candidate_drift_and_rollback_rejects_a_preview() {
+    let _guard = test_db_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    drop(setup());
+    let service = LegacyRepairService::new(test_database_url());
+    let preview = service
+        .preview(
+            "operator@example.com",
+            LegacyBadJwtRepairFilter {
+                nostr_pubkey: ACCOUNT.to_string(),
+                event_ids: vec![MATCHING_EVENT.to_string()],
+                exact_error: None,
+                after_event_id: None,
+                limit: 1,
+            },
+        )
+        .expect("preview should persist");
+
+    let rollback = service.rollback(&preview.operation_id);
+    assert!(rollback.is_err());
+
+    let mut conn = PgConnection::establish(&test_database_url()).expect("database should connect");
+    diesel::sql_query("UPDATE publish_jobs SET attempt = attempt + 1 WHERE nostr_event_id = $1")
+        .bind::<Text, _>(MATCHING_EVENT)
+        .execute(&mut conn)
+        .expect("candidate should change");
+
+    let confirm = service.confirm(&preview.operation_id, &preview.confirmation_digest);
+    assert!(confirm.is_err());
+}
+
+#[test]
+fn rollback_skips_a_repair_that_a_worker_has_claimed() {
+    let _guard = test_db_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    drop(setup());
+    let service = LegacyRepairService::new(test_database_url());
+    let preview = service
+        .preview(
+            "operator@example.com",
+            LegacyBadJwtRepairFilter {
+                nostr_pubkey: ACCOUNT.to_string(),
+                event_ids: vec![MATCHING_EVENT.to_string(), NEAR_MISS_EVENT.to_string()],
+                exact_error: None,
+                after_event_id: None,
+                limit: 2,
+            },
+        )
+        .expect("preview should persist");
+    service
+        .confirm(&preview.operation_id, &preview.confirmation_digest)
+        .expect("confirmation should apply");
+
+    let mut conn = PgConnection::establish(&test_database_url()).expect("database should connect");
+    claim_next_live_job(
+        &mut conn,
+        "repair-test-worker",
+        Utc::now() + Duration::minutes(5),
+    )
+    .expect("claim should work")
+    .expect("one repaired job should be claimable");
+
+    let rollback = service
+        .rollback(&preview.operation_id)
+        .expect("unclaimed row should still roll back");
+    assert_eq!(rollback.status, "rollback_partial");
+    assert_eq!(rollback.changed_count, 1);
+    assert_eq!(rollback.skipped_count, 1);
 }
 
 #[test]
@@ -199,6 +281,134 @@ fn preview_rejects_combining_explicit_ids_with_badjwt_class() {
         },
     );
     assert!(result.is_err());
+}
+
+#[test]
+fn preview_rejects_invalid_operator_selectors() {
+    let _guard = test_db_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    drop(setup());
+    let service = LegacyRepairService::new(test_database_url());
+    let cases = [
+        ("", ACCOUNT, vec![MATCHING_EVENT.to_string()], None, None, 1),
+        (
+            "operator",
+            "BAD",
+            vec![MATCHING_EVENT.to_string()],
+            None,
+            None,
+            1,
+        ),
+        (
+            "operator",
+            ACCOUNT,
+            vec![MATCHING_EVENT.to_string()],
+            None,
+            None,
+            0,
+        ),
+        ("operator", ACCOUNT, vec![], None, None, 1),
+        ("operator", ACCOUNT, vec!["BAD".to_string()], None, None, 1),
+        (
+            "operator",
+            ACCOUNT,
+            vec![MATCHING_EVENT.to_string()],
+            None,
+            Some("BAD".to_string()),
+            1,
+        ),
+        (
+            "operator",
+            ACCOUNT,
+            vec![],
+            Some("not allowlisted".to_string()),
+            None,
+            1,
+        ),
+    ];
+    for (actor, pubkey, event_ids, exact_error, after_event_id, limit) in cases {
+        let result = service.preview(
+            actor,
+            LegacyBadJwtRepairFilter {
+                nostr_pubkey: pubkey.to_string(),
+                event_ids,
+                exact_error,
+                after_event_id,
+                limit,
+            },
+        );
+        assert!(result.is_err());
+    }
+}
+
+#[test]
+fn database_preview_is_bounded_paginated_and_validated() {
+    let _guard = test_db_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let mut conn = setup();
+    let third = "3333333333333333333333333333333333333333333333333333333333333333";
+    seed_terminal_job(&mut conn, third, STORED_BADJWT);
+    let filter = LegacyBadJwtRepairFilter {
+        nostr_pubkey: ACCOUNT.to_string(),
+        event_ids: vec![MATCHING_EVENT.to_string(), third.to_string()],
+        exact_error: None,
+        after_event_id: None,
+        limit: 1,
+    };
+    let first = preview_legacy_badjwt_repair(&mut conn, &filter).expect("first page");
+    assert!(first.has_more);
+    assert_eq!(first.next_after_event_id.as_deref(), Some(MATCHING_EVENT));
+
+    let second = preview_legacy_badjwt_repair(
+        &mut conn,
+        &LegacyBadJwtRepairFilter {
+            after_event_id: first.next_after_event_id,
+            ..filter.clone()
+        },
+    )
+    .expect("second page");
+    assert!(!second.has_more);
+    assert_eq!(second.jobs[0].nostr_event_id, third);
+
+    for invalid in [
+        LegacyBadJwtRepairFilter {
+            nostr_pubkey: ACCOUNT.to_string(),
+            event_ids: vec![MATCHING_EVENT.to_string()],
+            exact_error: None,
+            after_event_id: None,
+            limit: 0,
+        },
+        LegacyBadJwtRepairFilter {
+            nostr_pubkey: ACCOUNT.to_string(),
+            event_ids: vec![],
+            exact_error: None,
+            after_event_id: None,
+            limit: 1,
+        },
+        LegacyBadJwtRepairFilter {
+            nostr_pubkey: ACCOUNT.to_string(),
+            event_ids: vec![MATCHING_EVENT.to_string()],
+            exact_error: Some(BADJWT.to_string()),
+            after_event_id: None,
+            limit: 1,
+        },
+    ] {
+        assert!(preview_legacy_badjwt_repair(&mut conn, &invalid).is_err());
+    }
+    assert_eq!(
+        revive_legacy_badjwt_jobs(&mut conn, &filter, &[]).expect("empty revival is a no-op"),
+        0
+    );
+    let union = LegacyBadJwtRepairFilter {
+        nostr_pubkey: ACCOUNT.to_string(),
+        event_ids: vec![MATCHING_EVENT.to_string()],
+        exact_error: Some(BADJWT.to_string()),
+        after_event_id: None,
+        limit: 1,
+    };
+    assert!(revive_legacy_badjwt_jobs(&mut conn, &union, &[MATCHING_EVENT.to_string()]).is_err());
 }
 
 #[test]
@@ -260,6 +470,50 @@ fn repair_cli_previews_confirms_and_rolls_back() {
     let rollback: serde_json::Value =
         serde_json::from_slice(&rollback_output.stdout).expect("rollback should be JSON");
     assert_eq!(rollback["status"], "rolled_back");
+}
+
+#[test]
+fn repair_cli_rejects_incomplete_or_conflicting_commands_without_echoing_values() {
+    for args in [
+        vec!["--operation-id", "secret-operation"],
+        vec!["--confirm-digest", "secret-digest"],
+        vec![
+            "--rollback-operation-id",
+            "some-operation",
+            "--confirm-digest",
+            "secret-digest",
+        ],
+        vec![
+            "--rollback-operation-id",
+            "some-operation",
+            "--actor",
+            "operator",
+        ],
+        vec![
+            "--operation-id",
+            "some-operation",
+            "--confirm-digest",
+            "digest",
+            "--max-rows",
+            "10",
+        ],
+        vec!["--nostr-pubkey", ACCOUNT, "--exact-badjwt"],
+        vec!["--actor", "operator", "--exact-badjwt"],
+        vec!["--unknown", "secret-value"],
+        vec!["--actor"],
+        vec!["--max-rows", "secret-non-integer"],
+    ] {
+        let output = run_repair_cli(&args);
+        assert!(
+            !output.status.success(),
+            "command unexpectedly succeeded: {args:?}"
+        );
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            !stderr.contains("secret-"),
+            "stderr leaked an argument: {stderr}"
+        );
+    }
 }
 
 #[test]

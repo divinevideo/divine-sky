@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# LCOV canonicalizes macOS' /tmp symlink to /private/tmp. Canonicalize the
+# repository root too so source-file paths compare consistently everywhere.
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 if [[ "${1:-}" == "--self-test" ]]; then
   exec bash "$repo_root/scripts/tests/check-coverage-thresholds.sh"
 fi
@@ -36,7 +38,15 @@ jq -e '
   (.global.functions | type == "number") and
   (.global.regions | type == "number") and
   (.global.non_decreasing | type == "boolean") and
-  .changed_rust.lines == 100
+  .changed_rust.lines == 100 and
+  (.changed_rust.allow_absent | type == "array") and
+  all(.changed_rust.allow_absent[]; type == "string") and
+  (.changed_rust.allow_uncovered | type == "array") and
+  all(.changed_rust.allow_uncovered[];
+    (.path | type == "string") and
+    (.line | type == "number") and
+    (.reason | type == "string" and length > 0)
+  )
 ' "$thresholds" >/dev/null || {
   echo "invalid coverage threshold schema" >&2
   exit 2
@@ -60,6 +70,9 @@ awk '
   /^\+\+\+ b\// { file = substr($0, 7); next }
   /^@@ / {
     if (file !~ /\.rs$/) next
+    # Integration-test sources drive instrumented code but cargo-llvm-cov does
+    # not include the test harness itself in LCOV. Gate production Rust only.
+    if (file ~ /(^|\/)tests\//) next
     split($0, parts, "+")
     split(parts[2], range, " ")
     split(range[1], nums, ",")
@@ -80,6 +93,9 @@ awk -v root="$repo_root/" '
 while IFS= read -r changed_file; do
   [[ -n "$changed_file" ]] || continue
   if ! grep -Fqx "$changed_file" "$covered_files_path"; then
+    if jq -e --arg path "$changed_file" '.changed_rust.allow_absent | index($path) != null' "$thresholds" >/dev/null; then
+      continue
+    fi
     echo "changed Rust file absent from LCOV: $changed_file" >&2
     exit 1
   fi
@@ -98,6 +114,12 @@ awk -v root="$repo_root/" '
     if (changed[key] && values[2] + 0 == 0) print key
   }
 ' "$changed_path" "$lcov_path" >"$uncovered_path"
+
+while IFS= read -r exception; do
+  [[ -n "$exception" ]] || continue
+  sed -i.bak "\\|^${exception}$|d" "$uncovered_path"
+  rm -f "$uncovered_path.bak"
+done < <(jq -r '.changed_rust.allow_uncovered[] | "\(.path):\(.line)"' "$thresholds")
 
 if [[ -s "$uncovered_path" ]]; then
   while IFS= read -r key; do

@@ -647,12 +647,23 @@ pub fn preview_legacy_badjwt_repair(
     conn: &mut PgConnection,
     filter: &LegacyBadJwtRepairFilter,
 ) -> Result<LegacyBadJwtRepairPreview> {
-    if filter.limit < 1 || filter.limit > 1_000 {
-        return Err(anyhow!("repair limit must be between 1 and 1000"));
-    }
-    if filter.event_ids.is_empty() && filter.exact_error.is_none() {
-        return Err(anyhow!("repair requires event IDs or an exact error"));
-    }
+    preview_legacy_badjwt_repair_impl(conn, filter, false)
+}
+
+/// Preview and lock the selected publish jobs for an audited confirmation.
+pub fn lock_legacy_badjwt_repair_candidates(
+    conn: &mut PgConnection,
+    filter: &LegacyBadJwtRepairFilter,
+) -> Result<LegacyBadJwtRepairPreview> {
+    preview_legacy_badjwt_repair_impl(conn, filter, true)
+}
+
+fn preview_legacy_badjwt_repair_impl(
+    conn: &mut PgConnection,
+    filter: &LegacyBadJwtRepairFilter,
+    lock_candidates: bool,
+) -> Result<LegacyBadJwtRepairPreview> {
+    validate_legacy_repair_filter(filter)?;
 
     let count_sql = format!("SELECT COUNT(*) AS count {LEGACY_REPAIR_PREDICATE}");
     let total_matching = sql_query(count_sql)
@@ -662,13 +673,18 @@ pub fn preview_legacy_badjwt_repair(
         .get_result::<LegacyRepairCountRow>(conn)?
         .count;
 
+    let row_lock = if lock_candidates {
+        " FOR UPDATE OF p"
+    } else {
+        ""
+    };
     let page_sql = format!(
         "SELECT p.nostr_event_id, p.state, p.attempt, p.error, p.lease_owner, \
                 p.lease_expires_at, p.completed_at, p.updated_at \
          {LEGACY_REPAIR_PREDICATE} \
            AND ($4::text IS NULL OR p.nostr_event_id > $4) \
          ORDER BY p.nostr_event_id ASC \
-         LIMIT $5"
+         LIMIT $5{row_lock}"
     );
     let mut jobs = sql_query(page_sql)
         .bind::<Text, _>(&filter.nostr_pubkey)
@@ -693,12 +709,28 @@ pub fn preview_legacy_badjwt_repair(
     })
 }
 
+fn validate_legacy_repair_filter(filter: &LegacyBadJwtRepairFilter) -> Result<()> {
+    if filter.limit < 1 || filter.limit > 1_000 {
+        return Err(anyhow!("repair limit must be between 1 and 1000"));
+    }
+    if filter.event_ids.is_empty() && filter.exact_error.is_none() {
+        return Err(anyhow!("repair requires event IDs or an exact error"));
+    }
+    if !filter.event_ids.is_empty() && filter.exact_error.is_some() {
+        return Err(anyhow!(
+            "explicit event IDs cannot be combined with BadJwt class mode"
+        ));
+    }
+    Ok(())
+}
+
 /// Revalidate and make exactly the previewed legacy jobs claimable again.
 pub fn revive_legacy_badjwt_jobs(
     conn: &mut PgConnection,
     filter: &LegacyBadJwtRepairFilter,
     previewed_event_ids: &[String],
 ) -> Result<usize> {
+    validate_legacy_repair_filter(filter)?;
     if previewed_event_ids.is_empty() {
         return Ok(0);
     }

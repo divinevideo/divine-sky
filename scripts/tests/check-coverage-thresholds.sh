@@ -10,7 +10,13 @@ cat >"$tmp_dir/thresholds.json" <<'JSON'
 {
   "version": 1,
   "global": {"lines": 50, "functions": 50, "regions": 50, "non_decreasing": true},
-  "changed_rust": {"lines": 100},
+  "changed_rust": {
+    "lines": 100,
+    "allow_absent": ["crates/allowed/src/lib.rs"],
+    "allow_uncovered": [
+      {"path": "crates/example/src/lib.rs", "line": 12, "reason": "test fixture"}
+    ]
+  },
   "exclude": ["target/**"]
 }
 JSON
@@ -65,6 +71,19 @@ if "$checker" \
   exit 1
 fi
 
+cat >"$tmp_dir/test-source.diff" <<'DIFF'
+diff --git a/crates/example/tests/integration.rs b/crates/example/tests/integration.rs
+--- a/crates/example/tests/integration.rs
++++ b/crates/example/tests/integration.rs
+@@ -0,0 +1 @@
++#[test] fn drives_covered_code() {}
+DIFF
+
+"$checker" \
+  --thresholds "$tmp_dir/thresholds.json" \
+  --lcov "$tmp_dir/covered.info" \
+  --diff "$tmp_dir/test-source.diff"
+
 cat >"$tmp_dir/missing-file.diff" <<'DIFF'
 diff --git a/crates/missing/src/lib.rs b/crates/missing/src/lib.rs
 --- a/crates/missing/src/lib.rs
@@ -80,6 +99,14 @@ if "$checker" \
   echo "expected a changed Rust file absent from LCOV to fail" >&2
   exit 1
 fi
+
+sed 's#crates/missing/src/lib.rs#crates/allowed/src/lib.rs#g' \
+  "$tmp_dir/missing-file.diff" >"$tmp_dir/allowed-file.diff"
+
+"$checker" \
+  --thresholds "$tmp_dir/thresholds.json" \
+  --lcov "$tmp_dir/covered.info" \
+  --diff "$tmp_dir/allowed-file.diff"
 
 cat >"$tmp_dir/malformed.json" <<'JSON'
 {"version": 1}

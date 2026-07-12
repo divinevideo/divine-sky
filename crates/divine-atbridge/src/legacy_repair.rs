@@ -2,8 +2,9 @@ use anyhow::{anyhow, Context, Result};
 use chrono::{DateTime, Utc};
 use diesel::sql_types::{BigInt, Int4, Jsonb, Nullable, Text, Timestamptz};
 use diesel::{Connection, PgConnection, QueryableByName, RunQueryDsl};
+use divine_bridge_db::models::LegacyBadJwtRepairFilter;
 use divine_bridge_db::{
-    preview_legacy_badjwt_repair, revive_legacy_badjwt_jobs, LegacyBadJwtRepairFilter,
+    lock_legacy_badjwt_repair_candidates, preview_legacy_badjwt_repair, revive_legacy_badjwt_jobs,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -166,7 +167,7 @@ impl LegacyRepairService {
                 after_event_id: scope.after_event_id,
                 limit: scope.limit,
             };
-            let current = preview_legacy_badjwt_repair(conn, &filter)?;
+            let current = lock_legacy_badjwt_repair_candidates(conn, &filter)?;
             let current_ids = current
                 .jobs
                 .iter()
