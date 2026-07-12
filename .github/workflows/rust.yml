@@ -32,6 +32,11 @@ jobs:
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@cargo-llvm-cov
 
       - name: Cache cargo artifacts
         uses: Swatinem/rust-cache@v2
@@ -43,3 +48,13 @@ jobs:
 
       - name: Verify workspace
         run: bash scripts/test-workspace.sh
+
+      - name: Verify coverage thresholds
+        env:
+          COVERAGE_BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: |
+          mkdir -p target/llvm-cov
+          cargo llvm-cov --workspace --all-features --lcov --output-path target/llvm-cov/lcov.info
+          bash scripts/check-coverage-thresholds.sh \
+            --lcov target/llvm-cov/lcov.info \
+            --base "$COVERAGE_BASE"

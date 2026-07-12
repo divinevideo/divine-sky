@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "global": {
+    "lines": 0,
+    "functions": 0,
+    "regions": 0,
+    "non_decreasing": true
+  },
+  "changed_rust": {
+    "lines": 100
+  },
+  "exclude": [
+    "target/**"
+  ]
+}
