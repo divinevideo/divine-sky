@@ -742,10 +742,15 @@ pub fn mark_publish_job_completed(
 /// Maximum failed attempts before a publish job is terminally failed.
 const MAX_PUBLISH_JOB_ATTEMPTS: i32 = 20;
 /// Upper bound on the exponential retry backoff for failed publish jobs.
-/// How long to park a job that hit the video service's per-DID daily upload
-/// quota. Comfortably inside a day so a job retries in the next window without
-/// hammering the service meanwhile.
-const UPLOAD_QUOTA_RETRY_SECS: i64 = 3 * 60 * 60;
+/// How long to park a LIVE job that hit the video service's per-DID daily upload
+/// quota. Short enough that a fresh post publishes soon after the window reopens.
+const UPLOAD_QUOTA_RETRY_SECS_LIVE: i64 = 60 * 60;
+
+/// How long to park a BACKFILL job on the same quota. Deliberately far longer
+/// than the live delay: a large catalog replay would otherwise consume the whole
+/// daily allowance every time the window reopens and starve the user's fresh
+/// posts. Backfill yields; live goes first.
+const UPLOAD_QUOTA_RETRY_SECS_BACKFILL: i64 = 12 * 60 * 60;
 
 /// The video service reports its per-DID daily cap as `daily_vid_limit_exceeded`
 /// (inside an HTTP 401 body, confusingly). Treat it as a throttle, not a defect.
@@ -777,13 +782,18 @@ pub fn mark_publish_job_failed(
     // quota resets. Park the job until the next window WITHOUT spending an
     // attempt, so backfills drain themselves across days.
     if is_upload_quota_error(error_msg) {
+        // Backfill waits far longer than live so a catalog replay cannot eat the
+        // daily allowance and starve the user's fresh posts.
+        let park_secs = if existing.job_source == PublishJobSource::Backfill.as_str() {
+            UPLOAD_QUOTA_RETRY_SECS_BACKFILL
+        } else {
+            UPLOAD_QUOTA_RETRY_SECS_LIVE
+        };
         let result = diesel::update(publish_jobs::table.find(nostr_event_id))
             .set((
                 publish_jobs::state.eq(PublishState::Failed.as_str()),
                 publish_jobs::error.eq(Some(error_msg.to_string())),
-                publish_jobs::lease_expires_at.eq(Some(
-                    now + chrono::Duration::seconds(UPLOAD_QUOTA_RETRY_SECS),
-                )),
+                publish_jobs::lease_expires_at.eq(Some(now + chrono::Duration::seconds(park_secs))),
                 publish_jobs::completed_at.eq(None::<DateTime<Utc>>),
                 publish_jobs::updated_at.eq(now),
             ))
