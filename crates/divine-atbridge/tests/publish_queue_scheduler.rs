@@ -419,13 +419,14 @@ fn upload_quota_errors_defer_without_spending_attempts() {
     );
     // ...the job stays reclaimable (never terminal)...
     assert!(deferred.completed_at.is_none());
-    // ...and it is held off for hours rather than seconds.
+    // ...and a LIVE job is held off for about an hour: long enough to stop
+    // hammering the quota, short enough to publish soon after it resets.
     let lease = deferred
         .lease_expires_at
         .expect("quota deferral must set a lease");
     assert!(
-        lease > before + Duration::hours(2),
-        "quota deferral should park the job for hours, got {lease}"
+        lease > before + Duration::minutes(30) && lease < before + Duration::hours(2),
+        "a live job should park for ~1h, got {lease}"
     );
 
     // Until the lease expires it must not be claimed again.
@@ -526,4 +527,49 @@ fn failed_jobs_back_off_and_terminalize_after_max_attempts() {
         after_terminal.is_none(),
         "terminally failed job must never be reclaimed"
     );
+}
+
+#[test]
+fn backfill_yields_the_daily_quota_to_live_posts() {
+    // A catalog replay must not eat the daily upload allowance and starve the
+    // user's fresh posts: on a quota rejection, backfill parks far longer than
+    // live so live gets the next window.
+    let _guard = test_db_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let database_url = test_database_url();
+    reset_database(&database_url);
+    let mut conn =
+        PgConnection::establish(&database_url).expect("test database should be reachable");
+
+    let created_at = DateTime::parse_from_rfc3339("2024-01-01T00:00:00Z")
+        .unwrap()
+        .with_timezone(&Utc);
+    enqueue_publish_job(
+        &mut conn,
+        &NewPublishJob {
+            nostr_event_id: "evt-backfill-quota",
+            nostr_pubkey: "npub1alice",
+            event_created_at: created_at,
+            event_payload: json!({"id": "evt-backfill-quota"}),
+            job_source: PublishJobSource::Backfill.as_str(),
+            state: "pending",
+        },
+    )
+    .expect("job should enqueue");
+
+    let quota_error =
+        "uploadVideo failed (401): {\"jobStatus\":{\"error\":\"daily_vid_limit_exceeded\"}}";
+    let before = Utc::now();
+    let deferred = mark_publish_job_failed(&mut conn, "evt-backfill-quota", quota_error)
+        .expect("quota failure should be recorded");
+
+    let lease = deferred
+        .lease_expires_at
+        .expect("quota deferral must set a lease");
+    assert!(
+        lease > before + Duration::hours(6),
+        "backfill should yield the quota for many hours, got {lease}"
+    );
+    assert!(deferred.completed_at.is_none(), "must stay reclaimable");
 }
