@@ -55,6 +55,10 @@ const MIGRATIONS: &[EmbeddedMigration] = &[
         name: "006_account_pds_session",
         up_sql: include_str!("../../../migrations/006_account_pds_session/up.sql"),
     },
+    EmbeddedMigration {
+        name: "007_operator_actions",
+        up_sql: include_str!("../../../migrations/007_operator_actions/up.sql"),
+    },
 ];
 
 /// Apply all bridge-owned migrations to `database_url` on startup.
@@ -88,6 +92,12 @@ mod tests {
     use super::*;
     use diesel::sql_types::Int8;
     use diesel::{QueryableByName, RunQueryDsl};
+    use std::sync::{Mutex, OnceLock};
+
+    fn test_db_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
 
     fn test_database_url() -> String {
         std::env::var("TEST_DATABASE_URL")
@@ -112,16 +122,52 @@ mod tests {
             > 0
     }
 
+    fn table_exists(conn: &mut PgConnection, table: &str) -> bool {
+        let sql = format!(
+            "SELECT COUNT(*) AS count FROM information_schema.tables \
+             WHERE table_schema = current_schema() AND table_name = '{table}'"
+        );
+        diesel::sql_query(sql)
+            .get_result::<CountRow>(conn)
+            .unwrap()
+            .count
+            > 0
+    }
+
+    #[test]
+    fn migrations_create_operator_action_audit_table() {
+        let _guard = test_db_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut conn = PgConnection::establish(&test_database_url())
+            .expect("test database should be reachable");
+        run_pending_migrations_on(&mut conn).expect("migrations should run");
+        assert!(table_exists(&mut conn, "operator_actions"));
+        assert!(column_exists(
+            &mut conn,
+            "operator_actions",
+            "before_images"
+        ));
+        assert!(column_exists(
+            &mut conn,
+            "operator_actions",
+            "confirmation_digest"
+        ));
+    }
+
     /// Running migrations against a fresh, a partial, and an already-migrated
     /// database must all succeed and converge on the full schema.
     #[test]
     fn migrations_are_idempotent_across_db_states() {
+        let _guard = test_db_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let mut conn = PgConnection::establish(&test_database_url())
             .expect("test database should be reachable");
 
         // Start from a clean slate.
         conn.batch_execute(
-            "DROP TABLE IF EXISTS record_mappings, moderation_actions, publish_jobs, \
+            "DROP TABLE IF EXISTS operator_actions, record_mappings, moderation_actions, publish_jobs, \
              asset_manifest, ingest_offsets, provisioning_keys, account_links CASCADE",
         )
         .unwrap();
@@ -143,7 +189,7 @@ mod tests {
         // missing the 004 columns. A migration run must add them without erroring on
         // the tables that already exist.
         conn.batch_execute(
-            "DROP TABLE IF EXISTS record_mappings, moderation_actions, publish_jobs, \
+            "DROP TABLE IF EXISTS operator_actions, record_mappings, moderation_actions, publish_jobs, \
              asset_manifest, ingest_offsets, provisioning_keys, account_links CASCADE",
         )
         .unwrap();

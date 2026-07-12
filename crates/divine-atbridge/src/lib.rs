@@ -5,6 +5,7 @@ pub mod config;
 pub mod deletion;
 pub mod funnelcake_rest;
 pub mod health;
+pub mod legacy_repair;
 pub mod nostr_consumer;
 pub mod pds_accounts;
 pub mod pds_host_backfill;
