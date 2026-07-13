@@ -10,6 +10,7 @@ fi
 thresholds="$repo_root/.coverage-thresholds.json"
 lcov_path=""
 summary_json_path=""
+base_summary_json_path="${COVERAGE_BASE_SUMMARY_PATH:-}"
 base_ref=""
 diff_path=""
 
@@ -142,14 +143,26 @@ check_floor() {
   }
 }
 
-read -r line_pct function_pct region_pct < <(
+read_summary_percentages() {
   jq -er '
     .data[0].totals as $totals |
     select(($totals.lines.count | type) == "number") |
     select(($totals.functions.count | type) == "number") |
     select(($totals.regions.count | type) == "number" and $totals.regions.count > 0) |
     "\($totals.lines.percent) \($totals.functions.percent) \($totals.regions.percent)"
-  ' "$summary_json_path"
+  ' "$1"
+}
+
+check_non_decreasing() {
+  local name="$1" actual="$2" base="$3"
+  awk -v actual="$actual" -v base="$base" 'BEGIN { exit !(actual + 0.000000001 >= base + 0) }' || {
+    echo "$name coverage regressed from base $base to $actual" >&2
+    exit 1
+  }
+}
+
+read -r line_pct function_pct region_pct < <(
+  read_summary_percentages "$summary_json_path"
 ) || {
   echo "invalid LLVM summary JSON or no instrumented regions" >&2
   exit 2
@@ -158,5 +171,21 @@ read -r line_pct function_pct region_pct < <(
 check_floor lines "$line_pct" "$(jq -r '.global.lines' "$thresholds")"
 check_floor functions "$function_pct" "$(jq -r '.global.functions' "$thresholds")"
 check_floor regions "$region_pct" "$(jq -r '.global.regions' "$thresholds")"
+
+if [[ "$(jq -r '.global.non_decreasing' "$thresholds")" == "true" ]]; then
+  [[ -f "$base_summary_json_path" ]] || {
+    echo "non-decreasing coverage requires COVERAGE_BASE_SUMMARY_PATH" >&2
+    exit 2
+  }
+  read -r base_line_pct base_function_pct base_region_pct < <(
+    read_summary_percentages "$base_summary_json_path"
+  ) || {
+    echo "invalid base LLVM summary JSON or no instrumented regions" >&2
+    exit 2
+  }
+  check_non_decreasing lines "$line_pct" "$base_line_pct"
+  check_non_decreasing functions "$function_pct" "$base_function_pct"
+  check_non_decreasing regions "$region_pct" "$base_region_pct"
+fi
 
 echo "coverage thresholds passed: lines=$line_pct functions=$function_pct regions=$region_pct changed_uncovered=0"

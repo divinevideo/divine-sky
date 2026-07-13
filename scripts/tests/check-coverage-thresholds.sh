@@ -53,6 +53,16 @@ cat >"$tmp_dir/summary.json" <<'JSON'
 {"data":[{"totals":{"lines":{"count":2,"covered":2,"percent":100},"functions":{"count":1,"covered":1,"percent":100},"regions":{"count":2,"covered":2,"percent":100}}}]}
 JSON
 
+cat >"$tmp_dir/base-summary.json" <<'JSON'
+{"data":[{"totals":{"lines":{"count":20,"covered":19,"percent":95},"functions":{"count":20,"covered":19,"percent":95},"regions":{"count":20,"covered":19,"percent":95}}}]}
+JSON
+
+cat >"$tmp_dir/regressed-summary.json" <<'JSON'
+{"data":[{"totals":{"lines":{"count":10,"covered":9,"percent":90},"functions":{"count":10,"covered":9,"percent":90},"regions":{"count":10,"covered":9,"percent":90}}}]}
+JSON
+
+export COVERAGE_BASE_SUMMARY_PATH="$tmp_dir/base-summary.json"
+
 cat >"$tmp_dir/low-regions.json" <<'JSON'
 {"data":[{"totals":{"lines":{"count":2,"covered":2,"percent":100},"functions":{"count":1,"covered":1,"percent":100},"regions":{"count":10,"covered":4,"percent":40}}}]}
 JSON
@@ -78,6 +88,15 @@ if "$checker" \
   --summary-json "$tmp_dir/summary.json" \
   --diff "$tmp_dir/changed.diff"; then
   echo "expected uncovered changed line to fail" >&2
+  exit 1
+fi
+
+if COVERAGE_BASE_SUMMARY_PATH="$tmp_dir/base-summary.json" "$checker" \
+  --thresholds "$tmp_dir/thresholds.json" \
+  --lcov "$tmp_dir/covered.info" \
+  --summary-json "$tmp_dir/regressed-summary.json" \
+  --diff "$tmp_dir/changed.diff"; then
+  echo "expected above-floor aggregate regression against base to fail" >&2
   exit 1
 fi
 
