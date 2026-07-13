@@ -12,13 +12,13 @@
     "allow_uncovered": [
       {"path": "crates/divine-atbridge/src/bin/repair_legacy_badjwt.rs", "line": 93, "reason": "rustc assigns no counter to the covered question-mark expression"},
       {"path": "crates/divine-atbridge/src/legacy_repair.rs", "line": 48, "reason": "Diesel QueryableByName derive declaration"},
-      {"path": "crates/divine-atbridge/src/legacy_repair.rs", "line": 182, "reason": "rustc assigns no counter to the covered question-mark expression"},
-      {"path": "crates/divine-atbridge/src/legacy_repair.rs", "line": 187, "reason": "defense-in-depth check dominated by the preceding digest comparison"},
-      {"path": "crates/divine-atbridge/src/legacy_repair.rs", "line": 193, "reason": "serializable transaction and row predicates make partial update unreachable without database corruption"},
-      {"path": "crates/divine-atbridge/src/legacy_repair.rs", "line": 320, "reason": "rustc closing-expression counter artifact; invalid cursor is tested"},
+      {"path": "crates/divine-atbridge/src/legacy_repair.rs", "line": 186, "reason": "rustc assigns no counter to the covered question-mark expression"},
+      {"path": "crates/divine-atbridge/src/legacy_repair.rs", "line": 191, "reason": "defense-in-depth check dominated by the preceding digest comparison"},
+      {"path": "crates/divine-atbridge/src/legacy_repair.rs", "line": 197, "reason": "serializable transaction and row predicates make partial update unreachable without database corruption"},
+      {"path": "crates/divine-atbridge/src/legacy_repair.rs", "line": 328, "reason": "rustc closing-expression counter artifact; invalid cursor is tested"},
       {"path": "crates/divine-bridge-db/src/models.rs", "line": 278, "reason": "Diesel QueryableByName derive declaration"},
       {"path": "crates/divine-bridge-db/src/queries.rs", "line": 29, "reason": "Diesel QueryableByName derive declaration"},
-      {"path": "crates/divine-bridge-db/src/schema.rs", "line": 113, "reason": "Diesel table macro closing token"}
+      {"path": "crates/divine-bridge-db/src/schema.rs", "line": 113, "reason": "Diesel table macro declaration has no runtime counter"}
     ]
   },
   "exclude": [

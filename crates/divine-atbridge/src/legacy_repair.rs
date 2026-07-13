@@ -58,7 +58,11 @@ struct PersistedAction {
     #[diesel(sql_type = Jsonb)]
     before_images: Value,
     #[diesel(sql_type = BigInt)]
-    changed_count: i64,
+    applied_count: i64,
+    #[diesel(sql_type = BigInt)]
+    rollback_restored_count: i64,
+    #[diesel(sql_type = BigInt)]
+    rollback_skipped_count: i64,
     #[diesel(sql_type = Text)]
     status: String,
     #[diesel(sql_type = Timestamptz)]
@@ -150,7 +154,7 @@ impl LegacyRepairService {
             if action.status == "applied" {
                 return Ok(LegacyRepairApplyResult {
                     operation_id: action.operation_id,
-                    changed_count: action.changed_count,
+                    changed_count: action.applied_count,
                     skipped_count: 0,
                     status: action.status,
                 });
@@ -194,7 +198,8 @@ impl LegacyRepairService {
             }
             diesel::sql_query(
                 "UPDATE operator_actions
-                 SET dry_run = FALSE, changed_count = $2, status = 'applied', updated_at = NOW()
+                 SET dry_run = FALSE, changed_count = $2, applied_count = $2,
+                     applied_at = NOW(), status = 'applied', updated_at = NOW()
                  WHERE operation_id = $1",
             )
             .bind::<Text, _>(operation_id)
@@ -214,11 +219,11 @@ impl LegacyRepairService {
         let mut conn = self.connect()?;
         conn.transaction::<_, anyhow::Error, _>(|conn| {
             let action = load_action_for_update(conn, operation_id)?;
-            if action.status == "rolled_back" {
+            if action.status == "rolled_back" || action.status == "rollback_partial" {
                 return Ok(LegacyRepairApplyResult {
                     operation_id: action.operation_id,
-                    changed_count: action.changed_count,
-                    skipped_count: 0,
+                    changed_count: action.rollback_restored_count,
+                    skipped_count: action.rollback_skipped_count,
                     status: action.status,
                 });
             }
@@ -261,12 +266,14 @@ impl LegacyRepairService {
             };
             diesel::sql_query(
                 "UPDATE operator_actions
-                 SET status = $2, changed_count = $3, updated_at = NOW()
+                 SET status = $2, rollback_restored_count = $3,
+                     rollback_skipped_count = $4, rollback_at = NOW(), updated_at = NOW()
                  WHERE operation_id = $1",
             )
             .bind::<Text, _>(operation_id)
             .bind::<Text, _>(status)
             .bind::<BigInt, _>(changed)
+            .bind::<BigInt, _>(skipped)
             .execute(conn)?;
             Ok(LegacyRepairApplyResult {
                 operation_id: operation_id.to_string(),
@@ -281,7 +288,8 @@ impl LegacyRepairService {
 fn load_action_for_update(conn: &mut PgConnection, operation_id: &str) -> Result<PersistedAction> {
     diesel::sql_query(
         "SELECT operation_id, scope, confirmation_digest, before_images,
-                actor, changed_count, status, updated_at
+                actor, applied_count, rollback_restored_count,
+                rollback_skipped_count, status, updated_at
          FROM operator_actions
          WHERE operation_id = $1
          FOR UPDATE",

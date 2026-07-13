@@ -118,7 +118,7 @@ git commit -m "ci: enforce bridge coverage thresholds"
 
 - [ ] **Step 1: Write the failing migration integration assertion**
 
-In `crates/divine-atbridge/tests/legacy_badjwt_repair.rs`, create an isolated schema using the existing `TEST_DATABASE_URL` pattern, run pending migrations, and assert `operator_actions` has `operation_id`, `action_type`, `actor`, `scope`, `dry_run`, `confirmation_digest`, `before_images`, `matched_count`, `changed_count`, `status`, and timestamps. Assert a duplicate `operation_id` fails.
+In `crates/divine-atbridge/tests/legacy_badjwt_repair.rs`, create an isolated schema using the existing `TEST_DATABASE_URL` pattern, run pending migrations, and assert `operator_actions` has `operation_id`, `action_type`, `actor`, `scope`, `dry_run`, `confirmation_digest`, `before_images`, `matched_count`, `changed_count`, immutable apply/rollback counts and timestamps, and `status`. Assert a duplicate `operation_id` fails.
 
 - [ ] **Step 2: Run RED**
 
@@ -143,6 +143,11 @@ CREATE TABLE IF NOT EXISTS operator_actions (
     before_images JSONB NOT NULL DEFAULT '[]'::jsonb,
     matched_count BIGINT NOT NULL DEFAULT 0,
     changed_count BIGINT NOT NULL DEFAULT 0,
+    applied_count BIGINT NOT NULL DEFAULT 0,
+    applied_at TIMESTAMPTZ,
+    rollback_restored_count BIGINT NOT NULL DEFAULT 0,
+    rollback_skipped_count BIGINT NOT NULL DEFAULT 0,
+    rollback_at TIMESTAMPTZ,
     status TEXT NOT NULL CHECK (status IN ('previewed','applied','rolled_back','failed')),
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
@@ -307,6 +312,12 @@ Do not reset `attempt`; current claim logic will pick the nonterminal failed row
 - [ ] **Step 4: Implement guarded rollback**
 
 Rollback loads the audit before-images and updates a job only when its current state is still `failed`, `completed_at IS NULL`, lease is absent/expired, and `updated_at` equals the action's recorded post-update timestamp. Any changed job produces a nonzero skipped count; rollback never overwrites a claimed/published job.
+
+Apply and rollback remain distinct audit phases: confirmation writes immutable
+`applied_count`/`applied_at`, while rollback writes
+`rollback_restored_count`/`rollback_skipped_count`/`rollback_at`. Repeating a
+full or partial rollback returns those persisted rollback facts without touching
+publish jobs again.
 
 - [ ] **Step 5: Run GREEN and commit**
 

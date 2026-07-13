@@ -2,8 +2,8 @@ use std::process::Command;
 use std::sync::{Mutex, OnceLock};
 
 use chrono::{Duration, Utc};
-use diesel::sql_types::{Bool, Jsonb, Nullable, Text, Timestamptz};
-use diesel::{Connection, PgConnection, RunQueryDsl};
+use diesel::sql_types::{BigInt, Bool, Jsonb, Nullable, Text, Timestamptz};
+use diesel::{Connection, PgConnection, QueryableByName, RunQueryDsl};
 use divine_atbridge::legacy_repair::LegacyRepairService;
 use divine_bridge_db::migrations::run_pending_migrations_on;
 use divine_bridge_db::models::LegacyBadJwtRepairFilter;
@@ -18,6 +18,20 @@ const NEAR_MISS_EVENT: &str = "2222222222222222222222222222222222222222222222222
 const BADJWT: &str = "BadJwt: Signature tag didn't verify";
 const STORED_BADJWT: &str = "failed to upload blob to PDS: failed to get service auth for video \
 upload: getServiceAuth failed (400) for did:plc:repair-test: BadJwt: Signature tag didn't verify";
+
+#[derive(QueryableByName)]
+struct OperatorActionAuditFacts {
+    #[diesel(sql_type = BigInt)]
+    applied_count: i64,
+    #[diesel(sql_type = Nullable<Timestamptz>)]
+    applied_at: Option<chrono::DateTime<Utc>>,
+    #[diesel(sql_type = BigInt)]
+    rollback_restored_count: i64,
+    #[diesel(sql_type = BigInt)]
+    rollback_skipped_count: i64,
+    #[diesel(sql_type = Nullable<Timestamptz>)]
+    rollback_at: Option<chrono::DateTime<Utc>>,
+}
 
 fn test_database_url() -> String {
     std::env::var("TEST_DATABASE_URL")
@@ -261,6 +275,63 @@ fn rollback_skips_a_repair_that_a_worker_has_claimed() {
     assert_eq!(rollback.status, "rollback_partial");
     assert_eq!(rollback.changed_count, 1);
     assert_eq!(rollback.skipped_count, 1);
+
+    let repeated = service
+        .rollback(&preview.operation_id)
+        .expect("partial rollback retry should return its persisted result");
+    assert_eq!(repeated.status, "rollback_partial");
+    assert_eq!(repeated.changed_count, 1);
+    assert_eq!(repeated.skipped_count, 1);
+}
+
+#[test]
+fn rollback_preserves_apply_and_rollback_audit_facts() {
+    let _guard = test_db_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    drop(setup());
+    let service = LegacyRepairService::new(test_database_url());
+    let preview = service
+        .preview(
+            "operator@example.com",
+            LegacyBadJwtRepairFilter {
+                nostr_pubkey: ACCOUNT.to_string(),
+                event_ids: vec![MATCHING_EVENT.to_string(), NEAR_MISS_EVENT.to_string()],
+                exact_error: None,
+                after_event_id: None,
+                limit: 2,
+            },
+        )
+        .expect("preview should persist");
+    let applied = service
+        .confirm(&preview.operation_id, &preview.confirmation_digest)
+        .expect("confirmation should apply");
+
+    let mut conn = PgConnection::establish(&test_database_url()).expect("database should connect");
+    claim_next_live_job(
+        &mut conn,
+        "repair-test-worker",
+        Utc::now() + Duration::minutes(5),
+    )
+    .expect("claim should work")
+    .expect("one repaired job should be claimable");
+    let rolled_back = service
+        .rollback(&preview.operation_id)
+        .expect("partial rollback should persist audit facts");
+
+    let facts = diesel::sql_query(
+        "SELECT applied_count, applied_at, rollback_restored_count, \
+                rollback_skipped_count, rollback_at \
+         FROM operator_actions WHERE operation_id = $1",
+    )
+    .bind::<Text, _>(&preview.operation_id)
+    .get_result::<OperatorActionAuditFacts>(&mut conn)
+    .expect("both audit phases should be queryable");
+    assert_eq!(facts.applied_count, applied.changed_count);
+    assert!(facts.applied_at.is_some());
+    assert_eq!(facts.rollback_restored_count, rolled_back.changed_count);
+    assert_eq!(facts.rollback_skipped_count, rolled_back.skipped_count);
+    assert!(facts.rollback_at.is_some());
 }
 
 #[test]
