@@ -10,7 +10,7 @@ use anyhow::Result;
 use async_trait::async_trait;
 use divine_atbridge::pipeline::{
     AccountLink, AccountStore, AssetManifestRecord, BridgePipeline, HttpBlobFetcher, ProcessResult,
-    RecordMapping, RecordStore,
+    PublishJobEnvelope, RecordMapping, RecordStore,
 };
 use divine_atbridge::publisher::PdsClient;
 use divine_bridge_types::{NostrEvent, RecordStatus};
@@ -121,7 +121,7 @@ impl RecordStore for TrackingRecordStore {
 }
 
 #[tokio::test]
-async fn new_video_posts_use_create_record_with_validate_true_and_no_custom_rkey() {
+async fn queued_video_posts_use_reserved_tid() {
     let mut blossom_server = mockito::Server::new_async().await;
     let video_bytes = b"publish-path-video".to_vec();
     let source_sha256 = hex::encode(Sha256::digest(&video_bytes));
@@ -157,13 +157,13 @@ async fn new_video_posts_use_create_record_with_validate_true_and_no_custom_rkey
     let created_rkey = "3lp5l4phu2k2w";
     let create_mock = pds_server
         .mock("POST", "/xrpc/com.atproto.repo.createRecord")
-        .match_request(|request| {
+        .match_request(move |request| {
             let body: serde_json::Value =
                 serde_json::from_str(&request.utf8_lossy_body().unwrap()).unwrap();
             body["repo"] == "did:plc:integration"
                 && body["collection"] == "app.bsky.feed.post"
                 && body["validate"] == true
-                && body.get("rkey").is_none()
+                && body["rkey"] == created_rkey
         })
         .with_status(200)
         .with_header("content-type", "application/json")
@@ -196,7 +196,17 @@ async fn new_video_posts_use_create_record_with_validate_true_and_no_custom_rkey
         PdsClient::new(pds_server.url(), "integration-token"),
     );
 
-    let result = pipeline.process_event(&event).await;
+    let result = pipeline
+        .execute_publish_job(&PublishJobEnvelope {
+            nostr_event_id: event.id.clone(),
+            nostr_pubkey: event.pubkey.clone(),
+            event_created_at: event.created_at,
+            event_payload: serde_json::to_value(&event).unwrap(),
+            reserved_rkey: Some(created_rkey.to_string()),
+            prepared_record: None,
+        })
+        .await
+        .expect("queued event should execute");
 
     match result {
         ProcessResult::Published { rkey, .. } => assert_eq!(rkey, created_rkey),

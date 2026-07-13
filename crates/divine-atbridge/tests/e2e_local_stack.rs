@@ -7,6 +7,7 @@ use std::fs;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
+use diesel::connection::SimpleConnection;
 use diesel::Connection;
 use diesel::PgConnection;
 use diesel::RunQueryDsl;
@@ -108,13 +109,7 @@ fn test_database_url() -> String {
 }
 
 fn execute_batch(conn: &mut PgConnection, sql: &str) {
-    for statement in sql
-        .split(';')
-        .map(str::trim)
-        .filter(|line| !line.is_empty())
-    {
-        diesel::sql_query(statement).execute(conn).unwrap();
-    }
+    conn.batch_execute(sql).unwrap();
 }
 
 fn reset_database(database_url: &str) {
@@ -131,6 +126,10 @@ fn reset_database(database_url: &str) {
     execute_batch(
         &mut conn,
         include_str!("../../../migrations/004_publish_job_scheduler/up.sql"),
+    );
+    execute_batch(
+        &mut conn,
+        include_str!("../../../migrations/008_publish_job_reserved_rkey/up.sql"),
     );
 }
 
@@ -317,6 +316,8 @@ async fn e2e_local_stack_scheduler_publishes_profiles_posts_and_deletes() {
         )
         .create_async()
         .await;
+    let created_video_rkey = Arc::new(Mutex::new(None::<String>));
+    let response_rkey = created_video_rkey.clone();
     let video_create = pds_server
         .mock("POST", "/xrpc/com.atproto.repo.createRecord")
         .match_request(|request| {
@@ -324,18 +325,23 @@ async fn e2e_local_stack_scheduler_publishes_profiles_posts_and_deletes() {
                 serde_json::from_str(&request.utf8_lossy_body().unwrap()).unwrap();
             body["collection"] == "app.bsky.feed.post"
                 && body["validate"] == true
-                && body.get("rkey").is_none()
+                && body["rkey"].as_str().is_some_and(|rkey| rkey.len() == 13)
         })
         .with_status(200)
         .with_header("content-type", "application/json")
-        .with_body(
+        .with_body_from_request(move |request| {
+            let body: serde_json::Value =
+                serde_json::from_str(&request.utf8_lossy_body().unwrap()).unwrap();
+            let rkey = body["rkey"].as_str().unwrap().to_string();
+            *response_rkey.lock().unwrap() = Some(rkey.clone());
             serde_json::json!({
-                "uri": "at://did:plc:e2e/app.bsky.feed.post/e2e-video",
+                "uri": format!("at://did:plc:e2e/app.bsky.feed.post/{rkey}"),
                 "cid": "bafyrecorde2evideo",
                 "validationStatus": "valid"
             })
-            .to_string(),
-        )
+            .to_string()
+            .into_bytes()
+        })
         .create_async()
         .await;
     let profile_put = pds_server
@@ -357,9 +363,14 @@ async fn e2e_local_stack_scheduler_publishes_profiles_posts_and_deletes() {
         )
         .create_async()
         .await;
+    let delete_expected_rkey = created_video_rkey.clone();
     let delete_mock = pds_server
         .mock("POST", "/xrpc/com.atproto.repo.deleteRecord")
-        .match_body(mockito::Matcher::Regex("e2e-video".to_string()))
+        .match_request(move |request| {
+            let body: serde_json::Value =
+                serde_json::from_str(&request.utf8_lossy_body().unwrap()).unwrap();
+            body["rkey"].as_str() == delete_expected_rkey.lock().unwrap().as_deref()
+        })
         .with_status(200)
         .with_body("{}")
         .create_async()

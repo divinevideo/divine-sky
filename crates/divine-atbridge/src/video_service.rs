@@ -34,8 +34,10 @@ struct UploadVideoResponse {
 
 #[derive(Debug)]
 enum VideoUploadOutcome {
-    Job(String),
-    Blob(BlobRef),
+    FreshJob(String),
+    CachedJob(String),
+    FreshBlob(BlobRef),
+    CachedBlob(BlobRef),
 }
 
 #[derive(Debug, Deserialize)]
@@ -190,7 +192,9 @@ impl VideoServiceUploader {
         Ok(resp.did)
     }
 
-    /// Upload the raw video bytes and return either a new job or a reusable blob.
+    /// Upload the raw video bytes and retain whether the response came from the
+    /// service's cross-account processing cache. Blob CIDs are content-addressed,
+    /// but their availability is scoped to a PDS repository.
     async fn upload_to_video_service(
         &self,
         data: &[u8],
@@ -223,15 +227,16 @@ impl VideoServiceUploader {
             )
         })?;
 
-        // The service reports a previously processed video as `already_exists`
-        // (usually HTTP 409) while still returning the reusable BlobRef. Bluesky's
-        // contract says clients must prefer a present blob regardless of job state.
+        let cached = status == reqwest::StatusCode::CONFLICT
+            || upload.error.as_deref() == Some("already_exists");
+
         if let Some(blob) = upload.blob {
-            return Ok(VideoUploadOutcome::Blob(BlobRef::new(
-                blob.blob_ref.link,
-                blob.mime_type,
-                blob.size,
-            )));
+            let blob = BlobRef::new(blob.blob_ref.link, blob.mime_type, blob.size);
+            return Ok(if cached {
+                VideoUploadOutcome::CachedBlob(blob)
+            } else {
+                VideoUploadOutcome::FreshBlob(blob)
+            });
         }
 
         if !status.is_success() {
@@ -245,7 +250,7 @@ impl VideoServiceUploader {
                         did = %user_did,
                         "video already has a transcoding job; reusing it"
                     );
-                    return Ok(VideoUploadOutcome::Job(id.to_string()));
+                    return Ok(VideoUploadOutcome::CachedJob(id.to_string()));
                 }
             }
             bail!(
@@ -256,7 +261,8 @@ impl VideoServiceUploader {
         }
 
         match upload.job_id {
-            Some(id) => Ok(VideoUploadOutcome::Job(id)),
+            Some(id) if cached => Ok(VideoUploadOutcome::CachedJob(id)),
+            Some(id) => Ok(VideoUploadOutcome::FreshJob(id)),
             None => bail!(
                 "uploadVideo returned no jobId: {}",
                 upload
@@ -373,16 +379,22 @@ impl BlobUploader for VideoServiceUploader {
             .await
             .context("failed to upload to video service")?;
 
-        let job_id = match upload {
-            VideoUploadOutcome::Blob(blob) => {
+        let (job_id, cached) = match upload {
+            VideoUploadOutcome::CachedBlob(blob) => {
                 tracing::info!(
                     did = %user_did,
-                    cid = %blob.cid(),
-                    "video was already processed; reusing existing blob"
+                    cached_cid = %blob.cid(),
+                    "video cache hit is not proof of target-repository blob ownership"
                 );
-                return Ok(blob);
+                return self
+                    .pds_client
+                    .upload_blob_for_did(data, mime_type, user_did)
+                    .await
+                    .context("failed to upload cached video source to target PDS");
             }
-            VideoUploadOutcome::Job(job_id) => job_id,
+            VideoUploadOutcome::FreshBlob(blob) => return Ok(blob),
+            VideoUploadOutcome::FreshJob(job_id) => (job_id, false),
+            VideoUploadOutcome::CachedJob(job_id) => (job_id, true),
         };
 
         tracing::info!(
@@ -391,9 +403,26 @@ impl BlobUploader for VideoServiceUploader {
             "video upload job created, polling for completion"
         );
 
-        self.poll_job(&job_id)
+        let transcoded = self
+            .poll_job(&job_id)
             .await
-            .context("video transcoding job failed")
+            .context("video transcoding job failed")?;
+
+        if cached {
+            tracing::info!(
+                job_id = %job_id,
+                did = %user_did,
+                cached_cid = %transcoded.cid(),
+                "cached video job completed; uploading source into target repository"
+            );
+            return self
+                .pds_client
+                .upload_blob_for_did(data, mime_type, user_did)
+                .await
+                .context("failed to upload cached video source to target PDS");
+        }
+
+        Ok(transcoded)
     }
 }
 
@@ -407,8 +436,24 @@ mod tests {
     use mockito::Matcher;
 
     #[tokio::test]
-    async fn upload_video_reuses_blob_when_video_was_already_processed() {
+    async fn cached_video_is_uploaded_directly_to_target_pds() {
         let mut server = mockito::Server::new_async().await;
+        let describe = server
+            .mock("GET", "/xrpc/com.atproto.server.describeServer")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"did":"did:web:pds.example"}"#)
+            .create_async()
+            .await;
+        let service_auth = server
+            .mock("GET", "/xrpc/com.atproto.server.getServiceAuth")
+            .match_header("authorization", "Bearer account-token")
+            .match_query(Matcher::Any)
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"token":"service-token"}"#)
+            .create_async()
+            .await;
         let upload = server
             .mock("POST", "/xrpc/app.bsky.video.uploadVideo")
             .match_query(Matcher::AllOf(vec![
@@ -425,7 +470,7 @@ mod tests {
                     "message": "video has already been processed",
                     "blob": {
                         "$type": "blob",
-                        "ref": { "$link": "bafkreiexistingvideo" },
+                        "ref": { "$link": "bafkreiotherrepo" },
                         "mimeType": "video/mp4",
                         "size": 1_866_809
                     }
@@ -434,31 +479,48 @@ mod tests {
             )
             .create_async()
             .await;
+        let target_upload = server
+            .mock("POST", "/xrpc/com.atproto.repo.uploadBlob")
+            .match_header("authorization", "Bearer account-token")
+            .match_header("content-type", "video/mp4")
+            .match_body(b"video".to_vec())
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                serde_json::json!({
+                    "blob": {
+                        "$type": "blob",
+                        "ref": { "$link": "bafkreitargetrepo" },
+                        "mimeType": "video/mp4",
+                        "size": 5
+                    }
+                })
+                .to_string(),
+            )
+            .create_async()
+            .await;
 
         let uploader = VideoServiceUploader::new(
-            PdsClient::new("http://127.0.0.1:9", "unused"),
-            "http://127.0.0.1:9".to_string(),
+            PdsClient::new(server.url(), "account-token"),
+            server.url(),
             server.url(),
             Duration::from_secs(1),
             Duration::ZERO,
         );
 
-        let outcome = uploader
-            .upload_to_video_service(b"video", "service-token", "did:plc:alice")
+        let blob = uploader
+            .upload_blob_for_user(b"video", "video/mp4", "did:plc:alice")
             .await
-            .expect("an already-processed video should reuse its blob");
+            .expect("cached video should be uploaded into the target repository");
 
-        match outcome {
-            VideoUploadOutcome::Blob(blob) => {
-                assert_eq!(blob.cid(), "bafkreiexistingvideo");
-                assert_eq!(blob.mime_type, "video/mp4");
-                assert_eq!(blob.size, 1_866_809);
-            }
-            VideoUploadOutcome::Job(job_id) => {
-                panic!("expected an existing blob, got job {job_id}")
-            }
-        }
+        assert_eq!(blob.cid(), "bafkreitargetrepo");
+        assert_ne!(blob.cid(), "bafkreiotherrepo");
+        assert_eq!(blob.mime_type, "video/mp4");
+        assert_eq!(blob.size, 5);
+        describe.assert_async().await;
+        service_auth.assert_async().await;
         upload.assert_async().await;
+        target_upload.assert_async().await;
     }
 
     #[tokio::test]
@@ -479,7 +541,31 @@ mod tests {
             .await
             .expect("a new video should return its job");
 
-        assert!(matches!(outcome, VideoUploadOutcome::Job(id) if id == "new-job"));
+        assert!(matches!(outcome, VideoUploadOutcome::FreshJob(id) if id == "new-job"));
+        upload.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn successful_already_exists_response_is_still_a_cached_job() {
+        let mut server = mockito::Server::new_async().await;
+        let upload = server
+            .mock("POST", "/xrpc/app.bsky.video.uploadVideo")
+            .match_query(Matcher::Any)
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                r#"{"jobId":"existing-job","state":"JOB_STATE_COMPLETED","error":"already_exists"}"#,
+            )
+            .create_async()
+            .await;
+        let uploader = test_uploader(server.url());
+
+        let outcome = uploader
+            .upload_to_video_service(b"video", "service-token", "did:plc:alice")
+            .await
+            .expect("already_exists should preserve cache provenance at any HTTP status");
+
+        assert!(matches!(outcome, VideoUploadOutcome::CachedJob(id) if id == "existing-job"));
         upload.assert_async().await;
     }
 
@@ -591,6 +677,26 @@ mod tests {
             )
             .create_async()
             .await;
+        let target_upload = server
+            .mock("POST", "/xrpc/com.atproto.repo.uploadBlob")
+            .match_header("authorization", "Bearer tok")
+            .match_header("content-type", "video/mp4")
+            .match_body(b"video-bytes".to_vec())
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                serde_json::json!({
+                    "blob": {
+                        "$type": "blob",
+                        "ref": { "$link": "bafkreitargetvideo" },
+                        "mimeType": "video/mp4",
+                        "size": 11
+                    }
+                })
+                .to_string(),
+            )
+            .create_async()
+            .await;
 
         let uploader = VideoServiceUploader::new(
             PdsClient::new(server.url(), "tok"),
@@ -603,11 +709,75 @@ mod tests {
         let blob = uploader
             .upload_blob_for_user(b"video-bytes", "video/mp4", "did:plc:user")
             .await
-            .expect("409 already_exists with jobId should resolve to the cached job's blob");
+            .expect("a cached job should upload source bytes into the target repository");
 
-        assert_eq!(blob.cid(), "bafkreicachedvideo");
+        assert_eq!(blob.cid(), "bafkreitargetvideo");
         assert_eq!(blob.mime_type, "video/mp4");
-        assert_eq!(blob.size, 2048);
+        assert_eq!(blob.size, 11);
+        describe.assert_async().await;
+        service_auth.assert_async().await;
+        upload.assert_async().await;
+        job_status.assert_async().await;
+        target_upload.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn fresh_video_job_does_not_call_direct_pds_upload() {
+        let mut server = mockito::Server::new_async().await;
+        let describe = server
+            .mock("GET", "/xrpc/com.atproto.server.describeServer")
+            .with_status(200)
+            .with_body(r#"{"did":"did:web:pds.example"}"#)
+            .create_async()
+            .await;
+        let service_auth = server
+            .mock("GET", "/xrpc/com.atproto.server.getServiceAuth")
+            .match_query(Matcher::Any)
+            .with_status(200)
+            .with_body(r#"{"token":"service-token"}"#)
+            .create_async()
+            .await;
+        let upload = server
+            .mock("POST", "/xrpc/app.bsky.video.uploadVideo")
+            .match_query(Matcher::Any)
+            .with_status(200)
+            .with_body(r#"{"jobId":"fresh-job","state":"JOB_STATE_CREATED"}"#)
+            .create_async()
+            .await;
+        let job_status = server
+            .mock("GET", "/xrpc/app.bsky.video.getJobStatus")
+            .match_query(Matcher::UrlEncoded("jobId".into(), "fresh-job".into()))
+            .with_status(200)
+            .with_body(
+                r#"{
+                    "jobStatus": {
+                        "state": "JOB_STATE_COMPLETED",
+                        "blob": {
+                            "ref": {"$link": "bafkreifreshvideo"},
+                            "mimeType": "video/mp4",
+                            "size": 4096
+                        }
+                    }
+                }"#,
+            )
+            .create_async()
+            .await;
+
+        let uploader = VideoServiceUploader::new(
+            PdsClient::new(server.url(), "tok"),
+            server.url(),
+            server.url(),
+            Duration::from_secs(5),
+            Duration::ZERO,
+        );
+
+        let blob = uploader
+            .upload_blob_for_user(b"fresh-video", "video/mp4", "did:plc:user")
+            .await
+            .expect("fresh video job should use its target-repository result");
+
+        assert_eq!(blob.cid(), "bafkreifreshvideo");
+        assert_eq!(blob.size, 4096);
         describe.assert_async().await;
         service_auth.assert_async().await;
         upload.assert_async().await;

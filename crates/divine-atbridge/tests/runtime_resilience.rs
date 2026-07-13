@@ -9,6 +9,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use chrono::{TimeZone, Utc};
+use diesel::connection::SimpleConnection;
 use diesel::Connection;
 use diesel::PgConnection;
 use diesel::RunQueryDsl;
@@ -24,7 +25,8 @@ use divine_atbridge::runtime::{
 };
 use divine_bridge_db::models::NewPublishJob;
 use divine_bridge_db::{
-    enqueue_publish_job, get_ingest_offset, get_publish_job, get_record_mapping,
+    claim_next_live_job, enqueue_publish_job, get_ingest_offset, get_publish_job,
+    get_record_mapping,
 };
 use divine_bridge_types::{BlobRef, NostrEvent, RecordStatus};
 use secp256k1::rand::rngs::OsRng;
@@ -79,19 +81,27 @@ fn make_profile_event(keypair: &Keypair, created_at: i64, display_name: &str) ->
     )
 }
 
+fn make_video_event(keypair: &Keypair, created_at: i64, url: &str, sha256: &str) -> NostrEvent {
+    make_signed_event_with_keypair(
+        keypair,
+        34235,
+        created_at,
+        "crash recovery video",
+        vec![
+            vec!["title".into(), "Crash Recovery".into()],
+            vec!["url".into(), url.into()],
+            vec!["x".into(), sha256.into()],
+        ],
+    )
+}
+
 fn test_database_url() -> String {
     std::env::var("TEST_DATABASE_URL")
         .unwrap_or_else(|_| "postgres://divine:divine_dev@[::1]:5432/divine_bridge".to_string())
 }
 
 fn execute_batch(conn: &mut PgConnection, sql: &str) {
-    for statement in sql
-        .split(';')
-        .map(str::trim)
-        .filter(|line| !line.is_empty())
-    {
-        diesel::sql_query(statement).execute(conn).unwrap();
-    }
+    conn.batch_execute(sql).unwrap();
 }
 
 fn reset_database(database_url: &str) {
@@ -108,6 +118,10 @@ fn reset_database(database_url: &str) {
     execute_batch(
         &mut conn,
         include_str!("../../../migrations/004_publish_job_scheduler/up.sql"),
+    );
+    execute_batch(
+        &mut conn,
+        include_str!("../../../migrations/008_publish_job_reserved_rkey/up.sql"),
     );
 }
 
@@ -256,6 +270,97 @@ impl BlobUploader for NoopBlobUploader {
             "application/octet-stream".to_string(),
             0,
         ))
+    }
+}
+
+struct CountingVideoFetcher {
+    data: Vec<u8>,
+    calls: Arc<Mutex<usize>>,
+}
+
+#[async_trait]
+impl BlobFetcher for CountingVideoFetcher {
+    async fn fetch_blob(&self, _url: &str) -> Result<(Vec<u8>, String)> {
+        *self.calls.lock().unwrap() += 1;
+        Ok((self.data.clone(), "video/mp4".to_string()))
+    }
+}
+
+struct ChangingBlobUploader {
+    calls: Arc<Mutex<usize>>,
+}
+
+#[async_trait]
+impl BlobUploader for ChangingBlobUploader {
+    async fn upload_blob(&self, data: &[u8], mime_type: &str) -> Result<BlobRef> {
+        let mut calls = self.calls.lock().unwrap();
+        *calls += 1;
+        Ok(BlobRef::new(
+            format!("bafy-video-attempt-{calls}"),
+            mime_type.to_string(),
+            data.len() as u64,
+        ))
+    }
+}
+
+#[derive(Default)]
+struct CommitThenLoseResponsePublisher {
+    committed: Mutex<Option<(String, serde_json::Value)>>,
+    calls: Mutex<usize>,
+}
+
+#[async_trait]
+impl PdsPublisher for CommitThenLoseResponsePublisher {
+    async fn create_record(
+        &self,
+        _did: &str,
+        _collection: &str,
+        _record: &serde_json::Value,
+    ) -> Result<String> {
+        Err(anyhow!("reserved create path required"))
+    }
+
+    async fn create_record_at_rkey_with_meta(
+        &self,
+        did: &str,
+        collection: &str,
+        rkey: &str,
+        record: &serde_json::Value,
+    ) -> Result<PublishedRecord> {
+        let mut calls = self.calls.lock().unwrap();
+        *calls += 1;
+        let uri = format!("at://{did}/{collection}/{rkey}");
+        let mut committed = self.committed.lock().unwrap();
+        match committed.as_ref() {
+            None => {
+                *committed = Some((uri, record.clone()));
+                Err(anyhow!("synthetic lost response after PDS commit"))
+            }
+            Some((stored_uri, stored_record)) => {
+                if stored_record != record {
+                    return Err(anyhow!("REMOTE_RECORD_DIVERGED"));
+                }
+                Ok(PublishedRecord {
+                    at_uri: stored_uri.clone(),
+                    rkey: rkey.to_string(),
+                    cid: Some("bafy-recovered-record".to_string()),
+                })
+            }
+        }
+    }
+
+    async fn put_record(
+        &self,
+        _did: &str,
+        _collection: &str,
+        _rkey: &str,
+        _record: &serde_json::Value,
+    ) -> Result<String> {
+        Err(anyhow!("profile path not used"))
+    }
+
+    async fn delete_record(&self, _did: &str, _collection: &str, _rkey: &str) -> Result<()> {
+        Ok(())
     }
 }
 
@@ -606,11 +711,16 @@ async fn runtime_scheduler_reclaims_expired_worker_leases() {
             },
         )
         .expect("job should enqueue");
+        claim_next_live_job(
+            &mut conn,
+            "dead-worker",
+            Utc::now() + chrono::Duration::minutes(5),
+        )
+        .expect("dead worker claim should work")
+        .expect("job should be claimable");
         diesel::sql_query(format!(
             "UPDATE publish_jobs
-             SET state = 'in_progress',
-                 lease_owner = 'dead-worker',
-                 lease_expires_at = NOW() - INTERVAL '1 second'
+             SET lease_expires_at = NOW() - INTERVAL '1 second'
              WHERE nostr_event_id = '{}'",
             event.id
         ))
@@ -645,4 +755,111 @@ async fn runtime_scheduler_reclaims_expired_worker_leases() {
         .expect("job lookup should succeed")
         .expect("job should still exist");
     assert_eq!(job.state, "published");
+}
+
+#[tokio::test]
+async fn pds_commit_then_lost_response_reuses_prepared_record_without_duplicate_media() {
+    let _guard = test_db_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let database_url = test_database_url();
+    reset_database(&database_url);
+    let connection = shared_connection(&database_url);
+
+    let secp = Secp256k1::new();
+    let keypair = Keypair::new(&secp, &mut OsRng);
+    let video = b"prepared-record-crash-video".to_vec();
+    let sha256 = hex::encode(Sha256::digest(&video));
+    let event = make_video_event(
+        &keypair,
+        1_700_100_040,
+        "https://blossom.example/crash.mp4",
+        &sha256,
+    );
+    {
+        let mut conn = connection.lock().unwrap();
+        insert_ready_account(
+            &mut conn,
+            &event.pubkey,
+            "did:plc:runtime-crash",
+            "runtime-crash.divine.video",
+        );
+    }
+
+    let fetch_calls = Arc::new(Mutex::new(0));
+    let upload_calls = Arc::new(Mutex::new(0));
+    let pipeline = BridgePipeline::new(
+        DbAccountStore::new(connection.clone()),
+        DbRecordStore::new(connection.clone()),
+        CountingVideoFetcher {
+            data: video,
+            calls: Arc::clone(&fetch_calls),
+        },
+        ChangingBlobUploader {
+            calls: Arc::clone(&upload_calls),
+        },
+        CommitThenLoseResponsePublisher::default(),
+    );
+
+    enqueue_live_event(&connection, "runtime-crash-test", &pipeline, &event)
+        .await
+        .expect("video should enqueue");
+
+    let first = run_publish_worker_once(
+        &connection,
+        &pipeline,
+        divine_bridge_types::PublishJobSource::Live,
+        "crash-worker-1",
+    )
+    .await
+    .expect("first attempt should be recorded as failed");
+    assert!(matches!(first, WorkerRunResult::Failed { .. }));
+
+    let (reserved_rkey, prepared_record) = {
+        let mut conn = connection.lock().unwrap();
+        let job = get_publish_job(&mut conn, &event.id)
+            .expect("job lookup should work")
+            .expect("job should exist");
+        diesel::sql_query(format!(
+            "UPDATE publish_jobs
+             SET lease_expires_at = NOW() - INTERVAL '1 second'
+             WHERE nostr_event_id = '{}'",
+            event.id
+        ))
+        .execute(&mut *conn)
+        .expect("retry lease should be made ready");
+        (
+            job.reserved_rkey
+                .expect("rkey must be durable before create"),
+            job.prepared_record
+                .expect("record must be durable before create"),
+        )
+    };
+
+    let second = run_publish_worker_once(
+        &connection,
+        &pipeline,
+        divine_bridge_types::PublishJobSource::Live,
+        "crash-worker-2",
+    )
+    .await
+    .expect("retry should recover the committed record");
+    assert!(matches!(second, WorkerRunResult::Completed { .. }));
+    assert_eq!(*fetch_calls.lock().unwrap(), 1, "retry must not refetch");
+    assert_eq!(*upload_calls.lock().unwrap(), 1, "retry must not reupload");
+
+    let mut conn = connection.lock().unwrap();
+    let completed = get_publish_job(&mut conn, &event.id)
+        .expect("job lookup should work")
+        .expect("job should exist");
+    assert_eq!(
+        completed.reserved_rkey.as_deref(),
+        Some(reserved_rkey.as_str())
+    );
+    assert_eq!(completed.prepared_record, Some(prepared_record));
+    assert_eq!(completed.state, "published");
+    let mapping = get_record_mapping(&mut conn, &event.id)
+        .expect("mapping lookup should work")
+        .expect("recovery must persist mapping");
+    assert_eq!(mapping.rkey, reserved_rkey);
 }

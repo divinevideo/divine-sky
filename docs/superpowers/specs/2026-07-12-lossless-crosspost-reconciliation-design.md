@@ -538,7 +538,10 @@ publication_intents
 The standard TID generator runs under the uniqueness constraint and the intent
 commits before the remote side effect. Original Nostr time remains in record
 `createdAt`; the TID represents bridge publication time. Media job ID, resulting
-blob/CID, and caption outcomes are persisted idempotently in `media_ready`.
+blob/CID, target repository DID, and caption outcomes are persisted idempotently
+in `media_ready`. Blob identity is content-addressed, but blob availability is
+repository-scoped: a CID returned while processing one DID is not evidence that
+`com.atproto.sync.getBlob` can serve it for another DID.
 Only then does a CAS persist the exact canonical record plus its hash and advance
 to `prepared`; `written` is impossible without both. Queue deletion cannot erase
 the intent or prepared artifact.
@@ -556,6 +559,39 @@ atomic create-only or equivalent `swapRecord` CAS is implemented and tested.
 Existing TID mappings remain valid and are materialized as already-mapped
 intents. Reconciliation never allocates a second intent for a mapped event.
 
+### Repository-scoped video blobs and duplicate sources
+
+Source/event deduplication and AT record deduplication remain mandatory, but a
+blob reference is never reused across repositories without proving availability
+for the target DID. Video-service `already_exists` means the bytes were processed
+somewhere; it does not prove that the optimized blob was uploaded into this
+user's PDS repository.
+
+For every video publication the worker obtains exactly one target-repository
+blob before preparing the one reserved AT record:
+
+1. a fresh video-service job completes only after the service has uploaded the
+   optimized blob to the target PDS using that account's service token;
+2. if `uploadVideo` or `getJobStatus` reports `already_exists`, the bridge does
+   not publish the cached cross-repository `BlobRef`;
+3. the compatibility fallback uploads the verified source bytes directly with
+   `com.atproto.repo.uploadBlob` as the target DID and uses that returned
+   repo-owned `BlobRef`; this is Bluesky's supported simple-upload flow, so
+   downstream processing may briefly lag but the post cannot permanently point
+   at `BlobNotFound`;
+4. later optimized reuse may copy bytes only from a proven local
+   `(source_sha256, owner_repo_did, blob_cid)` binding and must upload them to the
+   target repository before use.
+
+The fallback changes only the blob selected for the reserved publication
+intent. It never calls `createRecord` twice, allocates another rkey, or creates a
+second post. A retry reuses the same durable intent/rkey. Any ambiguous create
+failure—including `RecordAlreadyExists`, rsky's current generic HTTP 500 for an
+existing key, or a lost response—is recovered by reading that exact reserved
+URI and accepting it only when the canonical record equals the prepared record;
+different content is `REMOTE_RECORD_DIVERGED` and requires review. If the URI is
+absent, the original create failure remains retryable.
+
 Unfenced legacy auto-rkey `createRecord` and supplied-TID intent writers are never
 active concurrently.
 Accounts carry `publication_mode = legacy | draining | intent_v1`. During
@@ -567,6 +603,17 @@ use only a compatible binary preserving
 reserved intents; rolling back to unfenced `createRecord` is forbidden. A
 mixed-version fault test pauses after PDS commit and proves a legacy claimer
 cannot create a second TID record.
+
+The compatibility release implements that fence on the existing queue before
+the full intent table lands. Schema default `writer_epoch=1` keeps old-binary
+inserts quarantined. New claim SQL selects epoch 2 and supplies a
+transaction-local marker enforced by a database trigger; an old binary cannot
+claim after the fence is installed, while an already in-flight old claim may
+finish but can never be reclaimed by the new writer. A new enqueue may promote
+an epoch-1 row only when it is provably pristine (`pending`, attempt zero, and
+no lease, reservation, prepared record, or completion). Attempted epoch-1 work
+requires explicit classification. The bounded BadJwt repair may promote its
+confirmed rows because that error occurs before `createRecord`.
 
 ### Publication/deletion race protocol
 
@@ -763,9 +810,14 @@ team, severity, and safe repair operation.
 
 ### Immediate incident repair
 
-1. Deploy the already merged proactive session-refresh image to staging.
-2. Exercise an expired session and verify refresh, media upload, record creation,
-   rotated-session persistence, and playback.
+1. Deploy the proactive session-refresh image to staging only. Promotion is
+   blocked if a repeated source video produces `BlobNotFound` for a second DID or
+   if replay can allocate a second AT record.
+2. Exercise a fresh session and an expired session. Publish the same verified
+   source bytes from two isolated accounts and verify each target DID serves its
+   selected blob. Inject a crash after the PDS create response and before mapping
+   persistence; restart must recover the same reserved URI and leave exactly one
+   feed record.
 3. Promote the identical digest to production.
 4. Run the slice-1 `divine-atbridge repair-legacy-badjwt` command, which works on
    the current schema. It is dry-run by default; requires explicit full event IDs
@@ -865,6 +917,7 @@ Every invariant has an executable proof owner:
 | page atomicity and scan CAS | isolated PostgreSQL integration fixtures with crash injection after every write boundary |
 | >100 archive, >500 outage catch-up, two interleaved users | cross-service integration tests |
 | PDS commit then bridge crash | mock-PDS fault test; restart proves one reserved record and recovered mapping |
+| same source bytes for two DIDs | video-service `already_exists` test plus per-DID PDS `getBlob`; one record per event |
 | deletion before/after/racing publish; no resurrection | PostgreSQL + mock-PDS concurrency tests |
 | retry beyond old cap, typed rejection, fair scheduling | Rust scheduler tests with deterministic clock |
 | session CAS/encryption/redaction | unit/integration tests with fake KMS and log assertions |
@@ -906,6 +959,8 @@ Additional required cases:
 - moderation block/unblock, missed moderation notification, and block racing
   `putRecord` converge without a lasting record;
 - legacy/intent writer draining plus PDS/local crash creates one record;
+- video-service `already_exists` never reuses an unavailable cross-repository
+  blob and never creates a second post;
 - account disconnect racing publication ends with no AT record or stored
   session;
 - disconnect/reconnect, disconnect with revoked credentials, cleanup deadline,
@@ -964,3 +1019,6 @@ The work is complete when:
    tests before a user report is required.
 11. Staging and production use identical verified image digests per promoted
    service revision.
+12. Publishing the same source video for two connected DIDs leaves one AT record
+    per eligible source event, and each record's blob is retrievable for its own
+    DID; crash/retry does not change either reserved AT URI.
