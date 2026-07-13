@@ -59,14 +59,18 @@ jobs:
           base_parent="$(mktemp -d)"
           base_worktree="$base_parent/worktree"
           git worktree add --detach "$base_worktree" "$COVERAGE_BASE"
-          trap 'git worktree remove --force "$base_worktree" 2>/dev/null || true' EXIT
+          cleanup_coverage_base() {
+            git worktree remove --force "$base_worktree" 2>/dev/null || true
+            rm -rf "$base_parent" "$GITHUB_WORKSPACE/target/llvm-cov-base-target"
+          }
+          trap cleanup_coverage_base EXIT
           (
             cd "$base_worktree"
             CARGO_TARGET_DIR="$GITHUB_WORKSPACE/target/llvm-cov-base-target" \
               cargo llvm-cov --workspace --all-features --json --summary-only \
                 --output-path "$GITHUB_WORKSPACE/target/llvm-cov/base-summary.json"
           )
-          git worktree remove --force "$base_worktree"
+          cleanup_coverage_base
           trap - EXIT
           cargo llvm-cov --workspace --all-features --lcov --output-path target/llvm-cov/lcov.info
           cargo llvm-cov report --json --summary-only --output-path target/llvm-cov/summary.json

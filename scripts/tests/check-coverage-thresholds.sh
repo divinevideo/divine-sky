@@ -57,8 +57,16 @@ cat >"$tmp_dir/base-summary.json" <<'JSON'
 {"data":[{"totals":{"lines":{"count":20,"covered":19,"percent":95},"functions":{"count":20,"covered":19,"percent":95},"regions":{"count":20,"covered":19,"percent":95}}}]}
 JSON
 
-cat >"$tmp_dir/regressed-summary.json" <<'JSON'
-{"data":[{"totals":{"lines":{"count":10,"covered":9,"percent":90},"functions":{"count":10,"covered":9,"percent":90},"regions":{"count":10,"covered":9,"percent":90}}}]}
+cat >"$tmp_dir/regressed-lines-summary.json" <<'JSON'
+{"data":[{"totals":{"lines":{"count":10,"covered":9,"percent":90},"functions":{"count":20,"covered":19,"percent":95},"regions":{"count":20,"covered":19,"percent":95}}}]}
+JSON
+
+cat >"$tmp_dir/regressed-functions-summary.json" <<'JSON'
+{"data":[{"totals":{"lines":{"count":20,"covered":19,"percent":95},"functions":{"count":10,"covered":9,"percent":90},"regions":{"count":20,"covered":19,"percent":95}}}]}
+JSON
+
+cat >"$tmp_dir/regressed-regions-summary.json" <<'JSON'
+{"data":[{"totals":{"lines":{"count":20,"covered":19,"percent":95},"functions":{"count":20,"covered":19,"percent":95},"regions":{"count":10,"covered":9,"percent":90}}}]}
 JSON
 
 export COVERAGE_BASE_SUMMARY_PATH="$tmp_dir/base-summary.json"
@@ -91,14 +99,16 @@ if "$checker" \
   exit 1
 fi
 
-if COVERAGE_BASE_SUMMARY_PATH="$tmp_dir/base-summary.json" "$checker" \
-  --thresholds "$tmp_dir/thresholds.json" \
-  --lcov "$tmp_dir/covered.info" \
-  --summary-json "$tmp_dir/regressed-summary.json" \
-  --diff "$tmp_dir/changed.diff"; then
-  echo "expected above-floor aggregate regression against base to fail" >&2
-  exit 1
-fi
+for metric in lines functions regions; do
+  if COVERAGE_BASE_SUMMARY_PATH="$tmp_dir/base-summary.json" "$checker" \
+    --thresholds "$tmp_dir/thresholds.json" \
+    --lcov "$tmp_dir/covered.info" \
+    --summary-json "$tmp_dir/regressed-$metric-summary.json" \
+    --diff "$tmp_dir/changed.diff"; then
+    echo "expected above-floor $metric regression against base to fail" >&2
+    exit 1
+  fi
+done
 
 if "$checker" \
   --thresholds "$tmp_dir/thresholds.json" \
