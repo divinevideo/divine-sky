@@ -96,6 +96,28 @@ diesel::table! {
 }
 
 diesel::table! {
+    operator_actions (operation_id) {
+        operation_id -> Text,
+        action_type -> Text,
+        actor -> Text,
+        scope -> Jsonb,
+        dry_run -> Bool,
+        confirmation_digest -> Text,
+        before_images -> Jsonb,
+        matched_count -> Int8,
+        changed_count -> Int8,
+        applied_count -> Int8,
+        applied_at -> Nullable<Timestamptz>,
+        rollback_restored_count -> Int8,
+        rollback_skipped_count -> Int8,
+        rollback_at -> Nullable<Timestamptz>,
+        status -> Text,
+        created_at -> Timestamptz,
+        updated_at -> Timestamptz,
+    }
+}
+
+diesel::table! {
     labeler_events (seq) {
         seq -> Int8,
         src_did -> Text,
@@ -212,6 +234,7 @@ diesel::allow_tables_to_appear_in_same_query!(
     record_mappings,
     moderation_actions,
     publish_jobs,
+    operator_actions,
     labeler_events,
     inbound_labels,
     appview_repos,

@@ -6,7 +6,7 @@ use anyhow::{anyhow, Result};
 use chrono::{DateTime, Utc};
 use diesel::prelude::*;
 use diesel::sql_query;
-use diesel::sql_types::{Int8, Nullable, Text, Timestamptz};
+use diesel::sql_types::{Array, BigInt, Int8, Nullable, Text, Timestamptz};
 use diesel::PgConnection;
 use diesel::PgTextExpressionMethods;
 
@@ -24,6 +24,12 @@ const ACCOUNT_LINK_LIFECYCLE_COLUMNS: &str = "nostr_pubkey, did, handle, crosspo
 struct PublishJobIdRow {
     #[diesel(sql_type = Text)]
     nostr_event_id: String,
+}
+
+#[derive(Debug, QueryableByName)]
+struct LegacyRepairCountRow {
+    #[diesel(sql_type = BigInt)]
+    count: i64,
 }
 
 // ---------------------------------------------------------------------------
@@ -610,6 +616,159 @@ pub fn update_moderation_action_state(
 // ---------------------------------------------------------------------------
 // publish_jobs queries
 // ---------------------------------------------------------------------------
+
+const LEGACY_REPAIR_PREDICATE: &str = "
+    FROM publish_jobs p
+    INNER JOIN account_links a ON a.nostr_pubkey = p.nostr_pubkey
+    WHERE p.nostr_pubkey = $1
+      AND a.provisioning_state = 'ready'
+      AND a.crosspost_enabled = TRUE
+      AND p.state = 'failed'
+      AND p.completed_at IS NOT NULL
+      AND p.lease_owner IS NULL
+      AND (p.lease_expires_at IS NULL OR p.lease_expires_at <= NOW())
+      AND (
+        (cardinality($2::text[]) > 0 AND p.nostr_event_id = ANY($2))
+        OR (
+          $3::text IS NOT NULL
+          AND (
+            p.error = $3
+            OR (
+              $3 = 'BadJwt: Signature tag didn''t verify'
+              AND POSITION('getServiceAuth failed (400)' IN p.error) > 0
+              AND POSITION('BadJwt: Signature tag didn''t verify' IN p.error) > 0
+            )
+          )
+        )
+      )";
+
+/// Preview an exact, bounded page of terminal legacy BadJwt jobs.
+pub fn preview_legacy_badjwt_repair(
+    conn: &mut PgConnection,
+    filter: &LegacyBadJwtRepairFilter,
+) -> Result<LegacyBadJwtRepairPreview> {
+    preview_legacy_badjwt_repair_impl(conn, filter, false)
+}
+
+/// Preview and lock the selected publish jobs for an audited confirmation.
+pub fn lock_legacy_badjwt_repair_candidates(
+    conn: &mut PgConnection,
+    filter: &LegacyBadJwtRepairFilter,
+) -> Result<LegacyBadJwtRepairPreview> {
+    preview_legacy_badjwt_repair_impl(conn, filter, true)
+}
+
+fn preview_legacy_badjwt_repair_impl(
+    conn: &mut PgConnection,
+    filter: &LegacyBadJwtRepairFilter,
+    lock_candidates: bool,
+) -> Result<LegacyBadJwtRepairPreview> {
+    validate_legacy_repair_filter(filter)?;
+
+    let count_sql = format!("SELECT COUNT(*) AS count {LEGACY_REPAIR_PREDICATE}");
+    let total_matching = sql_query(count_sql)
+        .bind::<Text, _>(&filter.nostr_pubkey)
+        .bind::<Array<Text>, _>(&filter.event_ids)
+        .bind::<Nullable<Text>, _>(filter.exact_error.as_deref())
+        .get_result::<LegacyRepairCountRow>(conn)?
+        .count;
+
+    let row_lock = if lock_candidates {
+        " FOR UPDATE OF p"
+    } else {
+        ""
+    };
+    let page_sql = format!(
+        "SELECT p.nostr_event_id, p.state, p.attempt, p.error, p.lease_owner, \
+                p.lease_expires_at, p.completed_at, p.updated_at \
+         {LEGACY_REPAIR_PREDICATE} \
+           AND ($4::text IS NULL OR p.nostr_event_id > $4) \
+         ORDER BY p.nostr_event_id ASC \
+         LIMIT $5{row_lock}"
+    );
+    let mut jobs = sql_query(page_sql)
+        .bind::<Text, _>(&filter.nostr_pubkey)
+        .bind::<Array<Text>, _>(&filter.event_ids)
+        .bind::<Nullable<Text>, _>(filter.exact_error.as_deref())
+        .bind::<Nullable<Text>, _>(filter.after_event_id.as_deref())
+        .bind::<BigInt, _>(filter.limit + 1)
+        .load::<LegacyRepairJobSnapshot>(conn)?;
+    let has_more = jobs.len() as i64 > filter.limit;
+    if has_more {
+        jobs.truncate(filter.limit as usize);
+    }
+    let next_after_event_id = has_more
+        .then(|| jobs.last().map(|job| job.nostr_event_id.clone()))
+        .flatten();
+
+    Ok(LegacyBadJwtRepairPreview {
+        jobs,
+        total_matching,
+        has_more,
+        next_after_event_id,
+    })
+}
+
+fn validate_legacy_repair_filter(filter: &LegacyBadJwtRepairFilter) -> Result<()> {
+    if filter.limit < 1 || filter.limit > 1_000 {
+        return Err(anyhow!("repair limit must be between 1 and 1000"));
+    }
+    if filter.event_ids.is_empty() && filter.exact_error.is_none() {
+        return Err(anyhow!("repair requires event IDs or an exact error"));
+    }
+    if !filter.event_ids.is_empty() && filter.exact_error.is_some() {
+        return Err(anyhow!(
+            "explicit event IDs cannot be combined with BadJwt class mode"
+        ));
+    }
+    Ok(())
+}
+
+/// Revalidate and make exactly the previewed legacy jobs claimable again.
+pub fn revive_legacy_badjwt_jobs(
+    conn: &mut PgConnection,
+    filter: &LegacyBadJwtRepairFilter,
+    previewed_event_ids: &[String],
+) -> Result<usize> {
+    validate_legacy_repair_filter(filter)?;
+    if previewed_event_ids.is_empty() {
+        return Ok(0);
+    }
+    let query = "UPDATE publish_jobs p
+         SET completed_at = NULL, lease_owner = NULL,
+             lease_expires_at = NOW(), updated_at = NOW()
+         FROM account_links a
+         WHERE a.nostr_pubkey = p.nostr_pubkey
+           AND p.nostr_pubkey = $1
+           AND a.provisioning_state = 'ready'
+           AND a.crosspost_enabled = TRUE
+           AND p.state = 'failed'
+           AND p.completed_at IS NOT NULL
+           AND p.lease_owner IS NULL
+           AND (p.lease_expires_at IS NULL OR p.lease_expires_at <= NOW())
+           AND (
+             (cardinality($2::text[]) > 0 AND p.nostr_event_id = ANY($2))
+             OR (
+               $3::text IS NOT NULL
+               AND (
+                 p.error = $3
+                 OR (
+                   $3 = 'BadJwt: Signature tag didn''t verify'
+                   AND POSITION('getServiceAuth failed (400)' IN p.error) > 0
+                   AND POSITION('BadJwt: Signature tag didn''t verify' IN p.error) > 0
+                 )
+               )
+             )
+           )
+           AND p.nostr_event_id = ANY($4)";
+    let changed = sql_query(query)
+        .bind::<Text, _>(&filter.nostr_pubkey)
+        .bind::<Array<Text>, _>(&filter.event_ids)
+        .bind::<Nullable<Text>, _>(filter.exact_error.as_deref())
+        .bind::<Array<Text>, _>(previewed_event_ids)
+        .execute(conn)?;
+    Ok(changed)
+}
 
 /// Get a publish job by Nostr event ID (idempotency check).
 pub fn get_publish_job(

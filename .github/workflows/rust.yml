@@ -32,6 +32,11 @@ jobs:
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@cargo-llvm-cov
 
       - name: Cache cargo artifacts
         uses: Swatinem/rust-cache@v2
@@ -43,3 +48,34 @@ jobs:
 
       - name: Verify workspace
         run: bash scripts/test-workspace.sh
+
+      - name: Verify coverage thresholds
+        env:
+          COVERAGE_BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: |
+          bash scripts/check-coverage-thresholds.sh --self-test
+          mkdir -p target/llvm-cov
+          git fetch --no-tags --depth=1 origin "$COVERAGE_BASE"
+          base_parent="$(mktemp -d)"
+          base_worktree="$base_parent/worktree"
+          git worktree add --detach "$base_worktree" "$COVERAGE_BASE"
+          cleanup_coverage_base() {
+            git worktree remove --force "$base_worktree" 2>/dev/null || true
+            rm -rf "$base_parent" "$GITHUB_WORKSPACE/target/llvm-cov-base-target"
+          }
+          trap cleanup_coverage_base EXIT
+          (
+            cd "$base_worktree"
+            CARGO_TARGET_DIR="$GITHUB_WORKSPACE/target/llvm-cov-base-target" \
+              cargo llvm-cov --workspace --all-features --json --summary-only \
+                --output-path "$GITHUB_WORKSPACE/target/llvm-cov/base-summary.json"
+          )
+          cleanup_coverage_base
+          trap - EXIT
+          cargo llvm-cov --workspace --all-features --lcov --output-path target/llvm-cov/lcov.info
+          cargo llvm-cov report --json --summary-only --output-path target/llvm-cov/summary.json
+          COVERAGE_BASE_SUMMARY_PATH=target/llvm-cov/base-summary.json \
+            bash scripts/check-coverage-thresholds.sh \
+            --lcov target/llvm-cov/lcov.info \
+            --summary-json target/llvm-cov/summary.json \
+            --base "$COVERAGE_BASE"

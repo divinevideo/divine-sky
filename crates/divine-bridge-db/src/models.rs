@@ -266,6 +266,43 @@ pub struct NewPublishJob<'a> {
     pub state: &'a str,
 }
 
+#[derive(Debug, Clone)]
+pub struct LegacyBadJwtRepairFilter {
+    pub nostr_pubkey: String,
+    pub event_ids: Vec<String>,
+    pub exact_error: Option<String>,
+    pub after_event_id: Option<String>,
+    pub limit: i64,
+}
+
+#[derive(Debug, Clone, QueryableByName, serde::Serialize, serde::Deserialize)]
+pub struct LegacyRepairJobSnapshot {
+    #[diesel(sql_type = Text)]
+    pub nostr_event_id: String,
+    #[diesel(sql_type = Text)]
+    pub state: String,
+    #[diesel(sql_type = Int4)]
+    pub attempt: i32,
+    #[diesel(sql_type = Nullable<Text>)]
+    pub error: Option<String>,
+    #[diesel(sql_type = Nullable<Text>)]
+    pub lease_owner: Option<String>,
+    #[diesel(sql_type = Nullable<Timestamptz>)]
+    pub lease_expires_at: Option<DateTime<Utc>>,
+    #[diesel(sql_type = Nullable<Timestamptz>)]
+    pub completed_at: Option<DateTime<Utc>>,
+    #[diesel(sql_type = Timestamptz)]
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone)]
+pub struct LegacyBadJwtRepairPreview {
+    pub jobs: Vec<LegacyRepairJobSnapshot>,
+    pub total_matching: i64,
+    pub has_more: bool,
+    pub next_after_event_id: Option<String>,
+}
+
 // ---------------------------------------------------------------------------
 // labeler_events
 // ---------------------------------------------------------------------------
