@@ -18,6 +18,7 @@ const NEAR_MISS_EVENT: &str = "2222222222222222222222222222222222222222222222222
 const BADJWT: &str = "BadJwt: Signature tag didn't verify";
 const STORED_BADJWT: &str = "failed to upload blob to PDS: failed to get service auth for video \
 upload: getServiceAuth failed (400) for did:plc:repair-test: BadJwt: Signature tag didn't verify";
+const LEGACY_PARTIAL_OPERATION: &str = "00000000-0000-4000-8000-000000000001";
 
 #[derive(QueryableByName)]
 struct OperatorActionAuditFacts {
@@ -331,6 +332,58 @@ fn rollback_preserves_apply_and_rollback_audit_facts() {
     assert!(facts.applied_at.is_some());
     assert_eq!(facts.rollback_restored_count, rolled_back.changed_count);
     assert_eq!(facts.rollback_skipped_count, rolled_back.skipped_count);
+    assert!(facts.rollback_at.is_some());
+}
+
+#[test]
+fn migration_preserves_legacy_partial_rollback_result() {
+    let _guard = test_db_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let mut conn = setup();
+    diesel::sql_query(
+        "ALTER TABLE operator_actions
+           DROP COLUMN applied_count,
+           DROP COLUMN applied_at,
+           DROP COLUMN rollback_restored_count,
+           DROP COLUMN rollback_skipped_count,
+           DROP COLUMN rollback_at",
+    )
+    .execute(&mut conn)
+    .expect("legacy audit schema should omit phase-specific fields");
+    diesel::sql_query(
+        "INSERT INTO operator_actions (
+            operation_id, action_type, actor, scope, dry_run,
+            confirmation_digest, before_images, matched_count,
+            changed_count, status
+         ) VALUES (
+            $1, 'repair_legacy_badjwt', 'legacy-operator', '{}'::jsonb, FALSE,
+            'legacy-digest', '[]'::jsonb, 2, 1, 'rollback_partial'
+         )",
+    )
+    .bind::<Text, _>(LEGACY_PARTIAL_OPERATION)
+    .execute(&mut conn)
+    .expect("legacy partial rollback should insert");
+
+    run_pending_migrations_on(&mut conn).expect("migration should upgrade the legacy audit row");
+    let result = LegacyRepairService::new(test_database_url())
+        .rollback(LEGACY_PARTIAL_OPERATION)
+        .expect("legacy partial rollback retry should remain idempotent");
+    assert_eq!(result.status, "rollback_partial");
+    assert_eq!(result.changed_count, 1);
+    assert_eq!(result.skipped_count, 1);
+
+    let facts = diesel::sql_query(
+        "SELECT applied_count, applied_at, rollback_restored_count, \
+                rollback_skipped_count, rollback_at \
+         FROM operator_actions WHERE operation_id = $1",
+    )
+    .bind::<Text, _>(LEGACY_PARTIAL_OPERATION)
+    .get_result::<OperatorActionAuditFacts>(&mut conn)
+    .expect("legacy rollback facts should be backfilled");
+    assert_eq!(facts.applied_count, 2);
+    assert_eq!(facts.rollback_restored_count, 1);
+    assert_eq!(facts.rollback_skipped_count, 1);
     assert!(facts.rollback_at.is_some());
 }
 

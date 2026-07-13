@@ -18,7 +18,7 @@
       {"path": "crates/divine-atbridge/src/legacy_repair.rs", "line": 328, "reason": "rustc closing-expression counter artifact; invalid cursor is tested"},
       {"path": "crates/divine-bridge-db/src/models.rs", "line": 278, "reason": "Diesel QueryableByName derive declaration"},
       {"path": "crates/divine-bridge-db/src/queries.rs", "line": 29, "reason": "Diesel QueryableByName derive declaration"},
-      {"path": "crates/divine-bridge-db/src/schema.rs", "line": 113, "reason": "Diesel table macro declaration has no runtime counter"}
+      {"path": "crates/divine-bridge-db/src/schema.rs", "line": 118, "reason": "Diesel table macro closing token has no runtime counter"}
     ]
   },
   "exclude": [

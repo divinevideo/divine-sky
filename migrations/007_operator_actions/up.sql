@@ -37,5 +37,14 @@ SET applied_count = matched_count,
 WHERE status IN ('applied', 'rolled_back', 'rollback_partial')
   AND applied_count = 0;
 
+UPDATE operator_actions
+SET rollback_restored_count = changed_count,
+    rollback_skipped_count = GREATEST(matched_count - changed_count, 0),
+    rollback_at = updated_at
+WHERE status IN ('rolled_back', 'rollback_partial')
+  AND rollback_at IS NULL
+  AND rollback_restored_count = 0
+  AND rollback_skipped_count = 0;
+
 CREATE INDEX IF NOT EXISTS idx_operator_actions_type_created
     ON operator_actions (action_type, created_at DESC);
