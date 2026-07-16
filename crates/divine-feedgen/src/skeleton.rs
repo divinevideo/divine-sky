@@ -110,3 +110,49 @@ pub async fn feed_skeleton(
         cursor: None,
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use diesel::connection::SimpleConnection;
+    use diesel::{Connection, PgConnection};
+
+    // CI and local runs export TEST_DATABASE_URL; require it so every line of
+    // this helper executes under coverage (no untaken fallback branch).
+    fn test_database_url() -> String {
+        std::env::var("TEST_DATABASE_URL")
+            .expect("TEST_DATABASE_URL must be set for feedgen store tests")
+    }
+
+    #[tokio::test]
+    async fn db_feed_store_from_env_queries_both_feeds() {
+        let url = test_database_url();
+        let mut conn = PgConnection::establish(&url).expect("test database should be reachable");
+        // `appview_posts` lives in the non-idempotent 003 migration; reset it with
+        // down-then-up the way the appview integration tests do.
+        conn.batch_execute(include_str!(
+            "../../../migrations/003_appview_read_model/down.sql"
+        ))
+        .expect("appview read-model down migration should run");
+        conn.batch_execute(include_str!(
+            "../../../migrations/003_appview_read_model/up.sql"
+        ))
+        .expect("appview read-model up migration should run");
+
+        std::env::set_var("DATABASE_URL", &url);
+        let store = DbFeedStore::from_env();
+        std::env::remove_var("DATABASE_URL");
+
+        let latest = store
+            .latest_posts(10)
+            .await
+            .expect("latest feed query succeeds through the pool");
+        let trending = store
+            .trending_posts(10)
+            .await
+            .expect("trending feed query succeeds through the pool");
+
+        assert!(latest.len() <= 10);
+        assert!(trending.len() <= 10);
+    }
+}

@@ -43,3 +43,63 @@ pub fn build_pool(database_url: &str) -> Result<DbPool> {
         .build(manager)
         .context("failed to build database connection pool")
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::{Mutex, OnceLock};
+
+    // `build_pool` reads the process-global `DB_POOL_MAX_SIZE`; serialize the
+    // tests that mutate it so parallel execution cannot observe a torn value.
+    fn env_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    // CI (and local runs) export TEST_DATABASE_URL; require it rather than a
+    // fallback so every line of this helper executes under coverage.
+    fn test_database_url() -> String {
+        std::env::var("TEST_DATABASE_URL").expect("TEST_DATABASE_URL must be set for pool tests")
+    }
+
+    #[test]
+    fn build_pool_uses_default_max_size_and_opens_a_connection() {
+        let guard = env_lock().lock().unwrap();
+        std::env::remove_var("DB_POOL_MAX_SIZE");
+        let pool = build_pool(&test_database_url()).expect("pool builds against the test database");
+        assert_eq!(pool.max_size(), DEFAULT_MAX_SIZE);
+        let conn = pool.get().expect("a connection can be checked out");
+        drop(conn);
+        drop(guard);
+    }
+
+    #[test]
+    fn build_pool_honors_db_pool_max_size_override() {
+        let guard = env_lock().lock().unwrap();
+        std::env::set_var("DB_POOL_MAX_SIZE", "3");
+        let pool = build_pool(&test_database_url()).expect("pool builds with an overridden size");
+        std::env::remove_var("DB_POOL_MAX_SIZE");
+        assert_eq!(pool.max_size(), 3);
+        drop(guard);
+    }
+
+    #[test]
+    fn build_pool_ignores_an_unparseable_db_pool_max_size() {
+        let guard = env_lock().lock().unwrap();
+        std::env::set_var("DB_POOL_MAX_SIZE", "not-a-number");
+        let pool = build_pool(&test_database_url()).expect("pool builds despite a bad override");
+        std::env::remove_var("DB_POOL_MAX_SIZE");
+        assert_eq!(pool.max_size(), DEFAULT_MAX_SIZE);
+        drop(guard);
+    }
+
+    #[test]
+    fn build_pool_errors_when_the_database_is_unreachable() {
+        let guard = env_lock().lock().unwrap();
+        std::env::remove_var("DB_POOL_MAX_SIZE");
+        let error = build_pool("postgres://divine:divine_dev@127.0.0.1:1/divine_bridge")
+            .expect_err("an unreachable database must fail the eager connection");
+        assert!(error.to_string().contains("connection pool"));
+        drop(guard);
+    }
+}

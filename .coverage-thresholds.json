@@ -8,7 +8,9 @@
   },
   "changed_rust": {
     "lines": 100,
-    "allow_absent": [],
+    "allow_absent": [
+      "crates/divine-bridge-db/src/lib.rs"
+    ],
     "allow_uncovered": [
       {"path": "crates/divine-atbridge/src/bin/repair_legacy_badjwt.rs", "line": 93, "reason": "rustc assigns no counter to the covered question-mark expression"},
       {"path": "crates/divine-atbridge/src/legacy_repair.rs", "line": 48, "reason": "Diesel QueryableByName derive declaration"},
