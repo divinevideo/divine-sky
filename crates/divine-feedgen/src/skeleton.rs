@@ -1,6 +1,6 @@
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
-use diesel::{Connection, PgConnection};
+use divine_bridge_db::pool::{build_pool, DbPool};
 use divine_bridge_db::{list_latest_appview_posts, list_trending_appview_posts};
 use serde::Serialize;
 use std::sync::Arc;
@@ -45,25 +45,22 @@ pub trait FeedStore: Send + Sync {
 pub type DynFeedStore = Arc<dyn FeedStore>;
 
 pub struct DbFeedStore {
-    database_url: String,
+    pool: DbPool,
 }
 
 impl DbFeedStore {
     pub fn from_env() -> Self {
+        let database_url = std::env::var("DATABASE_URL").expect("DATABASE_URL is required");
         Self {
-            database_url: std::env::var("DATABASE_URL").expect("DATABASE_URL is required"),
+            pool: build_pool(&database_url).expect("failed to build feedgen database pool"),
         }
-    }
-
-    fn connect(&self) -> Result<PgConnection> {
-        Ok(PgConnection::establish(&self.database_url)?)
     }
 }
 
 #[async_trait]
 impl FeedStore for DbFeedStore {
     async fn latest_posts(&self, limit: usize) -> Result<Vec<String>> {
-        let mut conn = self.connect()?;
+        let mut conn = self.pool.get()?;
         Ok(list_latest_appview_posts(&mut conn, limit as i64)?
             .into_iter()
             .map(|post| post.uri)
@@ -71,7 +68,7 @@ impl FeedStore for DbFeedStore {
     }
 
     async fn trending_posts(&self, limit: usize) -> Result<Vec<String>> {
-        let mut conn = self.connect()?;
+        let mut conn = self.pool.get()?;
         Ok(list_trending_appview_posts(&mut conn, limit as i64)?
             .into_iter()
             .map(|post| post.uri)
