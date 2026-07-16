@@ -141,10 +141,10 @@ impl PdsClient {
         Ok(self.auth_token.clone())
     }
 
-    /// On a 401 for `did`, mint a fresh access token via `refreshSession` using the
-    /// stored refresh JWT, persist the rotated session, and return the new access
-    /// token. Returns `None` if there is no session provider or no refresh token.
-    async fn refresh_session_for(&self, did: &str) -> Result<Option<String>> {
+    /// On an expired token for `did`, mint a fresh access token via `refreshSession`
+    /// using the stored refresh JWT, persist the rotated session, and return the new
+    /// access token. Returns `None` if there is no session provider or no refresh token.
+    pub(crate) async fn refresh_session_for(&self, did: &str) -> Result<Option<String>> {
         let Some(provider) = &self.session_provider else {
             return Ok(None);
         };
@@ -181,14 +181,19 @@ impl PdsClient {
     }
 
     /// POST a JSON repo-write to `path`, authenticated as `did`'s account, with a
-    /// single refresh-and-retry on 401. Centralizes the per-account auth +
-    /// token-refresh behavior for createRecord/putRecord/deleteRecord.
+    /// single refresh-and-retry on an expired token. Centralizes the per-account
+    /// auth + token-refresh behavior for createRecord/putRecord/deleteRecord.
+    ///
+    /// Returns the final response status and its (already-consumed) body text. The
+    /// body must be consumed here so we can inspect the XRPC error code to detect a
+    /// `400 {"error":"ExpiredToken"}` expiry, so callers parse the returned body
+    /// rather than the `reqwest::Response`.
     async fn post_repo_write_as(
         &self,
         did: &str,
         path: &str,
         body: &serde_json::Value,
-    ) -> Result<reqwest::Response> {
+    ) -> Result<(reqwest::StatusCode, String)> {
         let url = format!("{}/xrpc/{path}", self.base_url);
         let mut auth_token = self.auth_token_for(did).await?;
         let mut refreshed = false;
@@ -203,26 +208,34 @@ impl PdsClient {
                 .await
                 .with_context(|| format!("failed to send {path} request"))?;
 
-            if resp.status() == reqwest::StatusCode::UNAUTHORIZED && !refreshed {
+            let status = resp.status();
+            let text = resp
+                .text()
+                .await
+                .with_context(|| format!("failed to read {path} response body"))?;
+
+            if !refreshed && is_expired_token(status, &text) {
                 if let Some(new_token) = self.refresh_session_for(did).await? {
                     auth_token = new_token;
                     refreshed = true;
                     continue;
                 }
             }
-            return Ok(resp);
+            return Ok((status, text));
         }
     }
 
-    /// Upload a blob to the PDS.
+    /// Upload a blob to the PDS using the shared static token.
     ///
-    /// Calls `POST /xrpc/com.atproto.repo.uploadBlob` with raw bytes.
+    /// Calls `POST /xrpc/com.atproto.repo.uploadBlob` with raw bytes. The static
+    /// token has no associated session/refresh JWT, so this path never refreshes.
     pub async fn upload_blob(&self, data: &[u8], mime_type: &str) -> Result<BlobRef> {
-        self.upload_blob_with_token(data, mime_type, &self.auth_token)
+        self.upload_blob_inner(data, mime_type, self.auth_token.clone(), None)
             .await
     }
 
-    /// Upload a blob authenticated as `did`'s account (per-account session token).
+    /// Upload a blob authenticated as `did`'s account (per-account session token),
+    /// with a single refresh-and-retry on an expired token.
     pub async fn upload_blob_for_did(
         &self,
         data: &[u8],
@@ -230,42 +243,60 @@ impl PdsClient {
         did: &str,
     ) -> Result<BlobRef> {
         let token = self.auth_token_for(did).await?;
-        self.upload_blob_with_token(data, mime_type, &token).await
+        self.upload_blob_inner(data, mime_type, token, Some(did))
+            .await
     }
 
-    async fn upload_blob_with_token(
+    /// Core uploadBlob request. When `did` is `Some`, an expired token triggers a
+    /// single `refreshSession` + retry; when `None` (static token) it never refreshes.
+    async fn upload_blob_inner(
         &self,
         data: &[u8],
         mime_type: &str,
-        auth_token: &str,
+        initial_token: String,
+        did: Option<&str>,
     ) -> Result<BlobRef> {
         let url = format!("{}/xrpc/com.atproto.repo.uploadBlob", self.base_url);
+        let mut auth_token = initial_token;
+        let mut refreshed = false;
+        loop {
+            let resp = self
+                .client
+                .post(&url)
+                .header("Content-Type", mime_type)
+                .header("Authorization", format!("Bearer {auth_token}"))
+                .body(data.to_vec())
+                .send()
+                .await
+                .context("failed to send uploadBlob request")?;
 
-        let resp = self
-            .client
-            .post(&url)
-            .header("Content-Type", mime_type)
-            .header("Authorization", format!("Bearer {auth_token}"))
-            .body(data.to_vec())
-            .send()
-            .await
-            .context("failed to send uploadBlob request")?;
+            let status = resp.status();
+            let text = resp
+                .text()
+                .await
+                .context("failed to read uploadBlob response body")?;
 
-        let status = resp.status();
-        if !status.is_success() {
-            let body = resp.text().await.unwrap_or_default();
-            let detail = parse_xrpc_error(&body);
-            anyhow::bail!("uploadBlob failed ({}): {}", status.as_u16(), detail);
+            if !status.is_success() {
+                if let Some(did) = did {
+                    if !refreshed && is_expired_token(status, &text) {
+                        if let Some(new_token) = self.refresh_session_for(did).await? {
+                            auth_token = new_token;
+                            refreshed = true;
+                            continue;
+                        }
+                    }
+                }
+                let detail = parse_xrpc_error(&text);
+                anyhow::bail!("uploadBlob failed ({}): {}", status.as_u16(), detail);
+            }
+
+            let upload: UploadBlobResponse =
+                serde_json::from_str(&text).context("failed to parse uploadBlob response")?;
+
+            let cid = upload.blob.ref_link.map(|r| r.link).unwrap_or_default();
+
+            return Ok(BlobRef::new(cid, upload.blob.mime_type, upload.blob.size));
         }
-
-        let upload: UploadBlobResponse = resp
-            .json()
-            .await
-            .context("failed to parse uploadBlob response")?;
-
-        let cid = upload.blob.ref_link.map(|r| r.link).unwrap_or_default();
-
-        Ok(BlobRef::new(cid, upload.blob.mime_type, upload.blob.size))
     }
 
     /// Create a record in a PDS repository.
@@ -284,21 +315,17 @@ impl PdsClient {
             "record": record,
         });
 
-        let resp = self
+        let (status, resp_body) = self
             .post_repo_write_as(did, "com.atproto.repo.createRecord", &body)
             .await?;
 
-        let status = resp.status();
         if !status.is_success() {
-            let body = resp.text().await.unwrap_or_default();
-            let detail = parse_xrpc_error(&body);
+            let detail = parse_xrpc_error(&resp_body);
             anyhow::bail!("createRecord failed ({}): {}", status.as_u16(), detail);
         }
 
-        let response: CreateRecordResponse = resp
-            .json()
-            .await
-            .context("failed to parse createRecord response")?;
+        let response: CreateRecordResponse =
+            serde_json::from_str(&resp_body).context("failed to parse createRecord response")?;
 
         if matches!(response.validation_status.as_deref(), Some("unknown")) {
             anyhow::bail!("createRecord returned unknown validation status");
@@ -324,20 +351,16 @@ impl PdsClient {
             "record": record,
         });
 
-        let resp = self
+        let (status, resp_body) = self
             .post_repo_write_as(did, "com.atproto.repo.putRecord", &body)
             .await?;
 
-        let status = resp.status();
         if !status.is_success() {
-            let body = resp.text().await.unwrap_or_default();
-            let detail = parse_xrpc_error(&body);
+            let detail = parse_xrpc_error(&resp_body);
             anyhow::bail!("putRecord failed ({}): {}", status.as_u16(), detail);
         }
 
-        resp.json()
-            .await
-            .context("failed to parse putRecord response")
+        serde_json::from_str(&resp_body).context("failed to parse putRecord response")
     }
 
     /// Delete a record from a PDS repository.
@@ -350,14 +373,12 @@ impl PdsClient {
             "rkey": rkey,
         });
 
-        let resp = self
+        let (status, resp_body) = self
             .post_repo_write_as(did, "com.atproto.repo.deleteRecord", &body)
             .await?;
 
-        let status = resp.status();
         if !status.is_success() {
-            let body = resp.text().await.unwrap_or_default();
-            let detail = parse_xrpc_error(&body);
+            let detail = parse_xrpc_error(&resp_body);
             anyhow::bail!("deleteRecord failed ({}): {}", status.as_u16(), detail);
         }
 
@@ -448,6 +469,26 @@ impl PdsPublisher for PdsClient {
     }
 }
 
+/// Detect whether an XRPC response indicates an expired access token, matching the
+/// `@atproto/api` reference client: a token is expired when the status is `401`, or
+/// when the status is `400` and the XRPC error code is exactly `ExpiredToken`.
+///
+/// This is deliberately narrow: a `400 {"error":"InvalidRequest"}` (or any other
+/// non-`ExpiredToken` 400) is a genuine bad request and must NOT trigger a refresh,
+/// to avoid masking real errors or looping. Centralized so every per-account-token
+/// call site (repo writes, uploadBlob, getServiceAuth) shares one predicate.
+pub(crate) fn is_expired_token(status: reqwest::StatusCode, body: &str) -> bool {
+    if status == reqwest::StatusCode::UNAUTHORIZED {
+        return true;
+    }
+    if status == reqwest::StatusCode::BAD_REQUEST {
+        if let Ok(err) = serde_json::from_str::<XrpcError>(body) {
+            return err.error.as_deref() == Some("ExpiredToken");
+        }
+    }
+    false
+}
+
 /// Try to extract a human-readable message from an XRPC error response body.
 fn parse_xrpc_error(body: &str) -> String {
     if let Ok(err) = serde_json::from_str::<XrpcError>(body) {
@@ -473,6 +514,37 @@ fn parse_xrpc_error(body: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use reqwest::StatusCode;
+
+    #[test]
+    fn is_expired_token_matches_reference_client_semantics() {
+        // 401 -> expired regardless of body.
+        assert!(is_expired_token(StatusCode::UNAUTHORIZED, ""));
+        assert!(is_expired_token(
+            StatusCode::UNAUTHORIZED,
+            r#"{"error":"AuthenticationRequired"}"#
+        ));
+        // 400 with ExpiredToken -> expired.
+        assert!(is_expired_token(
+            StatusCode::BAD_REQUEST,
+            r#"{"error":"ExpiredToken","message":"Token is expired"}"#
+        ));
+        // 400 with a different error code -> NOT expired.
+        assert!(!is_expired_token(
+            StatusCode::BAD_REQUEST,
+            r#"{"error":"InvalidRequest"}"#
+        ));
+        // 400 with an unparseable body -> NOT expired.
+        assert!(!is_expired_token(StatusCode::BAD_REQUEST, "not json"));
+        // 400 with no error field -> NOT expired.
+        assert!(!is_expired_token(
+            StatusCode::BAD_REQUEST,
+            r#"{"message":"x"}"#
+        ));
+        // Other statuses -> NOT expired.
+        assert!(!is_expired_token(StatusCode::INTERNAL_SERVER_ERROR, ""));
+        assert!(!is_expired_token(StatusCode::OK, ""));
+    }
 
     #[tokio::test]
     async fn create_record_sends_correct_body_and_parses_response() {
@@ -621,6 +693,210 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn create_record_refreshes_session_and_retries_on_400_expired_token() {
+        // Reference @atproto/api treats 400 {"error":"ExpiredToken"} as an expired
+        // token, exactly like a 401. createRecord must refresh + retry on it too.
+        let mut server = mockito::Server::new_async().await;
+        let expired = server
+            .mock("POST", "/xrpc/com.atproto.repo.createRecord")
+            .match_header("Authorization", "Bearer stale-access-jwt")
+            .with_status(400)
+            .with_body(
+                serde_json::json!({"error": "ExpiredToken", "message": "Token is expired"})
+                    .to_string(),
+            )
+            .expect(1)
+            .create_async()
+            .await;
+        let refresh = server
+            .mock("POST", "/xrpc/com.atproto.server.refreshSession")
+            .match_header("Authorization", "Bearer refresh-jwt")
+            .with_status(200)
+            .with_body(
+                serde_json::json!({"accessJwt": "new-access-jwt", "refreshJwt": "new-refresh-jwt"})
+                    .to_string(),
+            )
+            .expect(1)
+            .create_async()
+            .await;
+        let ok = server
+            .mock("POST", "/xrpc/com.atproto.repo.createRecord")
+            .match_header("Authorization", "Bearer new-access-jwt")
+            .with_status(200)
+            .with_header("Content-Type", "application/json")
+            .with_body(
+                serde_json::json!({
+                    "uri": "at://did:plc:abc123/app.bsky.feed.post/rk",
+                    "cid": "bafyrei123",
+                    "validationStatus": "valid"
+                })
+                .to_string(),
+            )
+            .expect(1)
+            .create_async()
+            .await;
+
+        let provider = Arc::new(RefreshingSessionProvider::default());
+        let client = PdsClient::new(server.url(), "shared").with_session_provider(provider.clone());
+        client
+            .create_record(
+                "did:plc:abc123",
+                "app.bsky.feed.post",
+                &serde_json::json!({"text": "hi"}),
+            )
+            .await
+            .unwrap();
+
+        expired.assert_async().await;
+        refresh.assert_async().await;
+        ok.assert_async().await;
+        assert_eq!(
+            provider.stored.lock().unwrap().as_slice(),
+            &[("new-access-jwt".to_string(), "new-refresh-jwt".to_string())]
+        );
+    }
+
+    #[tokio::test]
+    async fn create_record_does_not_refresh_on_400_invalid_request() {
+        // A genuine 400 (bad request) must NOT trigger a refresh/retry loop —
+        // refreshing would mask the real error and could loop. The error must
+        // propagate and refreshSession must never be called.
+        let mut server = mockito::Server::new_async().await;
+        let bad = server
+            .mock("POST", "/xrpc/com.atproto.repo.createRecord")
+            .match_header("Authorization", "Bearer stale-access-jwt")
+            .with_status(400)
+            .with_body(
+                serde_json::json!({"error": "InvalidRequest", "message": "bad record"}).to_string(),
+            )
+            .expect(1)
+            .create_async()
+            .await;
+        // If a refresh is (wrongly) attempted, this mock would be hit; expect(0).
+        let refresh = server
+            .mock("POST", "/xrpc/com.atproto.server.refreshSession")
+            .expect(0)
+            .create_async()
+            .await;
+
+        let provider = Arc::new(RefreshingSessionProvider::default());
+        let client = PdsClient::new(server.url(), "shared").with_session_provider(provider.clone());
+        let err = client
+            .create_record(
+                "did:plc:abc123",
+                "app.bsky.feed.post",
+                &serde_json::json!({"text": "hi"}),
+            )
+            .await
+            .expect_err("400 InvalidRequest should propagate as an error");
+
+        let msg = err.to_string();
+        assert!(msg.contains("400"), "expected 400 in: {msg}");
+        assert!(
+            msg.contains("InvalidRequest"),
+            "expected error name in: {msg}"
+        );
+        bad.assert_async().await;
+        refresh.assert_async().await;
+        assert!(
+            provider.stored.lock().unwrap().is_empty(),
+            "no session should have been stored"
+        );
+    }
+
+    #[tokio::test]
+    async fn upload_blob_for_did_refreshes_session_and_retries_on_400_expired_token() {
+        // Per-account blob uploads must also refresh + retry on an expired token.
+        let mut server = mockito::Server::new_async().await;
+        let expired = server
+            .mock("POST", "/xrpc/com.atproto.repo.uploadBlob")
+            .match_header("Authorization", "Bearer stale-access-jwt")
+            .with_status(400)
+            .with_body(
+                serde_json::json!({"error": "ExpiredToken", "message": "Token is expired"})
+                    .to_string(),
+            )
+            .expect(1)
+            .create_async()
+            .await;
+        let refresh = server
+            .mock("POST", "/xrpc/com.atproto.server.refreshSession")
+            .match_header("Authorization", "Bearer refresh-jwt")
+            .with_status(200)
+            .with_body(
+                serde_json::json!({"accessJwt": "new-access-jwt", "refreshJwt": "new-refresh-jwt"})
+                    .to_string(),
+            )
+            .expect(1)
+            .create_async()
+            .await;
+        let ok = server
+            .mock("POST", "/xrpc/com.atproto.repo.uploadBlob")
+            .match_header("Authorization", "Bearer new-access-jwt")
+            .with_status(200)
+            .with_header("Content-Type", "application/json")
+            .with_body(
+                serde_json::json!({
+                    "blob": {
+                        "ref": {"$link": "bafblob"},
+                        "mimeType": "video/mp4",
+                        "size": 3
+                    }
+                })
+                .to_string(),
+            )
+            .expect(1)
+            .create_async()
+            .await;
+
+        let provider = Arc::new(RefreshingSessionProvider::default());
+        let client = PdsClient::new(server.url(), "shared").with_session_provider(provider.clone());
+        let blob = client
+            .upload_blob_for_did(b"abc", "video/mp4", "did:plc:abc123")
+            .await
+            .unwrap();
+
+        assert_eq!(blob.cid(), "bafblob");
+        expired.assert_async().await;
+        refresh.assert_async().await;
+        ok.assert_async().await;
+        assert_eq!(
+            provider.stored.lock().unwrap().as_slice(),
+            &[("new-access-jwt".to_string(), "new-refresh-jwt".to_string())]
+        );
+    }
+
+    #[tokio::test]
+    async fn upload_blob_static_token_does_not_refresh_on_expired_token() {
+        // The static-token upload_blob has no per-account session; it must NOT
+        // attempt a refresh even if the PDS returns an expired-token error.
+        let mut server = mockito::Server::new_async().await;
+        let expired = server
+            .mock("POST", "/xrpc/com.atproto.repo.uploadBlob")
+            .with_status(400)
+            .with_body(serde_json::json!({"error": "ExpiredToken"}).to_string())
+            .expect(1)
+            .create_async()
+            .await;
+        let refresh = server
+            .mock("POST", "/xrpc/com.atproto.server.refreshSession")
+            .expect(0)
+            .create_async()
+            .await;
+
+        let provider = Arc::new(RefreshingSessionProvider::default());
+        let client = PdsClient::new(server.url(), "shared").with_session_provider(provider.clone());
+        let err = client
+            .upload_blob(b"abc", "video/mp4")
+            .await
+            .expect_err("static-token upload should not refresh");
+
+        assert!(err.to_string().contains("ExpiredToken"));
+        expired.assert_async().await;
+        refresh.assert_async().await;
+    }
+
+    #[tokio::test]
     async fn create_record_uses_per_account_session_token() {
         // rsky authorizes repo writes as the account DID, so create_record must
         // send the account's session token (from the provider), not the shared one.
@@ -758,6 +1034,33 @@ mod tests {
         assert_eq!(resp.uri, "at://did:plc:xyz/app.bsky.feed.post/rk1");
         assert_eq!(resp.cid, "bafyrei456");
         mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn put_record_returns_error_on_non_success() {
+        let mut server = mockito::Server::new_async().await;
+        server
+            .mock("POST", "/xrpc/com.atproto.repo.putRecord")
+            .with_status(400)
+            .with_header("Content-Type", "application/json")
+            .with_body(
+                serde_json::json!({"error": "InvalidRequest", "message": "bad rkey"}).to_string(),
+            )
+            .create_async()
+            .await;
+
+        let client = PdsClient::new(server.url(), "tok");
+        let err = client
+            .put_record("did:plc:x", "col", "rk", &serde_json::json!({}))
+            .await
+            .expect_err("putRecord non-success should error");
+
+        let msg = err.to_string();
+        assert!(msg.contains("400"), "expected 400 in: {msg}");
+        assert!(
+            msg.contains("InvalidRequest"),
+            "expected error name in: {msg}"
+        );
     }
 
     #[tokio::test]

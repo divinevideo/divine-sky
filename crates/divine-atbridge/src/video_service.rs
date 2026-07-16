@@ -10,7 +10,7 @@ use serde::Deserialize;
 use std::time::Duration;
 
 use crate::pipeline::BlobUploader;
-use crate::publisher::PdsClient;
+use crate::publisher::{is_expired_token, PdsClient};
 
 // ---------------------------------------------------------------------------
 // Response types for the video service XRPC calls
@@ -122,32 +122,45 @@ impl VideoServiceUploader {
 
         // getServiceAuth issues a token for the *authenticated* account (rsky uses
         // AccessFull and sets iss = credentials.did), so it must be called as the
-        // user's account session, not the shared admin token.
-        let auth_token = self.pds_client.auth_token_for(user_did).await?;
-        let resp = self
-            .client
-            .get(&url)
-            .header("Authorization", format!("Bearer {auth_token}"))
-            .send()
-            .await
-            .context("getServiceAuth request failed")?;
+        // user's account session, not the shared admin token. On an expired token
+        // (401, or 400 ExpiredToken) refresh the session once and retry.
+        let mut auth_token = self.pds_client.auth_token_for(user_did).await?;
+        let mut refreshed = false;
+        loop {
+            let resp = self
+                .client
+                .get(&url)
+                .header("Authorization", format!("Bearer {auth_token}"))
+                .send()
+                .await
+                .context("getServiceAuth request failed")?;
 
-        let status = resp.status();
-        if !status.is_success() {
-            let body = resp.text().await.unwrap_or_default();
-            bail!(
-                "getServiceAuth failed ({}) for did={}: {}",
-                status.as_u16(),
-                user_did,
-                body
-            );
+            let status = resp.status();
+            let body = resp
+                .text()
+                .await
+                .context("failed to read getServiceAuth response body")?;
+
+            if !status.is_success() {
+                if !refreshed && is_expired_token(status, &body) {
+                    if let Some(new_token) = self.pds_client.refresh_session_for(user_did).await? {
+                        auth_token = new_token;
+                        refreshed = true;
+                        continue;
+                    }
+                }
+                bail!(
+                    "getServiceAuth failed ({}) for did={}: {}",
+                    status.as_u16(),
+                    user_did,
+                    body
+                );
+            }
+
+            let auth: ServiceAuthResponse =
+                serde_json::from_str(&body).context("failed to parse getServiceAuth response")?;
+            return Ok(auth.token);
         }
-
-        let auth: ServiceAuthResponse = resp
-            .json()
-            .await
-            .context("failed to parse getServiceAuth response")?;
-        Ok(auth.token)
     }
 
     /// Resolve the PDS service DID from `describeServer`.
@@ -342,6 +355,159 @@ impl BlobUploader for VideoServiceUploader {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::publisher::SessionProvider;
+    use std::sync::Arc;
+
+    fn test_uploader(pds_client: PdsClient, base_url: String) -> VideoServiceUploader {
+        VideoServiceUploader::new(
+            pds_client,
+            base_url.clone(),
+            base_url,
+            Duration::from_secs(1),
+            Duration::from_millis(1),
+        )
+    }
+
+    /// Session provider that supplies a stale access token plus a refresh token,
+    /// and records store_session calls, mirroring the publisher test provider.
+    #[derive(Default)]
+    struct RefreshingSessionProvider {
+        stored: std::sync::Mutex<Vec<(String, String)>>,
+    }
+
+    #[async_trait::async_trait]
+    impl SessionProvider for RefreshingSessionProvider {
+        async fn access_token(&self, _did: &str) -> Result<Option<String>> {
+            Ok(Some("stale-access-jwt".to_string()))
+        }
+        async fn refresh_token(&self, _did: &str) -> Result<Option<String>> {
+            Ok(Some("refresh-jwt".to_string()))
+        }
+        async fn store_session(&self, _did: &str, access: &str, refresh: &str) -> Result<()> {
+            self.stored
+                .lock()
+                .unwrap()
+                .push((access.to_string(), refresh.to_string()));
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn get_service_auth_refreshes_session_and_retries_on_400_expired_token() {
+        // getServiceAuth is called as the user's account session, so an expired
+        // token (401 or 400 ExpiredToken) must refresh + retry.
+        let mut server = mockito::Server::new_async().await;
+        let describe = server
+            .mock("GET", "/xrpc/com.atproto.server.describeServer")
+            .with_status(200)
+            .with_header("Content-Type", "application/json")
+            .with_body(serde_json::json!({"did": "did:web:pds.example"}).to_string())
+            .create_async()
+            .await;
+        let expired = server
+            .mock(
+                "GET",
+                "/xrpc/com.atproto.server.getServiceAuth?aud=did:web:pds.example&lxm=com.atproto.repo.uploadBlob",
+            )
+            .match_header("Authorization", "Bearer stale-access-jwt")
+            .with_status(400)
+            .with_body(
+                serde_json::json!({"error": "ExpiredToken", "message": "Token is expired"})
+                    .to_string(),
+            )
+            .expect(1)
+            .create_async()
+            .await;
+        let refresh = server
+            .mock("POST", "/xrpc/com.atproto.server.refreshSession")
+            .match_header("Authorization", "Bearer refresh-jwt")
+            .with_status(200)
+            .with_body(
+                serde_json::json!({"accessJwt": "new-access-jwt", "refreshJwt": "new-refresh-jwt"})
+                    .to_string(),
+            )
+            .expect(1)
+            .create_async()
+            .await;
+        let ok = server
+            .mock(
+                "GET",
+                "/xrpc/com.atproto.server.getServiceAuth?aud=did:web:pds.example&lxm=com.atproto.repo.uploadBlob",
+            )
+            .match_header("Authorization", "Bearer new-access-jwt")
+            .with_status(200)
+            .with_header("Content-Type", "application/json")
+            .with_body(serde_json::json!({"token": "service-token-123"}).to_string())
+            .expect(1)
+            .create_async()
+            .await;
+
+        let provider = Arc::new(RefreshingSessionProvider::default());
+        let pds_client =
+            PdsClient::new(server.url(), "shared").with_session_provider(provider.clone());
+        let uploader = test_uploader(pds_client, server.url());
+
+        let token = uploader
+            .get_service_auth("did:plc:abc123")
+            .await
+            .expect("get_service_auth should refresh and succeed");
+
+        assert_eq!(token, "service-token-123");
+        describe.assert_async().await;
+        expired.assert_async().await;
+        refresh.assert_async().await;
+        ok.assert_async().await;
+        assert_eq!(
+            provider.stored.lock().unwrap().as_slice(),
+            &[("new-access-jwt".to_string(), "new-refresh-jwt".to_string())]
+        );
+    }
+
+    #[tokio::test]
+    async fn get_service_auth_bails_without_refresh_on_non_expired_error() {
+        // A non-expired failure (e.g. 500) must NOT trigger a refresh; the error
+        // propagates immediately.
+        let mut server = mockito::Server::new_async().await;
+        let describe = server
+            .mock("GET", "/xrpc/com.atproto.server.describeServer")
+            .with_status(200)
+            .with_header("Content-Type", "application/json")
+            .with_body(serde_json::json!({"did": "did:web:pds.example"}).to_string())
+            .create_async()
+            .await;
+        let failed = server
+            .mock(
+                "GET",
+                "/xrpc/com.atproto.server.getServiceAuth?aud=did:web:pds.example&lxm=com.atproto.repo.uploadBlob",
+            )
+            .match_header("Authorization", "Bearer stale-access-jwt")
+            .with_status(500)
+            .with_body("boom")
+            .expect(1)
+            .create_async()
+            .await;
+        let refresh = server
+            .mock("POST", "/xrpc/com.atproto.server.refreshSession")
+            .expect(0)
+            .create_async()
+            .await;
+
+        let provider = Arc::new(RefreshingSessionProvider::default());
+        let pds_client =
+            PdsClient::new(server.url(), "shared").with_session_provider(provider.clone());
+        let uploader = test_uploader(pds_client, server.url());
+
+        let err = uploader
+            .get_service_auth("did:plc:abc123")
+            .await
+            .expect_err("500 should propagate without refresh");
+
+        assert!(err.to_string().contains("500"), "expected 500 in: {err}");
+        describe.assert_async().await;
+        failed.assert_async().await;
+        refresh.assert_async().await;
+        assert!(provider.stored.lock().unwrap().is_empty());
+    }
 
     #[test]
     fn upload_video_response_deserializes_with_job_id() {
