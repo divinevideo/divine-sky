@@ -1,6 +1,7 @@
 use std::sync::{Mutex, OnceLock};
 
 use chrono::{DateTime, Duration, Utc};
+use diesel::connection::SimpleConnection;
 use diesel::Connection;
 use diesel::PgConnection;
 use diesel::RunQueryDsl;
@@ -9,7 +10,8 @@ use divine_bridge_db::{
     cancel_publish_job, claim_next_backfill_job, claim_next_live_job, enqueue_publish_job,
     get_publish_job, list_accounts_requiring_backfill, mark_account_backfill_completed,
     mark_account_backfill_failed, mark_account_backfill_started, mark_publish_job_completed,
-    mark_publish_job_failed,
+    mark_publish_job_completed_for_owner, mark_publish_job_failed, renew_publish_job_lease,
+    reserve_publish_job_prepared_record, reserve_publish_job_rkey,
 };
 use divine_bridge_types::PublishJobSource;
 use serde_json::json;
@@ -20,13 +22,7 @@ fn test_database_url() -> String {
 }
 
 fn execute_batch(conn: &mut PgConnection, sql: &str) {
-    for statement in sql
-        .split(';')
-        .map(str::trim)
-        .filter(|line| !line.is_empty())
-    {
-        diesel::sql_query(statement).execute(conn).unwrap();
-    }
+    conn.batch_execute(sql).unwrap();
 }
 
 fn reset_database(database_url: &str) {
@@ -43,6 +39,10 @@ fn reset_database(database_url: &str) {
     execute_batch(
         &mut conn,
         include_str!("../../../migrations/004_publish_job_scheduler/up.sql"),
+    );
+    execute_batch(
+        &mut conn,
+        include_str!("../../../migrations/008_publish_job_reserved_rkey/up.sql"),
     );
 }
 
@@ -82,6 +82,166 @@ fn seed_account(
     ))
     .execute(conn)
     .expect("account link should insert");
+}
+
+#[test]
+fn reserve_publish_job_rkey_is_first_writer_wins() {
+    let _guard = test_db_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let database_url = test_database_url();
+    reset_database(&database_url);
+    let mut conn =
+        PgConnection::establish(&database_url).expect("test database should be reachable");
+    let created_at = DateTime::parse_from_rfc3339("2024-01-01T00:00:00Z")
+        .unwrap()
+        .with_timezone(&Utc);
+
+    for event_id in ["evt-reserve-one", "evt-reserve-two"] {
+        enqueue_publish_job(
+            &mut conn,
+            &NewPublishJob {
+                nostr_event_id: event_id,
+                nostr_pubkey: "npub1alice",
+                event_created_at: created_at,
+                event_payload: json!({"id": event_id}),
+                job_source: PublishJobSource::Live.as_str(),
+                state: "pending",
+            },
+        )
+        .expect("job should enqueue");
+    }
+
+    let first = reserve_publish_job_rkey(&mut conn, "evt-reserve-one", "3abcfirsttid")
+        .expect("first reservation should succeed");
+    let repeated = reserve_publish_job_rkey(&mut conn, "evt-reserve-one", "3abcothertid")
+        .expect("later reservation should return the stored value");
+    assert_eq!(first, "3abcfirsttid");
+    assert_eq!(repeated, first);
+
+    let collision = reserve_publish_job_rkey(&mut conn, "evt-reserve-two", "3abcfirsttid");
+    assert!(
+        collision.is_err(),
+        "one linked account must not reserve the same rkey twice"
+    );
+
+    let first_record = json!({"text": "first", "embed": {"video": {"ref": {"$link": "cid-a"}}}});
+    let second_record = json!({"text": "second", "embed": {"video": {"ref": {"$link": "cid-b"}}}});
+    let stored = reserve_publish_job_prepared_record(&mut conn, "evt-reserve-one", &first_record)
+        .expect("first prepared record should persist");
+    let repeated =
+        reserve_publish_job_prepared_record(&mut conn, "evt-reserve-one", &second_record)
+            .expect("later preparation should return the stored record");
+    assert_eq!(stored, first_record);
+    assert_eq!(repeated, first_record, "the first prepared record must win");
+}
+
+#[test]
+fn writer_epoch_quarantines_legacy_jobs_and_fences_legacy_claims() {
+    let _guard = test_db_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let database_url = test_database_url();
+    reset_database(&database_url);
+    let mut conn =
+        PgConnection::establish(&database_url).expect("test database should be reachable");
+
+    diesel::sql_query(
+        "INSERT INTO publish_jobs (
+            nostr_event_id, nostr_pubkey, event_created_at, event_payload,
+            job_source, state
+         ) VALUES ('evt-legacy', 'npub1legacy', NOW(), '{}', 'live', 'pending')",
+    )
+    .execute(&mut conn)
+    .expect("legacy insert should use epoch 1 default");
+
+    let new_worker = claim_next_live_job(
+        &mut conn,
+        "epoch-2-worker",
+        Utc::now() + Duration::minutes(5),
+    )
+    .expect("new worker claim should not error");
+    assert!(new_worker.is_none(), "epoch-1 work must remain quarantined");
+
+    let legacy_claim = diesel::sql_query(
+        "UPDATE publish_jobs
+         SET state = 'in_progress', lease_owner = 'legacy-worker'
+         WHERE nostr_event_id = 'evt-legacy'",
+    )
+    .execute(&mut conn);
+    assert!(
+        legacy_claim.is_err(),
+        "a writer without the epoch marker must be rejected by the database"
+    );
+
+    enqueue_publish_job(
+        &mut conn,
+        &NewPublishJob {
+            nostr_event_id: "evt-legacy",
+            nostr_pubkey: "npub1legacy",
+            event_created_at: Utc::now(),
+            event_payload: json!({"id": "evt-legacy"}),
+            job_source: PublishJobSource::Live.as_str(),
+            state: "pending",
+        },
+    )
+    .expect("new ingester should adopt a pristine legacy insert");
+    let adopted = claim_next_live_job(
+        &mut conn,
+        "epoch-2-worker",
+        Utc::now() + Duration::minutes(5),
+    )
+    .expect("adopted claim should not error")
+    .expect("pristine legacy insert should become claimable");
+    assert_eq!(adopted.writer_epoch, 2);
+}
+
+#[test]
+fn lease_renewal_and_finalization_require_the_current_owner() {
+    let _guard = test_db_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let database_url = test_database_url();
+    reset_database(&database_url);
+    let mut conn =
+        PgConnection::establish(&database_url).expect("test database should be reachable");
+    let created_at = Utc::now();
+    enqueue_publish_job(
+        &mut conn,
+        &NewPublishJob {
+            nostr_event_id: "evt-owned-lease",
+            nostr_pubkey: "npub1alice",
+            event_created_at: created_at,
+            event_payload: json!({"id": "evt-owned-lease"}),
+            job_source: PublishJobSource::Live.as_str(),
+            state: "pending",
+        },
+    )
+    .expect("job should enqueue");
+    claim_next_live_job(&mut conn, "worker-a", Utc::now() + Duration::minutes(5))
+        .expect("claim should work")
+        .expect("job should be claimable");
+
+    assert!(renew_publish_job_lease(
+        &mut conn,
+        "evt-owned-lease",
+        "worker-a",
+        Utc::now() + Duration::minutes(10),
+    )
+    .expect("owner renewal should work"));
+    assert!(!renew_publish_job_lease(
+        &mut conn,
+        "evt-owned-lease",
+        "worker-b",
+        Utc::now() + Duration::minutes(10),
+    )
+    .expect("non-owner renewal should be a clean miss"));
+    assert!(
+        mark_publish_job_completed_for_owner(&mut conn, "evt-owned-lease", "worker-b").is_err()
+    );
+    let completed = mark_publish_job_completed_for_owner(&mut conn, "evt-owned-lease", "worker-a")
+        .expect("current owner should complete");
+    assert_eq!(completed.state, "published");
 }
 
 #[test]

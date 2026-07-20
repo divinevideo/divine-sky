@@ -59,6 +59,10 @@ const MIGRATIONS: &[EmbeddedMigration] = &[
         name: "007_operator_actions",
         up_sql: include_str!("../../../migrations/007_operator_actions/up.sql"),
     },
+    EmbeddedMigration {
+        name: "008_publish_job_reserved_rkey",
+        up_sql: include_str!("../../../migrations/008_publish_job_reserved_rkey/up.sql"),
+    },
 ];
 
 /// Apply all bridge-owned migrations to `database_url` on startup.
@@ -175,6 +179,9 @@ mod tests {
         // Fresh DB: full run creates everything, including the 004 scheduler columns.
         run_pending_migrations_on(&mut conn).expect("fresh migration run should succeed");
         assert!(column_exists(&mut conn, "publish_jobs", "nostr_pubkey"));
+        assert!(column_exists(&mut conn, "publish_jobs", "reserved_rkey"));
+        assert!(column_exists(&mut conn, "publish_jobs", "prepared_record"));
+        assert!(column_exists(&mut conn, "publish_jobs", "writer_epoch"));
         assert!(column_exists(
             &mut conn,
             "account_links",

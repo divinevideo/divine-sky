@@ -87,6 +87,10 @@ pub struct PublishJobEnvelope {
     pub nostr_pubkey: String,
     pub event_created_at: i64,
     pub event_payload: serde_json::Value,
+    /// Durable AT record key reserved before any remote side effect.
+    pub reserved_rkey: Option<String>,
+    /// Exact canonical record selected before the first PDS create attempt.
+    pub prepared_record: Option<serde_json::Value>,
 }
 
 /// Prepare-phase decision for a relay event.
@@ -127,6 +131,13 @@ pub trait RecordStore: Send + Sync {
     async fn mark_deleted(&self, event_id: &str) -> Result<()>;
     async fn save_asset_manifest(&self, _entry: AssetManifestRecord) -> Result<()> {
         Ok(())
+    }
+    async fn reserve_prepared_record(
+        &self,
+        _event_id: &str,
+        candidate: serde_json::Value,
+    ) -> Result<serde_json::Value> {
+        Ok(candidate)
     }
     async fn update_record_mapping_status(
         &self,
@@ -226,6 +237,16 @@ pub trait PdsPublisher: Send + Sync {
             rkey,
             cid: None,
         })
+    }
+
+    async fn create_record_at_rkey_with_meta(
+        &self,
+        _did: &str,
+        _collection: &str,
+        _rkey: &str,
+        _record: &serde_json::Value,
+    ) -> Result<PublishedRecord> {
+        anyhow::bail!("publisher does not support create-only writes at a reserved rkey")
     }
 
     async fn put_record(
@@ -374,6 +395,8 @@ fn build_publish_job_envelope(
         nostr_pubkey: event.pubkey.clone(),
         event_created_at: event.created_at,
         event_payload: serde_json::to_value(event).context("failed to serialize event payload")?,
+        reserved_rkey: None,
+        prepared_record: None,
     })
 }
 
@@ -497,14 +520,23 @@ where
     pub async fn execute_publish_job(&self, job: &PublishJobEnvelope) -> Result<ProcessResult> {
         let event: NostrEvent = serde_json::from_value(job.event_payload.clone())
             .context("failed to deserialize queued event payload")?;
-        self.process_event_inner(&event, DedupeMode::PublishedOnly)
-            .await
+        anyhow::ensure!(
+            event.kind != 34235 && event.kind != 34236 || job.reserved_rkey.is_some(),
+            "queued video publication requires a durable reserved rkey"
+        );
+        self.process_event_inner(
+            &event,
+            DedupeMode::PublishedOnly,
+            job.reserved_rkey.as_deref(),
+            job.prepared_record.as_ref(),
+        )
+        .await
     }
 
     /// Process a single Nostr event through the full bridge pipeline.
     pub async fn process_event(&self, event: &NostrEvent) -> ProcessResult {
         match self
-            .process_event_inner(event, DedupeMode::QueueAware)
+            .process_event_inner(event, DedupeMode::QueueAware, None, None)
             .await
         {
             Ok(result) => result,
@@ -518,6 +550,8 @@ where
         &self,
         event: &NostrEvent,
         dedupe_mode: DedupeMode,
+        reserved_rkey: Option<&str>,
+        prepared_record: Option<&serde_json::Value>,
     ) -> Result<ProcessResult> {
         // 1. Verify Nostr signature
         match verify_nostr_event(event) {
@@ -586,7 +620,9 @@ where
 
         // 5. For video events (kinds 34235, 34236)
         if event.kind == 34235 || event.kind == 34236 {
-            return self.handle_video_event(event, &account).await;
+            return self
+                .handle_video_event(event, &account, reserved_rkey, prepared_record)
+                .await;
         }
 
         Ok(ProcessResult::Skipped {
@@ -688,51 +724,73 @@ where
         &self,
         event: &NostrEvent,
         account: &AccountLink,
+        reserved_rkey: Option<&str>,
+        prepared_record: Option<&serde_json::Value>,
     ) -> Result<ProcessResult> {
-        // Fetch blob from Blossom
         let video_url = get_video_url(event).context("no video URL found in event")?;
         let expected_sha256 = get_source_sha256(event).context("no source hash found in event")?;
+        let record_value = match prepared_record {
+            Some(record) => record.clone(),
+            None => {
+                let fetched = self
+                    .blob_fetcher
+                    .fetch_blob_verified(&video_url, Some(&expected_sha256))
+                    .await
+                    .context("failed to fetch blob")?;
 
-        let fetched = self
-            .blob_fetcher
-            .fetch_blob_verified(&video_url, Some(&expected_sha256))
-            .await
-            .context("failed to fetch blob")?;
+                let prepared_video = prepare_publishable_video(&fetched.data, &fetched.mime_type)
+                    .context("failed to prepare publishable video")?;
 
-        let prepared_video = prepare_publishable_video(&fetched.data, &fetched.mime_type)
-            .context("failed to prepare publishable video")?;
+                let blob_ref = self
+                    .blob_uploader
+                    .upload_blob_for_user(
+                        &prepared_video.data,
+                        &prepared_video.mime_type,
+                        &account.did,
+                    )
+                    .await
+                    .context("failed to upload blob to PDS")?;
 
-        // Upload blob to PDS (or video service when enabled)
-        let blob_ref = self
-            .blob_uploader
-            .upload_blob_for_user(
-                &prepared_video.data,
-                &prepared_video.mime_type,
-                &account.did,
-            )
-            .await
-            .context("failed to upload blob to PDS")?;
+                let mut post = translate_nip71_to_post(event, &blob_ref)
+                    .context("failed to translate event to ATProto post")?;
+                if let Some(embed) = post.embed.as_mut() {
+                    embed.captions = self.resolve_video_captions(event, &account.did).await;
+                }
 
-        // Translate event to ATProto post
-        let mut post = translate_nip71_to_post(event, &blob_ref)
-            .context("failed to translate event to ATProto post")?;
+                let candidate =
+                    serde_json::to_value(&post).context("failed to serialize ATProto post")?;
+                self.record_store
+                    .reserve_prepared_record(&event.id, candidate)
+                    .await
+                    .context("failed to persist prepared AT record")?
+            }
+        };
 
-        // Attach WebVTT captions from NIP-71 text-track tags (best-effort:
-        // caption problems must never block the video publish).
-        if let Some(embed) = post.embed.as_mut() {
-            embed.captions = self.resolve_video_captions(event, &account.did).await;
-        }
-
-        let record_value =
-            serde_json::to_value(&post).context("failed to serialize ATProto post")?;
+        // Validate the durable intent before any create. This also provides the
+        // lineage values on recovery without repeating media work.
+        let blob_ref: BlobRef = serde_json::from_value(
+            record_value
+                .pointer("/embed/video")
+                .cloned()
+                .context("prepared AT record is missing embed.video")?,
+        )
+        .context("prepared AT record contains an invalid video blob")?;
 
         let collection = "app.bsky.feed.post";
 
-        let published = self
-            .pds_publisher
-            .create_record_with_meta(&account.did, collection, &record_value)
-            .await
-            .context("failed to write record to PDS")?;
+        let published = match reserved_rkey {
+            Some(rkey) => {
+                self.pds_publisher
+                    .create_record_at_rkey_with_meta(&account.did, collection, rkey, &record_value)
+                    .await
+            }
+            None => {
+                self.pds_publisher
+                    .create_record_with_meta(&account.did, collection, &record_value)
+                    .await
+            }
+        }
+        .context("failed to write record to PDS")?;
 
         // Save mapping
         self.record_store
@@ -749,11 +807,11 @@ where
 
         self.record_store
             .save_asset_manifest(AssetManifestRecord {
-                source_sha256: fetched.source_sha256,
+                source_sha256: expected_sha256,
                 blossom_url: Some(video_url),
                 at_blob_cid: blob_ref.cid().to_string(),
-                mime: prepared_video.mime_type,
-                bytes: prepared_video.bytes,
+                mime: blob_ref.mime_type,
+                bytes: blob_ref.size,
                 is_derivative: false,
             })
             .await
@@ -1414,6 +1472,34 @@ mod tests {
         assert_eq!(saved.len(), 1);
         assert_eq!(saved[0].nostr_event_id, event.id);
         assert_eq!(saved[0].rkey, "3mockvideorkey");
+    }
+
+    #[tokio::test]
+    async fn reserved_video_publish_fails_closed_without_create_only_publisher() {
+        let event = make_video_event("ignored");
+        let accounts = MockAccountStore {
+            links: vec![account_for(&event.pubkey)],
+        };
+        let pipeline = make_pipeline(accounts, MockRecordStore::new());
+        let job = PublishJobEnvelope {
+            nostr_event_id: event.id.clone(),
+            nostr_pubkey: event.pubkey.clone(),
+            event_created_at: event.created_at,
+            event_payload: serde_json::to_value(&event).unwrap(),
+            reserved_rkey: Some("3reservedtid".to_string()),
+            prepared_record: None,
+        };
+
+        let error = pipeline
+            .execute_publish_job(&job)
+            .await
+            .expect_err("queued video requires a create-only publisher implementation");
+
+        let message = format!("{error:#}");
+        assert!(
+            message.contains("publisher does not support create-only writes at a reserved rkey"),
+            "{message}"
+        );
     }
 
     #[tokio::test]

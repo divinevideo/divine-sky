@@ -18,6 +18,7 @@ pub mod publisher;
 pub mod runtime;
 pub mod signature;
 pub mod text_builder;
+pub mod tid;
 pub mod translator;
 pub mod video_service;
 

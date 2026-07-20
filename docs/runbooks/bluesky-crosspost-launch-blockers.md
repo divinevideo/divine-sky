@@ -1,4 +1,66 @@
-# Bluesky Crosspost — Launch Blockers (investigated 2026-06-01, updated 2026-06-03)
+# Bluesky Crosspost — Launch Blockers (investigated 2026-06-01, updated 2026-07-13)
+
+## Release gate update — 2026-07-13
+
+Staging now publishes records, but the candidate that preceded this update is
+not eligible for production promotion. A two-account canary proved that
+`video.bsky.app` may return the same `already_exists` blob CID for identical
+source bytes while that blob is retrievable only under the first account's DID.
+AT blob identity is content-addressed, but availability is repository-scoped.
+
+The next candidate must pass both of these gates:
+
+1. **Per-repository video ownership.** Provision two isolated connected
+   accounts and publish identical verified source bytes. Each account must have
+   exactly one feed record, and
+   `com.atproto.sync.getBlob?did=<that DID>&cid=<video BlobRef CID extracted from the record>` must return the
+   bytes for both accounts. A video-service cache hit must trigger an
+   authenticated `com.atproto.repo.uploadBlob` to the target account's PDS; its
+   foreign cached `BlobRef` must never be placed in that account's record.
+2. **Stable create identity.** Every queued event must have a non-null
+   `publish_jobs.reserved_rkey` before media upload or PDS publication. Inject a
+   crash after `createRecord` commits and before the mapping/job completion
+   write. After lease expiry and retry, the event must retain the same AT URI,
+   only one feed record may exist, and any ambiguous create failure—including
+   rsky's generic duplicate-key HTTP 500—may be accepted only after `getRecord`
+   returns the exact prepared record. Different content is
+   `REMOTE_RECORD_DIVERGED` and must never be overwritten.
+3. **Crash-stable prepared intent.** Before the first `createRecord`, the queue
+   row must contain both `reserved_rkey` and the exact `prepared_record`. A retry
+   must skip Blossom, transcoding, caption upload, and video upload, and reuse
+   that JSON exactly. A different cache outcome must not change the blob CID
+   selected by the first attempt.
+4. **Writer and lease fencing.** Existing epoch-1 jobs remain quarantined until
+   audited; epoch-2 workers only claim epoch-2 jobs, and the database rejects a
+   claim without the epoch marker. Long jobs renew their lease. Completion and
+   failure writes must match the current lease owner so a stale worker cannot
+   overwrite a replacement worker's state. Ownership is a fresh UUID per claim,
+   not a pod PID/name that can collide across replicas.
+
+Required canary evidence:
+
+```text
+account A: exactly one AT URI; selected blob retrievable for DID A
+account B: exactly one AT URI; selected blob retrievable for DID B
+retry A after injected lost response: same AT URI; record count unchanged
+retry A: fetch count unchanged; upload count unchanged; prepared JSON unchanged
+legacy epoch-1 row: not claimed by epoch-2 worker; legacy claim rejected
+expired session: refreshed; same URI/blob invariants
+repeat reconciliation: zero unexplained differences
+staging pod image digest: identical to the proposed production digest
+```
+
+Do not repair Rabble's archive or promote the image until every line above is
+recorded against the candidate digest.
+
+The B1–B4 material below is retained as the June incident record and is
+superseded as current-state guidance. As of this update, production runs an
+older atbridge image, the binary applies bridge-owned migrations at startup,
+and the deployed configuration enables the video service. The active blockers
+are the per-DID blob and stable-create release gates above, followed by the
+staged reconciliation rollout in the RFC.
+
+## Historical June investigation (superseded)
 
 Investigation of why Bluesky crossposting is not working / not launchable. Evidence
 gathered from the live `dv-platform-prod` cluster (kubectl), the IaC repo, and the

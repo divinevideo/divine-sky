@@ -2,11 +2,11 @@
 //!
 //! All query functions live here and are re-exported from the crate root.
 
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, Context, Result};
 use chrono::{DateTime, Utc};
 use diesel::prelude::*;
 use diesel::sql_query;
-use diesel::sql_types::{Array, BigInt, Int8, Nullable, Text, Timestamptz};
+use diesel::sql_types::{Array, BigInt, Bool, Int8, Jsonb, Nullable, Text, Timestamptz};
 use diesel::PgConnection;
 use diesel::PgTextExpressionMethods;
 
@@ -24,6 +24,24 @@ const ACCOUNT_LINK_LIFECYCLE_COLUMNS: &str = "nostr_pubkey, did, handle, crosspo
 struct PublishJobIdRow {
     #[diesel(sql_type = Text)]
     nostr_event_id: String,
+}
+
+#[derive(Debug, QueryableByName)]
+struct ReservedRkeyRow {
+    #[diesel(sql_type = Text)]
+    reserved_rkey: String,
+}
+
+#[derive(Debug, QueryableByName)]
+struct PreparedRecordRow {
+    #[diesel(sql_type = Jsonb)]
+    prepared_record: serde_json::Value,
+}
+
+#[derive(Debug, QueryableByName)]
+struct BooleanRow {
+    #[diesel(sql_type = Bool)]
+    value: bool,
 }
 
 #[derive(Debug, QueryableByName)]
@@ -736,7 +754,7 @@ pub fn revive_legacy_badjwt_jobs(
     }
     let query = "UPDATE publish_jobs p
          SET completed_at = NULL, lease_owner = NULL,
-             lease_expires_at = NOW(), updated_at = NOW()
+             lease_expires_at = NOW(), writer_epoch = 2, updated_at = NOW()
          FROM account_links a
          WHERE a.nostr_pubkey = p.nostr_pubkey
            AND p.nostr_pubkey = $1
@@ -787,18 +805,129 @@ pub fn get_publish_job(
 /// If a job already exists (including published/skipped terminal rows), that
 /// existing row is returned unchanged.
 pub fn enqueue_publish_job(conn: &mut PgConnection, job: &NewPublishJob) -> Result<PublishJob> {
-    diesel::insert_into(publish_jobs::table)
-        .values(job)
-        .on_conflict(publish_jobs::nostr_event_id)
-        .do_nothing()
-        .execute(conn)?;
+    conn.transaction(|conn| {
+        let inserted = diesel::insert_into(publish_jobs::table)
+            .values(job)
+            .on_conflict(publish_jobs::nostr_event_id)
+            .do_nothing()
+            .execute(conn)?;
 
-    get_publish_job(conn, job.nostr_event_id)?.ok_or_else(|| {
-        anyhow!(
-            "publish job missing after enqueue for {}",
-            job.nostr_event_id
-        )
+        // The schema default remains epoch 1 so an old binary overlapping the
+        // migration can only create quarantined legacy work.  Only this new
+        // enqueue path promotes rows it inserted to the create-only epoch.
+        if inserted == 1 {
+            diesel::update(publish_jobs::table.find(job.nostr_event_id))
+                .set(publish_jobs::writer_epoch.eq(2))
+                .execute(conn)?;
+        } else {
+            // During a rolling overlap an old ingester may win the insert with
+            // epoch 1. A completely pristine row proves no worker ever claimed
+            // it and no remote side effect is possible, so adopting that row is
+            // safe. Anything attempted remains quarantined for operator audit.
+            diesel::update(
+                publish_jobs::table
+                    .filter(publish_jobs::nostr_event_id.eq(job.nostr_event_id))
+                    .filter(publish_jobs::writer_epoch.eq(1))
+                    .filter(publish_jobs::state.eq(PublishState::Pending.as_str()))
+                    .filter(publish_jobs::attempt.eq(0))
+                    .filter(publish_jobs::reserved_rkey.is_null())
+                    .filter(publish_jobs::prepared_record.is_null())
+                    .filter(publish_jobs::lease_owner.is_null())
+                    .filter(publish_jobs::completed_at.is_null()),
+            )
+            .set(publish_jobs::writer_epoch.eq(2))
+            .execute(conn)?;
+        }
+
+        get_publish_job(conn, job.nostr_event_id)?.ok_or_else(|| {
+            anyhow!(
+                "publish job missing after enqueue for {}",
+                job.nostr_event_id
+            )
+        })
     })
+}
+
+/// Durably reserve the one AT record key used for every execution of a job.
+///
+/// The first candidate wins. Later calls return the stored key, including
+/// concurrent retries after a worker loses its lease. An advisory lock and
+/// same-account check turn a generator collision into an error before any
+/// remote side effect without requiring a blocking startup index build.
+pub fn reserve_publish_job_rkey(
+    conn: &mut PgConnection,
+    nostr_event_id: &str,
+    candidate: &str,
+) -> Result<String> {
+    conn.transaction(|conn| {
+        // Serialize the rare same-candidate path without building a blocking
+        // index during startup migration. Rkeys are repository-scoped; the
+        // Nostr pubkey identifies the linked target account here.
+        sql_query(
+            "SELECT TRUE AS value
+             FROM pg_advisory_xact_lock(hashtextextended($1, 0))",
+        )
+        .bind::<Text, _>(candidate)
+        .get_result::<BooleanRow>(conn)?;
+
+        let collision = sql_query(
+            "SELECT EXISTS (
+                SELECT 1
+                FROM publish_jobs AS other
+                JOIN publish_jobs AS current
+                  ON current.nostr_event_id = $1
+                WHERE other.nostr_pubkey = current.nostr_pubkey
+                  AND other.reserved_rkey = $2
+                  AND other.nostr_event_id <> current.nostr_event_id
+             ) AS value",
+        )
+        .bind::<Text, _>(nostr_event_id)
+        .bind::<Text, _>(candidate)
+        .get_result::<BooleanRow>(conn)?
+        .value;
+        if collision {
+            return Err(anyhow!(
+                "reserved rkey collision for linked account: {candidate}"
+            ));
+        }
+
+        let row = sql_query(
+            "UPDATE publish_jobs
+             SET reserved_rkey = COALESCE(reserved_rkey, $2),
+                 updated_at = CASE WHEN reserved_rkey IS NULL THEN NOW() ELSE updated_at END
+             WHERE nostr_event_id = $1
+             RETURNING reserved_rkey",
+        )
+        .bind::<Text, _>(nostr_event_id)
+        .bind::<Text, _>(candidate)
+        .get_result::<ReservedRkeyRow>(conn)
+        .with_context(|| format!("failed to reserve publish rkey for {nostr_event_id}"))?;
+        Ok(row.reserved_rkey)
+    })
+}
+
+/// Persist the exact AT record that every attempt of this job must create.
+///
+/// The first prepared value wins.  Returning the stored value is essential:
+/// concurrent workers may prepare different repo-scoped blob CIDs, but only
+/// one canonical record is allowed to reach `createRecord`.
+pub fn reserve_publish_job_prepared_record(
+    conn: &mut PgConnection,
+    nostr_event_id: &str,
+    candidate: &serde_json::Value,
+) -> Result<serde_json::Value> {
+    let row = sql_query(
+        "UPDATE publish_jobs
+         SET prepared_record = COALESCE(prepared_record, $2),
+             updated_at = CASE WHEN prepared_record IS NULL THEN NOW() ELSE updated_at END
+         WHERE nostr_event_id = $1
+         RETURNING prepared_record",
+    )
+    .bind::<Text, _>(nostr_event_id)
+    .bind::<Jsonb, _>(candidate)
+    .get_result::<PreparedRecordRow>(conn)
+    .with_context(|| format!("failed to reserve prepared record for {nostr_event_id}"))?;
+    Ok(row.prepared_record)
 }
 
 fn claim_next_job(
@@ -812,10 +941,13 @@ fn claim_next_job(
         PublishJobSource::Backfill => "event_created_at ASC, created_at ASC, nostr_event_id ASC",
     };
     let query = format!(
-        "WITH candidate AS (
+        "WITH writer_fence AS MATERIALIZED (
+            SELECT set_config('divine_sky.writer_epoch', '2', true)
+         ), candidate AS (
             SELECT nostr_event_id
-            FROM publish_jobs
+            FROM publish_jobs, writer_fence
             WHERE job_source = $1
+              AND writer_epoch = 2
               AND (
                 state = 'pending'
                 OR (
@@ -884,8 +1016,31 @@ pub fn mark_publish_job_completed(
     conn: &mut PgConnection,
     nostr_event_id: &str,
 ) -> Result<PublishJob> {
+    mark_publish_job_completed_inner(conn, nostr_event_id, None)
+}
+
+/// Complete a job only if this worker still owns the active lease.
+pub fn mark_publish_job_completed_for_owner(
+    conn: &mut PgConnection,
+    nostr_event_id: &str,
+    lease_owner: &str,
+) -> Result<PublishJob> {
+    mark_publish_job_completed_inner(conn, nostr_event_id, Some(lease_owner))
+}
+
+fn mark_publish_job_completed_inner(
+    conn: &mut PgConnection,
+    nostr_event_id: &str,
+    lease_owner: Option<&str>,
+) -> Result<PublishJob> {
     let now = Utc::now();
-    let result = diesel::update(publish_jobs::table.find(nostr_event_id))
+    let result = if let Some(lease_owner) = lease_owner {
+        diesel::update(
+            publish_jobs::table
+                .filter(publish_jobs::nostr_event_id.eq(nostr_event_id))
+                .filter(publish_jobs::state.eq(PublishState::InProgress.as_str()))
+                .filter(publish_jobs::lease_owner.eq(lease_owner)),
+        )
         .set((
             publish_jobs::state.eq(PublishState::Published.as_str()),
             publish_jobs::error.eq(None::<String>),
@@ -894,8 +1049,42 @@ pub fn mark_publish_job_completed(
             publish_jobs::completed_at.eq(Some(now)),
             publish_jobs::updated_at.eq(now),
         ))
-        .get_result::<PublishJob>(conn)?;
+        .get_result::<PublishJob>(conn)
+    } else {
+        diesel::update(publish_jobs::table.find(nostr_event_id))
+            .set((
+                publish_jobs::state.eq(PublishState::Published.as_str()),
+                publish_jobs::error.eq(None::<String>),
+                publish_jobs::lease_owner.eq(None::<String>),
+                publish_jobs::lease_expires_at.eq(None::<DateTime<Utc>>),
+                publish_jobs::completed_at.eq(Some(now)),
+                publish_jobs::updated_at.eq(now),
+            ))
+            .get_result::<PublishJob>(conn)
+    }
+    .with_context(|| format!("publish job lease lost before completion: {nostr_event_id}"))?;
     Ok(result)
+}
+
+/// Extend an active lease without allowing a stale worker to reacquire it.
+pub fn renew_publish_job_lease(
+    conn: &mut PgConnection,
+    nostr_event_id: &str,
+    lease_owner: &str,
+    lease_expires_at: DateTime<Utc>,
+) -> Result<bool> {
+    let changed = diesel::update(
+        publish_jobs::table
+            .filter(publish_jobs::nostr_event_id.eq(nostr_event_id))
+            .filter(publish_jobs::state.eq(PublishState::InProgress.as_str()))
+            .filter(publish_jobs::lease_owner.eq(lease_owner)),
+    )
+    .set((
+        publish_jobs::lease_expires_at.eq(Some(lease_expires_at)),
+        publish_jobs::updated_at.eq(Utc::now()),
+    ))
+    .execute(conn)?;
+    Ok(changed == 1)
 }
 
 /// Maximum failed attempts before a publish job is terminally failed.
@@ -931,7 +1120,36 @@ pub fn mark_publish_job_failed(
     nostr_event_id: &str,
     error_msg: &str,
 ) -> Result<PublishJob> {
-    let existing = get_publish_job(conn, nostr_event_id)?
+    mark_publish_job_failed_inner(conn, nostr_event_id, error_msg, None)
+}
+
+/// Fail a job only if this worker still owns the active lease.
+pub fn mark_publish_job_failed_for_owner(
+    conn: &mut PgConnection,
+    nostr_event_id: &str,
+    lease_owner: &str,
+    error_msg: &str,
+) -> Result<PublishJob> {
+    mark_publish_job_failed_inner(conn, nostr_event_id, error_msg, Some(lease_owner))
+}
+
+fn mark_publish_job_failed_inner(
+    conn: &mut PgConnection,
+    nostr_event_id: &str,
+    error_msg: &str,
+    lease_owner: Option<&str>,
+) -> Result<PublishJob> {
+    let mut owned = publish_jobs::table
+        .filter(publish_jobs::nostr_event_id.eq(nostr_event_id))
+        .into_boxed();
+    if let Some(lease_owner) = lease_owner {
+        owned = owned
+            .filter(publish_jobs::state.eq(PublishState::InProgress.as_str()))
+            .filter(publish_jobs::lease_owner.eq(lease_owner));
+    }
+    let existing = owned
+        .first::<PublishJob>(conn)
+        .optional()?
         .ok_or_else(|| anyhow!("publish job missing for {nostr_event_id}"))?;
     let now = Utc::now();
 
@@ -948,32 +1166,44 @@ pub fn mark_publish_job_failed(
         } else {
             UPLOAD_QUOTA_RETRY_SECS_LIVE
         };
-        let result = diesel::update(publish_jobs::table.find(nostr_event_id))
-            .set((
-                publish_jobs::state.eq(PublishState::Failed.as_str()),
-                publish_jobs::error.eq(Some(error_msg.to_string())),
-                publish_jobs::lease_expires_at.eq(Some(now + chrono::Duration::seconds(park_secs))),
-                publish_jobs::completed_at.eq(None::<DateTime<Utc>>),
-                publish_jobs::updated_at.eq(now),
-            ))
-            .get_result::<PublishJob>(conn)?;
+        let result = diesel::update(
+            publish_jobs::table
+                .filter(publish_jobs::nostr_event_id.eq(nostr_event_id))
+                .filter(
+                    publish_jobs::lease_owner.is_not_distinct_from(existing.lease_owner.clone()),
+                ),
+        )
+        .set((
+            publish_jobs::state.eq(PublishState::Failed.as_str()),
+            publish_jobs::error.eq(Some(error_msg.to_string())),
+            publish_jobs::lease_expires_at.eq(Some(now + chrono::Duration::seconds(park_secs))),
+            publish_jobs::completed_at.eq(None::<DateTime<Utc>>),
+            publish_jobs::updated_at.eq(now),
+        ))
+        .get_result::<PublishJob>(conn)?;
         return Ok(result);
     }
 
     let attempt = existing.attempt.saturating_add(1);
 
     if attempt >= MAX_PUBLISH_JOB_ATTEMPTS {
-        let result = diesel::update(publish_jobs::table.find(nostr_event_id))
-            .set((
-                publish_jobs::state.eq(PublishState::Failed.as_str()),
-                publish_jobs::attempt.eq(attempt),
-                publish_jobs::error.eq(Some(error_msg.to_string())),
-                publish_jobs::lease_owner.eq(None::<String>),
-                publish_jobs::lease_expires_at.eq(None::<DateTime<Utc>>),
-                publish_jobs::completed_at.eq(Some(now)),
-                publish_jobs::updated_at.eq(now),
-            ))
-            .get_result::<PublishJob>(conn)?;
+        let result = diesel::update(
+            publish_jobs::table
+                .filter(publish_jobs::nostr_event_id.eq(nostr_event_id))
+                .filter(
+                    publish_jobs::lease_owner.is_not_distinct_from(existing.lease_owner.clone()),
+                ),
+        )
+        .set((
+            publish_jobs::state.eq(PublishState::Failed.as_str()),
+            publish_jobs::attempt.eq(attempt),
+            publish_jobs::error.eq(Some(error_msg.to_string())),
+            publish_jobs::lease_owner.eq(None::<String>),
+            publish_jobs::lease_expires_at.eq(None::<DateTime<Utc>>),
+            publish_jobs::completed_at.eq(Some(now)),
+            publish_jobs::updated_at.eq(now),
+        ))
+        .get_result::<PublishJob>(conn)?;
         return Ok(result);
     }
 
@@ -981,16 +1211,20 @@ pub fn mark_publish_job_failed(
         .checked_pow(attempt.clamp(0, 30) as u32)
         .unwrap_or(MAX_PUBLISH_JOB_BACKOFF_SECS)
         .min(MAX_PUBLISH_JOB_BACKOFF_SECS);
-    let result = diesel::update(publish_jobs::table.find(nostr_event_id))
-        .set((
-            publish_jobs::state.eq(PublishState::Failed.as_str()),
-            publish_jobs::attempt.eq(attempt),
-            publish_jobs::error.eq(Some(error_msg.to_string())),
-            publish_jobs::lease_expires_at.eq(Some(now + chrono::Duration::seconds(backoff_secs))),
-            publish_jobs::completed_at.eq(None::<DateTime<Utc>>),
-            publish_jobs::updated_at.eq(now),
-        ))
-        .get_result::<PublishJob>(conn)?;
+    let result = diesel::update(
+        publish_jobs::table
+            .filter(publish_jobs::nostr_event_id.eq(nostr_event_id))
+            .filter(publish_jobs::lease_owner.is_not_distinct_from(existing.lease_owner.clone())),
+    )
+    .set((
+        publish_jobs::state.eq(PublishState::Failed.as_str()),
+        publish_jobs::attempt.eq(attempt),
+        publish_jobs::error.eq(Some(error_msg.to_string())),
+        publish_jobs::lease_expires_at.eq(Some(now + chrono::Duration::seconds(backoff_secs))),
+        publish_jobs::completed_at.eq(None::<DateTime<Utc>>),
+        publish_jobs::updated_at.eq(now),
+    ))
+    .get_result::<PublishJob>(conn)?;
     Ok(result)
 }
 

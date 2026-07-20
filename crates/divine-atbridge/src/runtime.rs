@@ -13,7 +13,9 @@ use divine_bridge_db::{
     cancel_publish_job, claim_next_backfill_job, claim_next_live_job, enqueue_publish_job,
     get_account_link_lifecycle, get_account_pds_access_jwt_by_did,
     get_account_pds_refresh_jwt_by_did, get_ingest_offset, get_publish_job, get_record_mapping,
-    insert_asset, insert_record_mapping, mark_publish_job_completed, mark_publish_job_failed,
+    insert_asset, insert_record_mapping, mark_publish_job_completed_for_owner,
+    mark_publish_job_failed_for_owner, renew_publish_job_lease,
+    reserve_publish_job_prepared_record, reserve_publish_job_rkey,
     store_account_pds_session_by_did,
     update_record_mapping_status as update_record_mapping_status_query, upsert_ingest_offset,
 };
@@ -29,13 +31,19 @@ use crate::pipeline::{
     PublishJobEnvelope, QueueDecision, RecordMapping, RecordStore,
 };
 use crate::publisher::PdsClient;
+use crate::tid::next_tid;
 use crate::video_service::VideoServiceUploader;
 
 pub type SharedConnection = Arc<Mutex<PgConnection>>;
 
-const DEFAULT_PUBLISH_JOB_LEASE_SECS: i64 = 120;
+const DEFAULT_PUBLISH_JOB_LEASE_SECS: i64 = 600;
+const PUBLISH_JOB_HEARTBEAT_SECS: u64 = 60;
 const DEFAULT_LIVE_WORKER_INTERVAL_MILLIS: u64 = 250;
 const DEFAULT_BACKFILL_WORKER_INTERVAL_MILLIS: u64 = 1_000;
+
+fn new_lease_owner_token(worker_name: &str) -> String {
+    format!("{worker_name}:{}", uuid::Uuid::new_v4())
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WorkerRunResult {
@@ -190,6 +198,15 @@ impl RecordStore for DbRecordStore {
         Ok(())
     }
 
+    async fn reserve_prepared_record(
+        &self,
+        event_id: &str,
+        candidate: serde_json::Value,
+    ) -> Result<serde_json::Value> {
+        let mut connection = self.connection.lock().unwrap();
+        reserve_publish_job_prepared_record(&mut connection, event_id, &candidate)
+    }
+
     async fn update_record_mapping_status(
         &self,
         event_id: &str,
@@ -260,6 +277,8 @@ fn delete_execution_envelope(tombstone_job: &PublishJobEnvelope) -> Result<Publi
         nostr_pubkey: event.pubkey,
         event_created_at: event.created_at,
         event_payload: tombstone_job.event_payload.clone(),
+        reserved_rkey: None,
+        prepared_record: None,
     })
 }
 
@@ -269,6 +288,8 @@ fn publish_job_envelope(job: &PublishJob) -> PublishJobEnvelope {
         nostr_pubkey: job.nostr_pubkey.clone(),
         event_created_at: job.event_created_at.timestamp(),
         event_payload: job.event_payload.clone(),
+        reserved_rkey: job.reserved_rkey.clone(),
+        prepared_record: job.prepared_record.clone(),
     }
 }
 
@@ -438,28 +459,77 @@ where
     U: crate::pipeline::BlobUploader,
     P: crate::pipeline::PdsPublisher,
 {
+    let lease_owner = new_lease_owner_token(worker_name);
     let lease_expires_at = Utc::now() + chrono::Duration::seconds(DEFAULT_PUBLISH_JOB_LEASE_SECS);
     let job = {
         let mut conn = connection.lock().unwrap();
         match lane {
             PublishJobSource::Live => {
-                claim_next_live_job(&mut conn, worker_name, lease_expires_at)?
+                claim_next_live_job(&mut conn, &lease_owner, lease_expires_at)?
             }
             PublishJobSource::Backfill => {
-                claim_next_backfill_job(&mut conn, worker_name, lease_expires_at)?
+                claim_next_backfill_job(&mut conn, &lease_owner, lease_expires_at)?
             }
         }
     };
 
-    let Some(job) = job else {
+    let Some(mut job) = job else {
         return Ok(WorkerRunResult::Idle);
     };
 
+    if job.reserved_rkey.is_none() {
+        let reserved_rkey = {
+            let mut conn = connection.lock().unwrap();
+            reserve_publish_job_rkey(&mut conn, &job.nostr_event_id, &next_tid())?
+        };
+        job.reserved_rkey = Some(reserved_rkey);
+    }
+
     let envelope = publish_job_envelope(&job);
-    match pipeline.execute_publish_job(&envelope).await {
+    let heartbeat_connection = Arc::clone(connection);
+    let heartbeat_event_id = job.nostr_event_id.clone();
+    let heartbeat_owner = lease_owner.clone();
+    let (stop_heartbeat, mut heartbeat_stopped) = tokio::sync::oneshot::channel::<()>();
+    let heartbeat = tokio::spawn(async move {
+        let mut interval = tokio::time::interval(Duration::from_secs(PUBLISH_JOB_HEARTBEAT_SECS));
+        interval.tick().await;
+        loop {
+            tokio::select! {
+                _ = &mut heartbeat_stopped => break,
+                _ = interval.tick() => {
+                    let renewed = {
+                        let mut conn = heartbeat_connection.lock().unwrap();
+                        renew_publish_job_lease(
+                            &mut conn,
+                            &heartbeat_event_id,
+                            &heartbeat_owner,
+                            Utc::now() + chrono::Duration::seconds(DEFAULT_PUBLISH_JOB_LEASE_SECS),
+                        )
+                    };
+                    match renewed {
+                        Ok(true) => {}
+                        Ok(false) => break,
+                        Err(error) => {
+                            tracing::warn!(
+                                nostr_event_id = %heartbeat_event_id,
+                                error = %format!("{error:#}"),
+                                "failed to renew publish-job lease"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    });
+
+    let execution = pipeline.execute_publish_job(&envelope).await;
+    let _ = stop_heartbeat.send(());
+    let _ = heartbeat.await;
+
+    match execution {
         Ok(_) => {
             let mut conn = connection.lock().unwrap();
-            mark_publish_job_completed(&mut conn, &job.nostr_event_id)?;
+            mark_publish_job_completed_for_owner(&mut conn, &job.nostr_event_id, &lease_owner)?;
             Ok(WorkerRunResult::Completed {
                 nostr_event_id: job.nostr_event_id,
             })
@@ -467,7 +537,12 @@ where
         Err(error) => {
             let error_message = format!("{error:#}");
             let mut conn = connection.lock().unwrap();
-            mark_publish_job_failed(&mut conn, &job.nostr_event_id, &error_message)?;
+            mark_publish_job_failed_for_owner(
+                &mut conn,
+                &job.nostr_event_id,
+                &lease_owner,
+                &error_message,
+            )?;
             Ok(WorkerRunResult::Failed {
                 nostr_event_id: job.nostr_event_id,
                 error: error_message,
@@ -709,5 +784,14 @@ mod tests {
         );
         let ids: Vec<&str> = out.iter().map(|e| e.id.as_str()).collect();
         assert_eq!(ids, vec!["a", "b", "c"]);
+    }
+
+    #[test]
+    fn lease_tokens_are_unique_for_identical_replica_names() {
+        let first = new_lease_owner_token("live-worker-1");
+        let second = new_lease_owner_token("live-worker-1");
+        assert_ne!(first, second);
+        assert!(first.starts_with("live-worker-1:"));
+        assert!(second.starts_with("live-worker-1:"));
     }
 }

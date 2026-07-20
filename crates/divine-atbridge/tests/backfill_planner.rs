@@ -4,6 +4,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use anyhow::Result;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
+use diesel::connection::SimpleConnection;
 use diesel::Connection;
 use diesel::PgConnection;
 use diesel::RunQueryDsl;
@@ -25,13 +26,7 @@ fn test_database_url() -> String {
 }
 
 fn execute_batch(conn: &mut PgConnection, sql: &str) {
-    for statement in sql
-        .split(';')
-        .map(str::trim)
-        .filter(|line| !line.is_empty())
-    {
-        diesel::sql_query(statement).execute(conn).unwrap();
-    }
+    conn.batch_execute(sql).unwrap();
 }
 
 fn reset_database(database_url: &str) {
@@ -48,6 +43,10 @@ fn reset_database(database_url: &str) {
     execute_batch(
         &mut conn,
         include_str!("../../../migrations/004_publish_job_scheduler/up.sql"),
+    );
+    execute_batch(
+        &mut conn,
+        include_str!("../../../migrations/008_publish_job_reserved_rkey/up.sql"),
     );
 }
 

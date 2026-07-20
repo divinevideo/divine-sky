@@ -259,6 +259,95 @@ impl PdsClient {
         }
     }
 
+    /// GET a repository record as the target account, with the same one-refresh
+    /// behavior as writes. Used only to resolve an ambiguous create outcome.
+    async fn get_repo_record_as(
+        &self,
+        did: &str,
+        collection: &str,
+        rkey: &str,
+    ) -> Result<serde_json::Value> {
+        let mut url = reqwest::Url::parse(&format!(
+            "{}/xrpc/com.atproto.repo.getRecord",
+            self.base_url
+        ))
+        .context("failed to build getRecord URL")?;
+        url.query_pairs_mut()
+            .append_pair("repo", did)
+            .append_pair("collection", collection)
+            .append_pair("rkey", rkey);
+
+        let mut auth_token = self.auth_token_for(did).await?;
+        let mut refreshed = false;
+        loop {
+            let resp = self
+                .client
+                .get(url.clone())
+                .header("Authorization", format!("Bearer {auth_token}"))
+                .send()
+                .await
+                .context("failed to send getRecord request")?;
+            if resp.status() == reqwest::StatusCode::UNAUTHORIZED && !refreshed {
+                if let Some(new_token) = self.refresh_session_for(did).await? {
+                    auth_token = new_token;
+                    refreshed = true;
+                    continue;
+                }
+            }
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            if !status.is_success() {
+                anyhow::bail!(
+                    "getRecord failed ({}): {}",
+                    status.as_u16(),
+                    parse_xrpc_error(&body)
+                );
+            }
+            return serde_json::from_str(&body).context("failed to parse getRecord response");
+        }
+    }
+
+    async fn recover_reserved_record(
+        &self,
+        did: &str,
+        collection: &str,
+        rkey: &str,
+        expected_record: &serde_json::Value,
+    ) -> Result<CreateRecordResponse> {
+        let response = self.get_repo_record_as(did, collection, rkey).await?;
+        // rsky may expose an XRPC wrapper as {"value": {"uri", "cid",
+        // "value": <record>}}; the standard shape puts those fields at root.
+        let container = response
+            .get("value")
+            .filter(|value| value.get("uri").is_some() && value.get("value").is_some())
+            .unwrap_or(&response);
+        let existing = container
+            .get("value")
+            .context("getRecord response is missing record value")?;
+        anyhow::ensure!(
+            existing == expected_record,
+            "REMOTE_RECORD_DIVERGED: reserved URI contains different content"
+        );
+        let uri = container
+            .get("uri")
+            .and_then(serde_json::Value::as_str)
+            .context("getRecord response is missing URI")?;
+        let expected_uri = format!("at://{did}/{collection}/{rkey}");
+        anyhow::ensure!(
+            uri == expected_uri,
+            "REMOTE_RECORD_DIVERGED: getRecord returned a different URI"
+        );
+        let cid = container
+            .get("cid")
+            .and_then(serde_json::Value::as_str)
+            .context("getRecord response is missing CID")?;
+        Ok(CreateRecordResponse {
+            uri: uri.to_string(),
+            cid: cid.to_string(),
+            validation_status: None,
+        })
+    }
+
     /// Upload a blob to the PDS.
     ///
     /// Calls `POST /xrpc/com.atproto.repo.uploadBlob` with raw bytes.
@@ -322,21 +411,77 @@ impl PdsClient {
         collection: &str,
         record: &serde_json::Value,
     ) -> Result<CreateRecordResponse> {
-        let body = serde_json::json!({
+        self.create_record_request(did, collection, None, record)
+            .await
+    }
+
+    /// Create a record at a caller-reserved ATProto TID.
+    pub async fn create_record_at_rkey(
+        &self,
+        did: &str,
+        collection: &str,
+        rkey: &str,
+        record: &serde_json::Value,
+    ) -> Result<CreateRecordResponse> {
+        self.create_record_request(did, collection, Some(rkey), record)
+            .await
+    }
+
+    async fn create_record_request(
+        &self,
+        did: &str,
+        collection: &str,
+        rkey: Option<&str>,
+        record: &serde_json::Value,
+    ) -> Result<CreateRecordResponse> {
+        let mut body = serde_json::json!({
             "repo": did,
             "collection": collection,
             "validate": true,
             "record": record,
         });
+        if let Some(rkey) = rkey {
+            body["rkey"] = serde_json::Value::String(rkey.to_string());
+        }
 
-        let resp = self
+        let resp = match self
             .post_repo_write_as(did, "com.atproto.repo.createRecord", &body)
-            .await?;
+            .await
+        {
+            Ok(resp) => resp,
+            Err(create_error) => {
+                if let Some(rkey) = rkey {
+                    match self
+                        .recover_reserved_record(did, collection, rkey, record)
+                        .await
+                    {
+                        Ok(recovered) => return Ok(recovered),
+                        Err(recovery_error) if is_remote_record_diverged(&recovery_error) => {
+                            return Err(recovery_error);
+                        }
+                        Err(_) => {}
+                    }
+                }
+                return Err(create_error);
+            }
+        };
 
         let status = resp.status();
         if !status.is_success() {
-            let body = resp.text().await.unwrap_or_default();
-            let detail = parse_xrpc_error(&body);
+            let response_body = resp.text().await.unwrap_or_default();
+            if let Some(rkey) = rkey {
+                match self
+                    .recover_reserved_record(did, collection, rkey, record)
+                    .await
+                {
+                    Ok(recovered) => return Ok(recovered),
+                    Err(recovery_error) if is_remote_record_diverged(&recovery_error) => {
+                        return Err(recovery_error);
+                    }
+                    Err(_) => {}
+                }
+            }
+            let detail = parse_xrpc_error(&response_body);
             anyhow::bail!("createRecord failed ({}): {}", status.as_u16(), detail);
         }
 
@@ -461,6 +606,27 @@ impl PdsPublisher for PdsClient {
         })
     }
 
+    async fn create_record_at_rkey_with_meta(
+        &self,
+        did: &str,
+        collection: &str,
+        rkey: &str,
+        record: &serde_json::Value,
+    ) -> Result<PublishedRecord> {
+        let response =
+            PdsClient::create_record_at_rkey(self, did, collection, rkey, record).await?;
+        let expected_uri = format!("at://{did}/{collection}/{rkey}");
+        anyhow::ensure!(
+            response.uri == expected_uri,
+            "createRecord returned unexpected URI for reserved rkey"
+        );
+        Ok(PublishedRecord {
+            at_uri: response.uri,
+            rkey: rkey.to_string(),
+            cid: Some(response.cid),
+        })
+    }
+
     async fn put_record(
         &self,
         did: &str,
@@ -511,6 +677,10 @@ fn parse_xrpc_error(body: &str) -> String {
     body.to_string()
 }
 
+fn is_remote_record_diverged(error: &anyhow::Error) -> bool {
+    format!("{error:#}").contains("REMOTE_RECORD_DIVERGED")
+}
+
 // ===========================================================================
 // Tests
 // ===========================================================================
@@ -559,6 +729,261 @@ mod tests {
         assert_eq!(resp.cid, "bafyrei123");
         assert_eq!(resp.validation_status.as_deref(), Some("valid"));
         mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn reserved_create_recovers_matching_existing_record() {
+        let mut server = mockito::Server::new_async().await;
+        let record = serde_json::json!({
+            "$type": "app.bsky.feed.post",
+            "text": "already committed",
+            "createdAt": "2024-01-01T00:00:00Z"
+        });
+        let create = server
+            .mock("POST", "/xrpc/com.atproto.repo.createRecord")
+            .match_body(mockito::Matcher::JsonString(
+                serde_json::json!({
+                    "repo": "did:plc:abc123",
+                    "collection": "app.bsky.feed.post",
+                    "rkey": "3reservedtid",
+                    "validate": true,
+                    "record": record
+                })
+                .to_string(),
+            ))
+            // rsky currently collapses duplicate-create internals into a
+            // generic 500, so recovery cannot depend on RecordAlreadyExists.
+            .with_status(500)
+            .with_header("content-type", "application/json")
+            .with_body(
+                serde_json::json!({
+                    "error": "InternalServerError",
+                    "message": "Something went wrong"
+                })
+                .to_string(),
+            )
+            .expect(1)
+            .create_async()
+            .await;
+        let get = server
+            .mock("GET", "/xrpc/com.atproto.repo.getRecord")
+            .match_query(mockito::Matcher::AllOf(vec![
+                mockito::Matcher::UrlEncoded("repo".into(), "did:plc:abc123".into()),
+                mockito::Matcher::UrlEncoded("collection".into(), "app.bsky.feed.post".into()),
+                mockito::Matcher::UrlEncoded("rkey".into(), "3reservedtid".into()),
+            ]))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                serde_json::json!({
+                    "value": {
+                        "uri": "at://did:plc:abc123/app.bsky.feed.post/3reservedtid",
+                        "cid": "bafyexistingrecord",
+                        "value": record
+                    }
+                })
+                .to_string(),
+            )
+            .expect(1)
+            .create_async()
+            .await;
+
+        let client = PdsClient::new(server.url(), "test-token");
+        let response = client
+            .create_record_at_rkey(
+                "did:plc:abc123",
+                "app.bsky.feed.post",
+                "3reservedtid",
+                &record,
+            )
+            .await
+            .expect("matching existing record should recover the lost response");
+
+        assert_eq!(
+            response.uri,
+            "at://did:plc:abc123/app.bsky.feed.post/3reservedtid"
+        );
+        assert_eq!(response.cid, "bafyexistingrecord");
+        create.assert_async().await;
+        get.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn reserved_create_rejects_divergent_existing_record() {
+        let mut server = mockito::Server::new_async().await;
+        server
+            .mock("POST", "/xrpc/com.atproto.repo.createRecord")
+            .with_status(409)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"error":"RecordAlreadyExists"}"#)
+            .create_async()
+            .await;
+        server
+            .mock("GET", "/xrpc/com.atproto.repo.getRecord")
+            .match_query(mockito::Matcher::Any)
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                serde_json::json!({
+                    "uri": "at://did:plc:abc123/app.bsky.feed.post/3reservedtid",
+                    "cid": "bafyotherrecord",
+                    "value": {"$type": "app.bsky.feed.post", "text": "different"}
+                })
+                .to_string(),
+            )
+            .create_async()
+            .await;
+
+        let client = PdsClient::new(server.url(), "test-token");
+        let error = client
+            .create_record_at_rkey(
+                "did:plc:abc123",
+                "app.bsky.feed.post",
+                "3reservedtid",
+                &serde_json::json!({"$type": "app.bsky.feed.post", "text": "expected"}),
+            )
+            .await
+            .expect_err("divergent content must never be overwritten or accepted");
+
+        assert!(format!("{error:#}").contains("REMOTE_RECORD_DIVERGED"));
+    }
+
+    #[tokio::test]
+    async fn reserved_create_preserves_original_error_when_recovery_misses() {
+        let mut server = mockito::Server::new_async().await;
+        let create = server
+            .mock("POST", "/xrpc/com.atproto.repo.createRecord")
+            .with_status(500)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"error":"InternalServerError","message":"create broke"}"#)
+            .expect(1)
+            .create_async()
+            .await;
+        let get = server
+            .mock("GET", "/xrpc/com.atproto.repo.getRecord")
+            .match_query(mockito::Matcher::Any)
+            .with_status(404)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"error":"RecordNotFound"}"#)
+            .expect(1)
+            .create_async()
+            .await;
+
+        let client = PdsClient::new(server.url(), "test-token");
+        let error = client
+            .create_record_at_rkey(
+                "did:plc:abc123",
+                "app.bsky.feed.post",
+                "3reservedtid",
+                &serde_json::json!({"$type": "app.bsky.feed.post", "text": "expected"}),
+            )
+            .await
+            .expect_err("a missing reserved record should keep the create failure retryable");
+
+        let message = format!("{error:#}");
+        assert!(message.contains("createRecord failed (500)"), "{message}");
+        assert!(message.contains("create broke"), "{message}");
+        create.assert_async().await;
+        get.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn reserved_create_recovers_after_get_record_refreshes_session() {
+        let mut server = mockito::Server::new_async().await;
+        let record = serde_json::json!({
+            "$type": "app.bsky.feed.post",
+            "text": "already committed",
+            "createdAt": "2024-01-01T00:00:00Z"
+        });
+        let create = server
+            .mock("POST", "/xrpc/com.atproto.repo.createRecord")
+            .with_status(500)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"error":"InternalServerError"}"#)
+            .expect(1)
+            .create_async()
+            .await;
+        let unauthorized_get = server
+            .mock("GET", "/xrpc/com.atproto.repo.getRecord")
+            .match_header("Authorization", "Bearer stale-access-jwt")
+            .match_query(mockito::Matcher::Any)
+            .with_status(401)
+            .with_body(serde_json::json!({"error": "ExpiredToken"}).to_string())
+            .expect(1)
+            .create_async()
+            .await;
+        let refresh = server
+            .mock("POST", "/xrpc/com.atproto.server.refreshSession")
+            .match_header("Authorization", "Bearer refresh-jwt")
+            .with_status(200)
+            .with_body(
+                serde_json::json!({"accessJwt": "new-access-jwt", "refreshJwt": "new-refresh-jwt"})
+                    .to_string(),
+            )
+            .expect(1)
+            .create_async()
+            .await;
+        let ok_get = server
+            .mock("GET", "/xrpc/com.atproto.repo.getRecord")
+            .match_header("Authorization", "Bearer new-access-jwt")
+            .match_query(mockito::Matcher::Any)
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                serde_json::json!({
+                    "uri": "at://did:plc:abc123/app.bsky.feed.post/3reservedtid",
+                    "cid": "bafyexistingrecord",
+                    "value": record
+                })
+                .to_string(),
+            )
+            .expect(1)
+            .create_async()
+            .await;
+
+        let provider = Arc::new(RefreshingSessionProvider::default());
+        let client = PdsClient::new(server.url(), "shared").with_session_provider(provider.clone());
+        let response = client
+            .create_record_at_rkey(
+                "did:plc:abc123",
+                "app.bsky.feed.post",
+                "3reservedtid",
+                &record,
+            )
+            .await
+            .expect("getRecord should refresh the session and recover");
+
+        assert_eq!(response.cid, "bafyexistingrecord");
+        assert_eq!(
+            provider.stored.lock().unwrap().as_slice(),
+            &[("new-access-jwt".to_string(), "new-refresh-jwt".to_string())]
+        );
+        create.assert_async().await;
+        unauthorized_get.assert_async().await;
+        refresh.assert_async().await;
+        ok_get.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn reserved_create_transport_failure_remains_retryable_when_recovery_misses() {
+        let client = PdsClient::new("http://127.0.0.1:9", "test-token");
+        let error = client
+            .create_record_at_rkey(
+                "did:plc:abc123",
+                "app.bsky.feed.post",
+                "3reservedtid",
+                &serde_json::json!({"$type": "app.bsky.feed.post", "text": "expected"}),
+            )
+            .await
+            .expect_err("transport failure should remain retryable when getRecord also misses");
+
+        let message = format!("{error:#}");
+        assert!(
+            message.contains("failed to send")
+                || message.contains("error sending request")
+                || message.contains("tcp connect error"),
+            "{message}"
+        );
     }
 
     #[derive(Debug)]

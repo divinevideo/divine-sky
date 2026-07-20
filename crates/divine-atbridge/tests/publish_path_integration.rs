@@ -260,10 +260,11 @@ async fn publish_path_integration_execute_publish_job_uses_envelope_payload() {
         PdsClient::new(pds_server.url(), "integration-token"),
     );
 
-    let envelope = match pipeline.prepare_publish_job(&event).await.unwrap() {
+    let mut envelope = match pipeline.prepare_publish_job(&event).await.unwrap() {
         QueueDecision::Enqueue(envelope) => envelope,
         other => panic!("expected enqueue decision, got {other:?}"),
     };
+    envelope.reserved_rkey = Some("3envelope".to_string());
 
     let result = pipeline
         .execute_publish_job(&envelope)
@@ -283,7 +284,7 @@ async fn publish_path_integration_execute_publish_job_uses_envelope_payload() {
 }
 
 #[tokio::test]
-async fn publish_path_integration_processes_video_event_through_http_collaborators() {
+async fn legacy_relay_session_refuses_video_without_a_durable_reserved_rkey() {
     let mut blossom_server = mockito::Server::new_async().await;
     let video_bytes = b"publish-path-video".to_vec();
     let source_sha256 = hex::encode(Sha256::digest(&video_bytes));
@@ -291,6 +292,7 @@ async fn publish_path_integration_processes_video_event_through_http_collaborato
 
     let blossom_mock = blossom_server
         .mock("GET", blossom_path)
+        .expect(0)
         .with_status(200)
         .with_header("content-type", "video/mp4")
         .with_body(video_bytes.clone())
@@ -300,6 +302,7 @@ async fn publish_path_integration_processes_video_event_through_http_collaborato
     let mut pds_server = mockito::Server::new_async().await;
     let upload_mock = pds_server
         .mock("POST", "/xrpc/com.atproto.repo.uploadBlob")
+        .expect(0)
         .with_status(200)
         .with_header("content-type", "application/json")
         .with_body(
@@ -319,6 +322,7 @@ async fn publish_path_integration_processes_video_event_through_http_collaborato
     let created_rkey = "3integrationtid";
     let create_mock = pds_server
         .mock("POST", "/xrpc/com.atproto.repo.createRecord")
+        .expect(0)
         .match_request(|request| {
             let body: serde_json::Value =
                 serde_json::from_str(&request.utf8_lossy_body().unwrap()).unwrap();
@@ -345,7 +349,6 @@ async fn publish_path_integration_processes_video_event_through_http_collaborato
         &source_sha256,
     );
     let raw = serde_json::json!(["EVENT", "sub-1", event.clone()]).to_string();
-    let event_id = event.id.clone();
 
     let pipeline = BridgePipeline::new(
         StaticAccountStore {
@@ -371,27 +374,12 @@ async fn publish_path_integration_processes_video_event_through_http_collaborato
     upload_mock.assert_async().await;
     create_mock.assert_async().await;
 
-    assert_eq!(consumer.last_seen_timestamp, Some(event.created_at));
-    assert_eq!(pipeline.record_store.manifests.lock().unwrap().len(), 1);
+    assert_eq!(consumer.last_seen_timestamp, None);
+    assert_eq!(pipeline.record_store.manifests.lock().unwrap().len(), 0);
     let mappings = pipeline.record_store.mappings.lock().unwrap();
-    assert_eq!(mappings.len(), 1);
-    assert_eq!(mappings[0].rkey, created_rkey);
+    assert_eq!(mappings.len(), 0);
     drop(mappings);
-    assert_eq!(
-        pipeline.record_store.statuses.lock().unwrap()[0],
-        (
-            event_id,
-            Some("bafyrecordintegration".to_string()),
-            RecordStatus::Published,
-        )
-    );
-    match &pipeline.process_event(&event).await {
-        ProcessResult::Published { .. }
-        | ProcessResult::Skipped { .. }
-        | ProcessResult::Error { .. }
-        | ProcessResult::Deleted { .. }
-        | ProcessResult::ProfileSynced { .. } => {}
-    }
+    assert!(pipeline.record_store.statuses.lock().unwrap().is_empty());
 }
 
 #[tokio::test]
