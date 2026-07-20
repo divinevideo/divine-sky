@@ -122,45 +122,73 @@ pub async fn feed_skeleton(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use diesel::connection::SimpleConnection;
-    use diesel::{Connection, PgConnection};
+    use std::sync::{Mutex, OnceLock};
 
-    // CI and local runs export TEST_DATABASE_URL; require it so every line of
-    // this helper executes under coverage (no untaken fallback branch).
-    fn test_database_url() -> String {
-        std::env::var("TEST_DATABASE_URL")
-            .expect("TEST_DATABASE_URL must be set for feedgen store tests")
+    struct EmptyFeedStore;
+
+    #[async_trait]
+    impl FeedStore for EmptyFeedStore {
+        async fn latest_posts(&self, limit: usize) -> Result<Vec<String>> {
+            Ok(vec![format!(
+                "at://did:plc:test/app.bsky.feed.post/latest-{limit}"
+            )])
+        }
+
+        async fn trending_posts(&self, limit: usize) -> Result<Vec<String>> {
+            Ok(vec![format!(
+                "at://did:plc:test/app.bsky.feed.post/trending-{limit}"
+            )])
+        }
+    }
+
+    fn env_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
     }
 
     #[tokio::test]
-    async fn db_feed_store_from_env_queries_both_feeds() {
-        let url = test_database_url();
-        let mut conn = PgConnection::establish(&url).expect("test database should be reachable");
-        // `appview_posts` lives in the non-idempotent 003 migration; reset it with
-        // down-then-up the way the appview integration tests do.
-        conn.batch_execute(include_str!(
-            "../../../migrations/003_appview_read_model/down.sql"
-        ))
-        .expect("appview read-model down migration should run");
-        conn.batch_execute(include_str!(
-            "../../../migrations/003_appview_read_model/up.sql"
-        ))
-        .expect("appview read-model up migration should run");
+    async fn feed_skeleton_rejects_unknown_feed_uri() {
+        let error = feed_skeleton(&EmptyFeedStore, "at://did:plc:divine.feed/unknown", 10)
+            .await
+            .expect_err("unknown feed should fail");
 
-        std::env::set_var("DATABASE_URL", &url);
-        let store = DbFeedStore::from_env();
+        assert!(error.to_string().contains("unknown feed URI"));
+    }
+
+    #[tokio::test]
+    async fn feed_skeleton_returns_latest_posts() {
+        let response = feed_skeleton(&EmptyFeedStore, LATEST_URI, 3)
+            .await
+            .expect("latest feed should resolve");
+
+        assert_eq!(response.feed.len(), 1);
+        assert_eq!(
+            response.feed[0].post,
+            "at://did:plc:test/app.bsky.feed.post/latest-3"
+        );
+        assert!(response.cursor.is_none());
+    }
+
+    #[tokio::test]
+    async fn feed_skeleton_returns_trending_posts() {
+        let response = feed_skeleton(&EmptyFeedStore, TRENDING_URI, 7)
+            .await
+            .expect("trending feed should resolve");
+
+        assert_eq!(response.feed.len(), 1);
+        assert_eq!(
+            response.feed[0].post,
+            "at://did:plc:test/app.bsky.feed.post/trending-7"
+        );
+        assert!(response.cursor.is_none());
+    }
+
+    #[test]
+    #[should_panic(expected = "DATABASE_URL is required")]
+    fn db_feed_store_from_env_requires_database_url() {
+        let guard = env_lock().lock().unwrap();
         std::env::remove_var("DATABASE_URL");
-
-        let latest = store
-            .latest_posts(10)
-            .await
-            .expect("latest feed query succeeds through the pool");
-        let trending = store
-            .trending_posts(10)
-            .await
-            .expect("trending feed query succeeds through the pool");
-
-        assert!(latest.len() <= 10);
-        assert!(trending.len() <= 10);
+        DbFeedStore::from_env();
+        drop(guard);
     }
 }

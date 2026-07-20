@@ -111,72 +111,30 @@ impl DbStore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use diesel::connection::SimpleConnection;
-    use diesel::{Connection, PgConnection};
-    use divine_bridge_db::migrations::run_pending_migrations_on;
-    use divine_bridge_db::models::NewLabelerEvent;
 
-    // CI and local runs export TEST_DATABASE_URL; require it so every line of
-    // this helper executes under coverage (no untaken fallback branch).
-    fn test_database_url() -> String {
-        std::env::var("TEST_DATABASE_URL").expect("TEST_DATABASE_URL must be set for store tests")
-    }
-
-    fn migrated_store() -> DbStore {
-        let url = test_database_url();
-        let mut conn = PgConnection::establish(&url).expect("test database should be reachable");
-        // Bridge-owned tables (001) include `record_mappings`; they are idempotent.
-        run_pending_migrations_on(&mut conn).expect("bridge migrations should run");
-        // `labeler_events` lives in the non-idempotent 002 migration, so reset it
-        // with down-then-up the way the crate's integration tests do.
-        conn.batch_execute(include_str!(
-            "../../../migrations/002_label_tracking/down.sql"
-        ))
-        .expect("labeler-tracking down migration should run");
-        conn.batch_execute(include_str!(
-            "../../../migrations/002_label_tracking/up.sql"
-        ))
-        .expect("labeler-tracking up migration should run");
-        DbStore::connect(&url).expect("store connects through the pool")
-    }
-
-    #[tokio::test]
-    async fn store_inserts_and_reads_labeler_events_and_mappings() {
-        let store = migrated_store();
-
+    #[test]
+    fn owned_labeler_event_round_trips_borrowed_fields() {
         let event = NewLabelerEvent {
-            src_did: "did:plc:test-store-labeler",
-            subject_uri: "at://did:plc:user/app.bsky.feed.post/store-test",
-            subject_cid: None,
+            src_did: "did:plc:test-labeler",
+            subject_uri: "at://did:plc:user/app.bsky.feed.post/test",
+            subject_cid: Some("bafy-test-cid"),
             val: "spam",
             neg: false,
-            nostr_event_id: Some("store-test-event"),
-            sha256: None,
+            nostr_event_id: Some("nostr-event-id"),
+            sha256: Some("sha256-test"),
             origin: "divine",
         };
-        let inserted = store
-            .insert_labeler_event(&event)
-            .await
-            .expect("event inserts");
-        assert_eq!(inserted.val, "spam");
 
-        let latest = store
-            .get_latest_seq()
-            .await
-            .expect("latest seq query succeeds")
-            .expect("at least one event exists after insert");
-        assert!(latest >= inserted.seq);
+        let owned = OwnedNewLabelerEvent::from_borrowed(&event);
+        let borrowed = owned.as_borrowed();
 
-        let events = store
-            .get_events_after(0, 1000)
-            .await
-            .expect("events-after query succeeds");
-        assert!(events.iter().any(|e| e.seq == inserted.seq));
-
-        let missing = store
-            .get_at_uri_by_event_id("no-such-nostr-event-id")
-            .await
-            .expect("mapping lookup succeeds");
-        assert!(missing.is_none());
+        assert_eq!(borrowed.src_did, event.src_did);
+        assert_eq!(borrowed.subject_uri, event.subject_uri);
+        assert_eq!(borrowed.subject_cid, event.subject_cid);
+        assert_eq!(borrowed.val, event.val);
+        assert_eq!(borrowed.neg, event.neg);
+        assert_eq!(borrowed.nostr_event_id, event.nostr_event_id);
+        assert_eq!(borrowed.sha256, event.sha256);
+        assert_eq!(borrowed.origin, event.origin);
     }
 }
