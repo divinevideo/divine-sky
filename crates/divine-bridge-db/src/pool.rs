@@ -10,9 +10,10 @@
 //! Blocking Diesel calls should still run off the async runtime — acquire a
 //! connection with [`DbPool::get`] inside `tokio::task::spawn_blocking`.
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use diesel::pg::PgConnection;
 use diesel::r2d2::{ConnectionManager, Pool, PooledConnection};
+use std::env::VarError;
 
 /// A pooled-connection handle to the bridge database.
 pub type DbPool = Pool<ConnectionManager<PgConnection>>;
@@ -32,16 +33,30 @@ const DEFAULT_MAX_SIZE: u32 = 10;
 /// The pool eagerly opens one connection to fail fast when the database is
 /// unreachable at startup, rather than surfacing the error on the first request.
 pub fn build_pool(database_url: &str) -> Result<DbPool> {
-    let max_size = std::env::var("DB_POOL_MAX_SIZE")
-        .ok()
-        .and_then(|v| v.parse::<u32>().ok())
-        .unwrap_or(DEFAULT_MAX_SIZE);
+    let max_size = db_pool_max_size_from_env()?;
 
     let manager = ConnectionManager::<PgConnection>::new(database_url);
     Pool::builder()
         .max_size(max_size)
+        .min_idle(Some(1))
         .build(manager)
         .context("failed to build database connection pool")
+}
+
+fn db_pool_max_size_from_env() -> Result<u32> {
+    let raw = match std::env::var("DB_POOL_MAX_SIZE") {
+        Ok(value) => value,
+        Err(VarError::NotPresent) => return Ok(DEFAULT_MAX_SIZE),
+        Err(error) => return Err(error).context("failed to read DB_POOL_MAX_SIZE"),
+    };
+
+    let max_size = raw
+        .parse::<u32>()
+        .with_context(|| format!("DB_POOL_MAX_SIZE must be a positive integer, got {raw:?}"))?;
+    if max_size == 0 {
+        bail!("DB_POOL_MAX_SIZE must be greater than 0");
+    }
+    Ok(max_size)
 }
 
 #[cfg(test)]
@@ -84,12 +99,24 @@ mod tests {
     }
 
     #[test]
-    fn build_pool_ignores_an_unparseable_db_pool_max_size() {
+    fn build_pool_errors_on_an_unparseable_db_pool_max_size() {
         let guard = env_lock().lock().unwrap();
         std::env::set_var("DB_POOL_MAX_SIZE", "not-a-number");
-        let pool = build_pool(&test_database_url()).expect("pool builds despite a bad override");
+        let error =
+            build_pool("postgres://unused").expect_err("bad pool size should fail before connect");
         std::env::remove_var("DB_POOL_MAX_SIZE");
-        assert_eq!(pool.max_size(), DEFAULT_MAX_SIZE);
+        assert!(error.to_string().contains("DB_POOL_MAX_SIZE"));
+        drop(guard);
+    }
+
+    #[test]
+    fn build_pool_errors_on_zero_db_pool_max_size() {
+        let guard = env_lock().lock().unwrap();
+        std::env::set_var("DB_POOL_MAX_SIZE", "0");
+        let error =
+            build_pool("postgres://unused").expect_err("zero pool size should fail before connect");
+        std::env::remove_var("DB_POOL_MAX_SIZE");
+        assert!(error.to_string().contains("greater than 0"));
         drop(guard);
     }
 

@@ -60,19 +60,27 @@ impl DbFeedStore {
 #[async_trait]
 impl FeedStore for DbFeedStore {
     async fn latest_posts(&self, limit: usize) -> Result<Vec<String>> {
-        let mut conn = self.pool.get()?;
-        Ok(list_latest_appview_posts(&mut conn, limit as i64)?
-            .into_iter()
-            .map(|post| post.uri)
-            .collect())
+        let pool = self.pool.clone();
+        tokio::task::spawn_blocking(move || {
+            let mut conn = pool.get()?;
+            Ok(list_latest_appview_posts(&mut conn, limit as i64)?
+                .into_iter()
+                .map(|post| post.uri)
+                .collect())
+        })
+        .await?
     }
 
     async fn trending_posts(&self, limit: usize) -> Result<Vec<String>> {
-        let mut conn = self.pool.get()?;
-        Ok(list_trending_appview_posts(&mut conn, limit as i64)?
-            .into_iter()
-            .map(|post| post.uri)
-            .collect())
+        let pool = self.pool.clone();
+        tokio::task::spawn_blocking(move || {
+            let mut conn = pool.get()?;
+            Ok(list_trending_appview_posts(&mut conn, limit as i64)?
+                .into_iter()
+                .map(|post| post.uri)
+                .collect())
+        })
+        .await?
     }
 }
 
