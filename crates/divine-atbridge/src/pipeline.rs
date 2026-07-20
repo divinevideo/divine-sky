@@ -1475,6 +1475,34 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn reserved_video_publish_fails_closed_without_create_only_publisher() {
+        let event = make_video_event("ignored");
+        let accounts = MockAccountStore {
+            links: vec![account_for(&event.pubkey)],
+        };
+        let pipeline = make_pipeline(accounts, MockRecordStore::new());
+        let job = PublishJobEnvelope {
+            nostr_event_id: event.id.clone(),
+            nostr_pubkey: event.pubkey.clone(),
+            event_created_at: event.created_at,
+            event_payload: serde_json::to_value(&event).unwrap(),
+            reserved_rkey: Some("3reservedtid".to_string()),
+            prepared_record: None,
+        };
+
+        let error = pipeline
+            .execute_publish_job(&job)
+            .await
+            .expect_err("queued video requires a create-only publisher implementation");
+
+        let message = format!("{error:#}");
+        assert!(
+            message.contains("publisher does not support create-only writes at a reserved rkey"),
+            "{message}"
+        );
+    }
+
+    #[tokio::test]
     async fn unlinked_user_skipped() {
         let event = make_video_event("unknown");
         let accounts = MockAccountStore { links: vec![] }; // no links

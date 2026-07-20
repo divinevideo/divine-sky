@@ -848,6 +848,144 @@ mod tests {
         assert!(format!("{error:#}").contains("REMOTE_RECORD_DIVERGED"));
     }
 
+    #[tokio::test]
+    async fn reserved_create_preserves_original_error_when_recovery_misses() {
+        let mut server = mockito::Server::new_async().await;
+        let create = server
+            .mock("POST", "/xrpc/com.atproto.repo.createRecord")
+            .with_status(500)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"error":"InternalServerError","message":"create broke"}"#)
+            .expect(1)
+            .create_async()
+            .await;
+        let get = server
+            .mock("GET", "/xrpc/com.atproto.repo.getRecord")
+            .match_query(mockito::Matcher::Any)
+            .with_status(404)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"error":"RecordNotFound"}"#)
+            .expect(1)
+            .create_async()
+            .await;
+
+        let client = PdsClient::new(server.url(), "test-token");
+        let error = client
+            .create_record_at_rkey(
+                "did:plc:abc123",
+                "app.bsky.feed.post",
+                "3reservedtid",
+                &serde_json::json!({"$type": "app.bsky.feed.post", "text": "expected"}),
+            )
+            .await
+            .expect_err("a missing reserved record should keep the create failure retryable");
+
+        let message = format!("{error:#}");
+        assert!(message.contains("createRecord failed (500)"), "{message}");
+        assert!(message.contains("create broke"), "{message}");
+        create.assert_async().await;
+        get.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn reserved_create_recovers_after_get_record_refreshes_session() {
+        let mut server = mockito::Server::new_async().await;
+        let record = serde_json::json!({
+            "$type": "app.bsky.feed.post",
+            "text": "already committed",
+            "createdAt": "2024-01-01T00:00:00Z"
+        });
+        let create = server
+            .mock("POST", "/xrpc/com.atproto.repo.createRecord")
+            .with_status(500)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"error":"InternalServerError"}"#)
+            .expect(1)
+            .create_async()
+            .await;
+        let unauthorized_get = server
+            .mock("GET", "/xrpc/com.atproto.repo.getRecord")
+            .match_header("Authorization", "Bearer stale-access-jwt")
+            .match_query(mockito::Matcher::Any)
+            .with_status(401)
+            .with_body(serde_json::json!({"error": "ExpiredToken"}).to_string())
+            .expect(1)
+            .create_async()
+            .await;
+        let refresh = server
+            .mock("POST", "/xrpc/com.atproto.server.refreshSession")
+            .match_header("Authorization", "Bearer refresh-jwt")
+            .with_status(200)
+            .with_body(
+                serde_json::json!({"accessJwt": "new-access-jwt", "refreshJwt": "new-refresh-jwt"})
+                    .to_string(),
+            )
+            .expect(1)
+            .create_async()
+            .await;
+        let ok_get = server
+            .mock("GET", "/xrpc/com.atproto.repo.getRecord")
+            .match_header("Authorization", "Bearer new-access-jwt")
+            .match_query(mockito::Matcher::Any)
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                serde_json::json!({
+                    "uri": "at://did:plc:abc123/app.bsky.feed.post/3reservedtid",
+                    "cid": "bafyexistingrecord",
+                    "value": record
+                })
+                .to_string(),
+            )
+            .expect(1)
+            .create_async()
+            .await;
+
+        let provider = Arc::new(RefreshingSessionProvider::default());
+        let client = PdsClient::new(server.url(), "shared").with_session_provider(provider.clone());
+        let response = client
+            .create_record_at_rkey(
+                "did:plc:abc123",
+                "app.bsky.feed.post",
+                "3reservedtid",
+                &record,
+            )
+            .await
+            .expect("getRecord should refresh the session and recover");
+
+        assert_eq!(response.cid, "bafyexistingrecord");
+        assert_eq!(
+            provider.stored.lock().unwrap().as_slice(),
+            &[("new-access-jwt".to_string(), "new-refresh-jwt".to_string())]
+        );
+        create.assert_async().await;
+        unauthorized_get.assert_async().await;
+        refresh.assert_async().await;
+        ok_get.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn reserved_create_transport_failure_remains_retryable_when_recovery_misses() {
+        let client = PdsClient::new("http://127.0.0.1:9", "test-token");
+        let error = client
+            .create_record_at_rkey(
+                "did:plc:abc123",
+                "app.bsky.feed.post",
+                "3reservedtid",
+                &serde_json::json!({"$type": "app.bsky.feed.post", "text": "expected"}),
+            )
+            .await
+            .expect_err("transport failure should remain retryable when getRecord also misses");
+
+        let message = format!("{error:#}");
+        assert!(
+            message.contains("failed to send")
+                || message.contains("error sending request")
+                || message.contains("tcp connect error"),
+            "{message}"
+        );
+    }
+
     #[derive(Debug)]
     struct StaticSessionProvider {
         token: String,

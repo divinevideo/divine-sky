@@ -546,6 +546,43 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn upload_video_returns_fresh_blob_for_new_completed_video() {
+        let mut server = mockito::Server::new_async().await;
+        let upload = server
+            .mock("POST", "/xrpc/app.bsky.video.uploadVideo")
+            .match_query(Matcher::Any)
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                serde_json::json!({
+                    "state": "JOB_STATE_COMPLETED",
+                    "blob": {
+                        "$type": "blob",
+                        "ref": { "$link": "bafkreifreshrepo" },
+                        "mimeType": "video/mp4",
+                        "size": 42
+                    }
+                })
+                .to_string(),
+            )
+            .create_async()
+            .await;
+        let uploader = test_uploader(server.url());
+
+        let outcome = uploader
+            .upload_to_video_service(b"video", "service-token", "did:plc:alice")
+            .await
+            .expect("a completed fresh upload should return its blob");
+
+        assert!(matches!(
+            outcome,
+            VideoUploadOutcome::FreshBlob(blob)
+                if blob.cid() == "bafkreifreshrepo" && blob.size == 42
+        ));
+        upload.assert_async().await;
+    }
+
+    #[tokio::test]
     async fn successful_already_exists_response_is_still_a_cached_job() {
         let mut server = mockito::Server::new_async().await;
         let upload = server
