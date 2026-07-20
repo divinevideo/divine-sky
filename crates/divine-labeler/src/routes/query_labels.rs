@@ -77,6 +77,7 @@ pub async fn handler(
     let events = state
         .store
         .get_events_after(after_seq, limit)
+        .await
         .map_err(|e| {
             tracing::error!("failed to query labeler events: {e}");
             StatusCode::INTERNAL_SERVER_ERROR

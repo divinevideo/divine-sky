@@ -48,7 +48,7 @@ pub async fn handler(
 
     // Resolve AT URI from record_mappings if nostr_event_id is provided
     let at_uri = if let Some(ref event_id) = payload.nostr_event_id {
-        match state.store.get_at_uri_by_event_id(event_id) {
+        match state.store.get_at_uri_by_event_id(event_id).await {
             Ok(Some((uri, _did))) => uri,
             _ => format!("at://sha256:{}", payload.sha256),
         }
@@ -98,7 +98,7 @@ pub async fn handler(
             },
         };
 
-        match state.store.insert_labeler_event(&new_event) {
+        match state.store.insert_labeler_event(&new_event).await {
             Ok(_event) => {
                 tracing::info!(
                     sha256 = %payload.sha256,
@@ -137,7 +137,7 @@ pub async fn handler(
                 origin: "divine",
             };
 
-            match state.store.insert_labeler_event(&new_event) {
+            match state.store.insert_labeler_event(&new_event).await {
                 Ok(_) => {
                     tracing::info!(sha256 = %payload.sha256, "!takedown label emitted");
                     accepted += 1;

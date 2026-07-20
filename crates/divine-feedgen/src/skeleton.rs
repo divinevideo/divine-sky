@@ -1,6 +1,6 @@
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
-use diesel::{Connection, PgConnection};
+use divine_bridge_db::pool::{build_pool, DbPool};
 use divine_bridge_db::{list_latest_appview_posts, list_trending_appview_posts};
 use serde::Serialize;
 use std::sync::Arc;
@@ -45,37 +45,42 @@ pub trait FeedStore: Send + Sync {
 pub type DynFeedStore = Arc<dyn FeedStore>;
 
 pub struct DbFeedStore {
-    database_url: String,
+    pool: DbPool,
 }
 
 impl DbFeedStore {
     pub fn from_env() -> Self {
+        let database_url = std::env::var("DATABASE_URL").expect("DATABASE_URL is required");
         Self {
-            database_url: std::env::var("DATABASE_URL").expect("DATABASE_URL is required"),
+            pool: build_pool(&database_url).expect("failed to build feedgen database pool"),
         }
-    }
-
-    fn connect(&self) -> Result<PgConnection> {
-        Ok(PgConnection::establish(&self.database_url)?)
     }
 }
 
 #[async_trait]
 impl FeedStore for DbFeedStore {
     async fn latest_posts(&self, limit: usize) -> Result<Vec<String>> {
-        let mut conn = self.connect()?;
-        Ok(list_latest_appview_posts(&mut conn, limit as i64)?
-            .into_iter()
-            .map(|post| post.uri)
-            .collect())
+        let pool = self.pool.clone();
+        tokio::task::spawn_blocking(move || {
+            let mut conn = pool.get()?;
+            Ok(list_latest_appview_posts(&mut conn, limit as i64)?
+                .into_iter()
+                .map(|post| post.uri)
+                .collect())
+        })
+        .await?
     }
 
     async fn trending_posts(&self, limit: usize) -> Result<Vec<String>> {
-        let mut conn = self.connect()?;
-        Ok(list_trending_appview_posts(&mut conn, limit as i64)?
-            .into_iter()
-            .map(|post| post.uri)
-            .collect())
+        let pool = self.pool.clone();
+        tokio::task::spawn_blocking(move || {
+            let mut conn = pool.get()?;
+            Ok(list_trending_appview_posts(&mut conn, limit as i64)?
+                .into_iter()
+                .map(|post| post.uri)
+                .collect())
+        })
+        .await?
     }
 }
 
@@ -112,4 +117,78 @@ pub async fn feed_skeleton(
         feed: items.into_iter().map(|post| FeedItem { post }).collect(),
         cursor: None,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::{Mutex, OnceLock};
+
+    struct EmptyFeedStore;
+
+    #[async_trait]
+    impl FeedStore for EmptyFeedStore {
+        async fn latest_posts(&self, limit: usize) -> Result<Vec<String>> {
+            Ok(vec![format!(
+                "at://did:plc:test/app.bsky.feed.post/latest-{limit}"
+            )])
+        }
+
+        async fn trending_posts(&self, limit: usize) -> Result<Vec<String>> {
+            Ok(vec![format!(
+                "at://did:plc:test/app.bsky.feed.post/trending-{limit}"
+            )])
+        }
+    }
+
+    fn env_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    #[tokio::test]
+    async fn feed_skeleton_rejects_unknown_feed_uri() {
+        let error = feed_skeleton(&EmptyFeedStore, "at://did:plc:divine.feed/unknown", 10)
+            .await
+            .expect_err("unknown feed should fail");
+
+        assert!(error.to_string().contains("unknown feed URI"));
+    }
+
+    #[tokio::test]
+    async fn feed_skeleton_returns_latest_posts() {
+        let response = feed_skeleton(&EmptyFeedStore, LATEST_URI, 3)
+            .await
+            .expect("latest feed should resolve");
+
+        assert_eq!(response.feed.len(), 1);
+        assert_eq!(
+            response.feed[0].post,
+            "at://did:plc:test/app.bsky.feed.post/latest-3"
+        );
+        assert!(response.cursor.is_none());
+    }
+
+    #[tokio::test]
+    async fn feed_skeleton_returns_trending_posts() {
+        let response = feed_skeleton(&EmptyFeedStore, TRENDING_URI, 7)
+            .await
+            .expect("trending feed should resolve");
+
+        assert_eq!(response.feed.len(), 1);
+        assert_eq!(
+            response.feed[0].post,
+            "at://did:plc:test/app.bsky.feed.post/trending-7"
+        );
+        assert!(response.cursor.is_none());
+    }
+
+    #[test]
+    #[should_panic(expected = "DATABASE_URL is required")]
+    fn db_feed_store_from_env_requires_database_url() {
+        let guard = env_lock().lock().unwrap();
+        std::env::remove_var("DATABASE_URL");
+        DbFeedStore::from_env();
+        drop(guard);
+    }
 }
