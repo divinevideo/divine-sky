@@ -25,8 +25,53 @@ The login and ATProto protocol split is:
   Requires a claimed username, sets `enabled = true`, moves lifecycle to `pending`, and triggers provisioning in `divine-sky`.
 - `GET /api/user/atproto/status`
   Returns `enabled`, `state`, `did`, `error`, and `username` for the authenticated user.
+- `POST /api/user/atproto/crosspost-status`
+  Returns bounded, per-video Bluesky crosspost state for the authenticated user's Nostr event IDs. Keycast should proxy this to the internal `divine-sky` route below and scope the path pubkey from the session, not from client input.
 - `POST /api/user/atproto/disable`
   Sets `enabled = false`, lifecycle `disabled`, and triggers downstream disable cleanup.
+
+### Internal Crosspost Status Contract
+
+`divine-sky` exposes the service-to-service source of truth for per-video status:
+
+```http
+POST /api/account-links/:nostr_pubkey/crosspost-status
+Authorization: Bearer <KEYCAST_ATPROTO_TOKEN>
+Content-Type: application/json
+
+{"nostr_event_ids":["<full 64-hex event id>"]}
+```
+
+The request accepts at most 100 event IDs. Larger batches return `400`.
+
+Response:
+
+```json
+{
+  "account": {
+    "crosspost_enabled": true,
+    "provisioning_state": "ready",
+    "did": "did:plc:..."
+  },
+  "videos": [
+    {
+      "nostr_event_id": "<full 64-hex event id>",
+      "status": "published",
+      "at_uri": "at://did:plc:.../app.bsky.feed.post/...",
+      "cid": "bafy..."
+    }
+  ]
+}
+```
+
+Supported `videos[].status` values are `not_applicable`, `queued`, `publishing`, `published`, `retrying`, `failed`, and `removed`.
+
+Privacy rules:
+
+- The path pubkey is authoritative.
+- Event IDs without a publish job for that pubkey return `not_applicable`.
+- Event IDs owned by another pubkey must never return that user's `at_uri` or `cid`.
+- Raw `publish_jobs.error` text must never pass through the response.
 
 ## State Contract
 

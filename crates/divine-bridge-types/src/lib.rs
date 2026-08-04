@@ -6,6 +6,9 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+pub mod crosspost_status;
+pub use crosspost_status::*;
+
 // ---------------------------------------------------------------------------
 // Nostr types
 // ---------------------------------------------------------------------------

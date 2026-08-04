@@ -4,26 +4,36 @@ use anyhow::{Context, Result};
 use diesel::Connection;
 use diesel::PgConnection;
 use divine_bridge_db::{
-    disable_account_link, enable_account_link, get_account_link_lifecycle,
-    get_account_link_lifecycle_by_handle, mark_account_link_failed, mark_account_link_ready,
-    upsert_pending_account_link,
+    build_pool, disable_account_link, enable_account_link, get_account_link_lifecycle,
+    list_publish_status_for_events, mark_account_link_failed, mark_account_link_ready,
+    upsert_pending_account_link, DbPool,
 };
 
 use crate::AccountLinkRecord;
 
-type SharedConnection = Arc<Mutex<PgConnection>>;
-
 #[derive(Clone)]
 pub struct DbStore {
-    connection: SharedConnection,
+    connection: ConnectionMode,
+}
+
+#[derive(Clone)]
+enum ConnectionMode {
+    Pool(DbPool),
+    Single(Arc<Mutex<PgConnection>>),
 }
 
 impl DbStore {
     pub fn connect(database_url: &str) -> Result<Self> {
+        Ok(Self {
+            connection: ConnectionMode::Pool(build_pool(database_url)?),
+        })
+    }
+
+    pub fn connect_single(database_url: &str) -> Result<Self> {
         let connection =
             PgConnection::establish(database_url).context("failed to connect to PostgreSQL")?;
         Ok(Self {
-            connection: Arc::new(Mutex::new(connection)),
+            connection: ConnectionMode::Single(Arc::new(Mutex::new(connection))),
         })
     }
 
@@ -35,21 +45,22 @@ impl DbStore {
     ) -> Result<AccountLinkRecord> {
         let signing_key_id = format!("pending-signing:{nostr_pubkey}");
         let plc_rotation_key_ref = format!("pending-rotation:{nostr_pubkey}");
-        let mut connection = self.connection.lock().unwrap();
-        let row = upsert_pending_account_link(
-            &mut connection,
-            nostr_pubkey,
-            handle,
-            &signing_key_id,
-            &plc_rotation_key_ref,
-            crosspost_enabled,
-        )?;
+        let row = self.with_connection(|connection| {
+            upsert_pending_account_link(
+                connection,
+                nostr_pubkey,
+                handle,
+                &signing_key_id,
+                &plc_rotation_key_ref,
+                crosspost_enabled,
+            )
+        })?;
         Ok(AccountLinkRecord::from(row))
     }
 
     pub fn mark_ready(&self, nostr_pubkey: &str, did: &str) -> Result<AccountLinkRecord> {
-        let mut connection = self.connection.lock().unwrap();
-        let row = mark_account_link_ready(&mut connection, nostr_pubkey, did)?;
+        let row = self
+            .with_connection(|connection| mark_account_link_ready(connection, nostr_pubkey, did))?;
         Ok(AccountLinkRecord::from(row))
     }
 
@@ -59,20 +70,15 @@ impl DbStore {
         did: Option<&str>,
         error: &str,
     ) -> Result<AccountLinkRecord> {
-        let mut connection = self.connection.lock().unwrap();
-        let row = mark_account_link_failed(&mut connection, nostr_pubkey, did, error)?;
+        let row = self.with_connection(|connection| {
+            mark_account_link_failed(connection, nostr_pubkey, did, error)
+        })?;
         Ok(AccountLinkRecord::from(row))
     }
 
     pub fn get_by_pubkey(&self, nostr_pubkey: &str) -> Result<Option<AccountLinkRecord>> {
-        let mut connection = self.connection.lock().unwrap();
-        let row = get_account_link_lifecycle(&mut connection, nostr_pubkey)?;
-        Ok(row.map(AccountLinkRecord::from))
-    }
-
-    pub fn get_by_handle(&self, handle: &str) -> Result<Option<AccountLinkRecord>> {
-        let mut connection = self.connection.lock().unwrap();
-        let row = get_account_link_lifecycle_by_handle(&mut connection, handle)?;
+        let row = self
+            .with_connection(|connection| get_account_link_lifecycle(connection, nostr_pubkey))?;
         Ok(row.map(AccountLinkRecord::from))
     }
 
@@ -80,8 +86,8 @@ impl DbStore {
         if self.get_by_pubkey(nostr_pubkey)?.is_none() {
             return Ok(None);
         }
-        let mut connection = self.connection.lock().unwrap();
-        let row = disable_account_link(&mut connection, nostr_pubkey)?;
+        let row =
+            self.with_connection(|connection| disable_account_link(connection, nostr_pubkey))?;
         Ok(Some(AccountLinkRecord::from(row)))
     }
 
@@ -89,8 +95,33 @@ impl DbStore {
         if self.get_by_pubkey(nostr_pubkey)?.is_none() {
             return Ok(None);
         }
-        let mut connection = self.connection.lock().unwrap();
-        let row = enable_account_link(&mut connection, nostr_pubkey)?;
+        let row =
+            self.with_connection(|connection| enable_account_link(connection, nostr_pubkey))?;
         Ok(Some(AccountLinkRecord::from(row)))
+    }
+
+    pub fn list_crosspost_status(
+        &self,
+        nostr_pubkey: &str,
+        event_ids: &[String],
+    ) -> Result<Vec<divine_bridge_db::models::PublishStatusRow>> {
+        self.with_connection(|connection| {
+            list_publish_status_for_events(connection, nostr_pubkey, event_ids)
+        })
+    }
+
+    fn with_connection<T>(&self, f: impl FnOnce(&mut PgConnection) -> Result<T>) -> Result<T> {
+        match &self.connection {
+            ConnectionMode::Pool(pool) => {
+                let mut connection = pool
+                    .get()
+                    .context("failed to check out PostgreSQL connection")?;
+                f(&mut connection)
+            }
+            ConnectionMode::Single(connection) => {
+                let mut connection = connection.lock().unwrap();
+                f(&mut connection)
+            }
+        }
     }
 }

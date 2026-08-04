@@ -306,6 +306,28 @@ pub struct LegacyBadJwtRepairPreview {
     pub next_after_event_id: Option<String>,
 }
 
+#[derive(Debug, Clone, QueryableByName)]
+pub struct PublishStatusRow {
+    #[diesel(sql_type = Text)]
+    pub nostr_event_id: String,
+    #[diesel(sql_type = Text)]
+    pub state: String,
+    #[diesel(sql_type = Nullable<Text>)]
+    pub error: Option<String>,
+    #[diesel(sql_type = Nullable<Timestamptz>)]
+    pub lease_expires_at: Option<DateTime<Utc>>,
+    #[diesel(sql_type = Nullable<Timestamptz>)]
+    pub completed_at: Option<DateTime<Utc>>,
+    #[diesel(sql_type = Timestamptz)]
+    pub updated_at: DateTime<Utc>,
+    #[diesel(sql_type = Nullable<Text>)]
+    pub at_uri: Option<String>,
+    #[diesel(sql_type = Nullable<Text>)]
+    pub cid: Option<String>,
+    #[diesel(sql_type = Nullable<Text>)]
+    pub record_status: Option<String>,
+}
+
 // ---------------------------------------------------------------------------
 // labeler_events
 // ---------------------------------------------------------------------------

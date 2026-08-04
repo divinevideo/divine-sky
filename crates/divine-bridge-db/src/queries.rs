@@ -128,6 +128,31 @@ pub fn get_account_link_lifecycle_by_handle(
     Ok(result)
 }
 
+/// List publish state for a bounded set of event IDs owned by one Nostr pubkey.
+pub fn list_publish_status_for_events(
+    conn: &mut PgConnection,
+    pubkey: &str,
+    event_ids: &[String],
+) -> Result<Vec<PublishStatusRow>> {
+    if event_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let rows = sql_query(
+        "SELECT p.nostr_event_id, p.state, p.error, p.lease_expires_at, \
+                p.completed_at, p.updated_at, rm.at_uri, rm.cid, \
+                rm.status AS record_status \
+         FROM publish_jobs p \
+         LEFT JOIN record_mappings rm ON rm.nostr_event_id = p.nostr_event_id \
+         WHERE p.nostr_pubkey = $1 \
+           AND p.nostr_event_id = ANY($2::text[])",
+    )
+    .bind::<Text, _>(pubkey)
+    .bind::<Array<Text>, _>(event_ids)
+    .load::<PublishStatusRow>(conn)?;
+    Ok(rows)
+}
+
 /// Load persisted non-pending lifecycle rows that should be republished on startup.
 pub fn list_account_link_lifecycle_for_reconciliation(
     conn: &mut PgConnection,

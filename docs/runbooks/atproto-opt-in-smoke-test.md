@@ -93,10 +93,18 @@ For a localnet run instead of staging:
 15. Verify any seeded backlog rows use `publish_jobs.job_source = 'backfill'` and drain oldest first by `event_created_at`.
 16. Verify the live post is allowed to publish without waiting for remaining backlog rows.
 17. If the user history includes a later delete for an older post, verify the affected backlog job lands in `state = 'skipped'` instead of publishing.
-18. Disable ATProto.
-19. Verify keycast status reaches `disabled`.
-20. Verify future mirrored posts stop and `divine-router` returns `404` for `/.well-known/atproto-did`.
-21. Return to `settings/security` and verify the `Bluesky Account` card reflects the disabled state.
+18. Query the per-video crosspost status route for the live post's full Nostr event ID.
+    - expected status while `publish_jobs.state = 'pending'`: `queued`
+    - expected status while `publish_jobs.state = 'in_progress'`: `publishing`
+    - expected status after publish completion plus a published `record_mappings` row: `published`, with full `at_uri` and `cid`
+    - expected status for `publish_jobs.state = 'failed'` and `completed_at IS NULL`: `retrying`, with `retryable = true`
+    - expected status for `publish_jobs.state = 'failed'` and `completed_at IS NOT NULL`: `failed`, with `retryable = false`
+    - expected status for skipped or deleted mapped records: `removed`
+    - expected status for unsupported, pre-opt-in, disabled, non-ready, or cross-user event IDs: `not_applicable`
+19. Disable ATProto.
+20. Verify keycast status reaches `disabled`.
+21. Verify future mirrored posts stop and `divine-router` returns `404` for `/.well-known/atproto-did`.
+22. Return to `settings/security` and verify the `Bluesky Account` card reflects the disabled state.
    - expected UI: public DID resolution and future cross-posting are disabled
    - expected status: `enabled = false`
    - expected status: `state = disabled`
