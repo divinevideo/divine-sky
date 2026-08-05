@@ -24,15 +24,58 @@ on:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   GCP_REGION: us-central1
 
 jobs:
+  rust-gate:
+    name: Wait for Rust
+    runs-on: ubuntu-latest
+    if: github.event_name != 'pull_request'
+    permissions:
+      actions: read
+    steps:
+      - name: Wait for Rust test to pass
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HEAD_SHA: ${{ github.sha }}
+        run: |
+          for attempt in {1..120}; do
+            result="$(
+              gh run list \
+                --repo "$GITHUB_REPOSITORY" \
+                --workflow rust.yml \
+                --commit "$HEAD_SHA" \
+                --event push \
+                --json conclusion,status \
+                --jq 'map(select(.status == "completed")) | .[0].conclusion // ""'
+            )"
+
+            case "$result" in
+              success)
+                echo "Rust workflow passed for ${HEAD_SHA}."
+                exit 0
+                ;;
+              failure|cancelled|timed_out|action_required)
+                echo "::error::Rust workflow concluded '${result}' for ${HEAD_SHA}; refusing to publish images."
+                exit 1
+                ;;
+            esac
+
+            echo "Waiting for Rust workflow to complete for ${HEAD_SHA} (attempt ${attempt}/120)."
+            sleep 15
+          done
+
+          echo "::error::Timed out waiting for Rust workflow to pass for ${HEAD_SHA}; refusing to publish images."
+          exit 1
+
   docker:
     name: Docker (${{ matrix.image }})
     runs-on: ubuntu-latest
+    needs: rust-gate
+    if: always() && (github.event_name == 'pull_request' || needs.rust-gate.result == 'success')
     permissions:
       id-token: write
       contents: read
