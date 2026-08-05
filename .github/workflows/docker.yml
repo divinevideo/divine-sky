@@ -1,0 +1,113 @@
+name: Docker
+
+# Publishes the four divine-sky service images to Artifact Registry.
+#
+# Why this exists: until now nothing in this repo built a container. All four
+# images were pushed by hand, which is why only divine-atbridge and
+# divine-handle-gateway ever reached containers-production, and why the
+# divine-labeler and divine-feedgen production Deployments have sat in
+# ImagePullBackOff against tags that were never published.
+#
+# Pushing requires divinevideo/divine-sky to be allow-listed by the Workload
+# Identity provider's attribute_condition in both environments — see
+# divine-iac-coreconfig#1457. Until that is applied, the push steps 403.
+#
+# This workflow publishes images only. It does not dispatch image-deploy:
+# that needs the CORECONFIG_DISPATCH_APP_ID / CORECONFIG_DISPATCH_APP_PRIVATE_KEY
+# secrets on this repo, which are not set yet. Manifest bumps stay manual PRs
+# against divine-iac-coreconfig until they are.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  GCP_REGION: us-central1
+
+jobs:
+  docker:
+    name: Docker (${{ matrix.image }})
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+    strategy:
+      # One image failing to build should not hide the state of the others.
+      fail-fast: false
+      matrix:
+        include:
+          - image: divine-labeler
+            dockerfile: Dockerfile.labeler
+          - image: divine-feedgen
+            dockerfile: Dockerfile.feedgen
+          - image: divine-atbridge
+            dockerfile: Dockerfile.atbridge
+          - image: divine-handle-gateway
+            dockerfile: Dockerfile.handle-gateway
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Generate image tags
+        id: tags
+        uses: divinevideo/divine-github-actions/generate-docker-tags@v1
+
+      # Build once and load locally, then push the same local image to each
+      # registry, so staging and production are byte-identical rather than two
+      # independent builds of the same commit.
+      - name: Build image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ${{ matrix.dockerfile }}
+          platforms: linux/amd64
+          push: false
+          load: true
+          tags: ${{ matrix.image }}:local
+          cache-from: type=gha,scope=${{ matrix.image }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.image }}
+
+      - name: Push to Staging
+        if: github.event_name != 'pull_request'
+        uses: divinevideo/divine-github-actions/docker-push-gcp@v1
+        with:
+          image-name: ${{ matrix.image }}:local
+          registry-image: ${{ matrix.image }}
+          tags: ${{ steps.tags.outputs.tags }}
+          wif-provider: ${{ vars.WORKLOAD_IDENTITY_PROVIDER_STAGING }}
+          service-account: ${{ vars.SERVICE_ACCOUNT_STAGING }}
+          project-id: ${{ vars.GCP_PROJECT_ID_STAGING }}
+          repository: containers-staging
+          region: ${{ env.GCP_REGION }}
+
+      - name: Push to Production
+        if: github.event_name != 'pull_request'
+        uses: divinevideo/divine-github-actions/docker-push-gcp@v1
+        with:
+          image-name: ${{ matrix.image }}:local
+          registry-image: ${{ matrix.image }}
+          tags: ${{ steps.tags.outputs.tags }}
+          wif-provider: ${{ vars.WORKLOAD_IDENTITY_PROVIDER_PRODUCTION }}
+          service-account: ${{ vars.SERVICE_ACCOUNT_PRODUCTION }}
+          project-id: ${{ vars.GCP_PROJECT_ID_PRODUCTION }}
+          repository: containers-production
+          region: ${{ env.GCP_REGION }}
+
+      - name: Summary
+        if: github.event_name != 'pull_request'
+        env:
+          IMAGE: ${{ matrix.image }}
+          TAGS: ${{ steps.tags.outputs.tags }}
+        run: |
+          {
+            printf -- '### %s published\n\n' "$IMAGE"
+            printf -- '- **Tags:** `%s`\n' "$TAGS"
+            printf -- '- **Registries:** containers-staging, containers-production\n'
+          } >> "$GITHUB_STEP_SUMMARY"
