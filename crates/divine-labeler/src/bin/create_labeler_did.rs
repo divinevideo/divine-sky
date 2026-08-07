@@ -32,44 +32,14 @@ fn main() -> Result<()> {
 
     let signing_did_key = pubkey_to_did_key(&public_key);
 
-    // PLC rotation keys are ordered by priority and control the identity: a key
-    // listed here can rewrite the DID document, including replacing the signing
-    // key. Defaulting to the signing key alone makes that key a single point of
-    // failure — lose it and the DID is unrecoverable. Passing a dedicated
-    // recovery key puts it ahead of the signing key so the identity survives a
-    // lost or compromised service key. Granting rotation authority needs only
-    // the public did:key, never the recovery private key.
     let recovery_did_key = get_arg(&args, "--rotation-key").ok();
-    let rotation_keys: Vec<String> = match &recovery_did_key {
-        Some(recovery) => vec![recovery.clone(), signing_did_key.clone()],
-        None => vec![signing_did_key.clone()],
-    };
+    let rotation_keys = build_rotation_keys(recovery_did_key.as_deref(), &signing_did_key);
 
     eprintln!("Signing key (did:key): {signing_did_key}");
     eprintln!("Rotation keys (priority order): {rotation_keys:?}");
 
-    // Build PLC operation
-    let mut verification_methods = BTreeMap::new();
-    verification_methods.insert("atproto".to_string(), signing_did_key);
-
-    let mut services = BTreeMap::new();
-    services.insert(
-        "atproto_labeler".to_string(),
-        serde_json::json!({
-            "type": "AtprotoLabeler",
-            "endpoint": pds_endpoint
-        }),
-    );
-
-    let mut operation = serde_json::json!({
-        "type": "plc_operation",
-        "rotationKeys": rotation_keys,
-        "verificationMethods": verification_methods,
-        "alsoKnownAs": [format!("at://{handle}")],
-        "services": services,
-        "prev": null,
-        "sig": ""
-    });
+    let mut operation =
+        build_plc_operation(&handle, &pds_endpoint, &signing_did_key, &rotation_keys);
 
     // Sign the operation
     let sig = sign_plc_operation(&operation, &secret_key)?;
@@ -136,6 +106,51 @@ fn main() -> Result<()> {
     Ok(())
 }
 
+/// Build the DID's rotation keys, highest priority first.
+///
+/// PLC rotation keys control the identity: a key listed here can rewrite the DID
+/// document, including replacing the signing key. Using the signing key alone
+/// makes it a single point of failure — lose it and the DID is unrecoverable,
+/// leak it and the identity is hijackable. A dedicated recovery key is therefore
+/// placed ahead of the signing key. Granting rotation authority needs only the
+/// public did:key, never the recovery private key.
+fn build_rotation_keys(recovery_did_key: Option<&str>, signing_did_key: &str) -> Vec<String> {
+    match recovery_did_key {
+        Some(recovery) => vec![recovery.to_string(), signing_did_key.to_string()],
+        None => vec![signing_did_key.to_string()],
+    }
+}
+
+/// Build the unsigned genesis PLC operation for a labeler identity.
+fn build_plc_operation(
+    handle: &str,
+    pds_endpoint: &str,
+    signing_did_key: &str,
+    rotation_keys: &[String],
+) -> serde_json::Value {
+    let mut verification_methods = BTreeMap::new();
+    verification_methods.insert("atproto".to_string(), signing_did_key.to_string());
+
+    let mut services = BTreeMap::new();
+    services.insert(
+        "atproto_labeler".to_string(),
+        serde_json::json!({
+            "type": "AtprotoLabeler",
+            "endpoint": pds_endpoint
+        }),
+    );
+
+    serde_json::json!({
+        "type": "plc_operation",
+        "rotationKeys": rotation_keys,
+        "verificationMethods": verification_methods,
+        "alsoKnownAs": [format!("at://{handle}")],
+        "services": services,
+        "prev": null,
+        "sig": ""
+    })
+}
+
 fn get_arg(args: &[String], name: &str) -> Result<String> {
     let pos = args
         .iter()
@@ -184,4 +199,52 @@ fn derive_did_plc(operation: &serde_json::Value) -> String {
         .encode(&hash[..15])
         .to_ascii_lowercase();
     format!("did:plc:{encoded}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const SIGNING: &str = "did:key:zQ3shv3obULi78b8TSZ9uz6dYuDLEQiog67sbBgLFjeA3zgAP";
+    const RECOVERY: &str = "did:key:zQ3shqtkyxqEpU468PfA6nKHpFbKwGx6oaao6jEs5cpxerjv1";
+
+    #[test]
+    fn rotation_keys_put_recovery_key_ahead_of_signing_key() {
+        assert_eq!(
+            build_rotation_keys(Some(RECOVERY), SIGNING),
+            vec![RECOVERY.to_string(), SIGNING.to_string()],
+            "recovery key must hold higher rotation priority than the signing key"
+        );
+    }
+
+    #[test]
+    fn rotation_keys_fall_back_to_signing_key_alone() {
+        assert_eq!(
+            build_rotation_keys(None, SIGNING),
+            vec![SIGNING.to_string()]
+        );
+    }
+
+    #[test]
+    fn plc_operation_carries_rotation_keys_in_order() {
+        let rotation_keys = build_rotation_keys(Some(RECOVERY), SIGNING);
+        let op = build_plc_operation(
+            "labeler.divine.video",
+            "https://labels.divine.video",
+            SIGNING,
+            &rotation_keys,
+        );
+
+        assert_eq!(op["rotationKeys"][0], RECOVERY);
+        assert_eq!(op["rotationKeys"][1], SIGNING);
+        assert_eq!(op["verificationMethods"]["atproto"], SIGNING);
+        assert_eq!(op["alsoKnownAs"][0], "at://labeler.divine.video");
+        assert_eq!(
+            op["services"]["atproto_labeler"]["endpoint"],
+            "https://labels.divine.video"
+        );
+        assert_eq!(op["services"]["atproto_labeler"]["type"], "AtprotoLabeler");
+        assert_eq!(op["type"], "plc_operation");
+        assert!(op["prev"].is_null());
+    }
 }
