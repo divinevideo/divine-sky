@@ -2,7 +2,13 @@
 //!
 //! Usage:
 //!   cargo run -p divine-labeler --bin create-labeler-did -- \
-//!     --signing-key <hex> --pds-endpoint <url> --handle <handle> --plc-directory <url>
+//!     --signing-key <hex> --pds-endpoint <url> --handle <handle> \
+//!     [--rotation-key <did:key>] [--plc-directory <url>]
+//!
+//! `--rotation-key` takes the PUBLIC did:key of a dedicated recovery key and
+//! lists it ahead of the signing key in rotationKeys. Strongly recommended for
+//! production identities: without it the service signing key is the only thing
+//! that can ever rewrite the DID document.
 
 use std::collections::BTreeMap;
 
@@ -25,9 +31,22 @@ fn main() -> Result<()> {
     let public_key = PublicKey::from_secret_key(&secp, &secret_key);
 
     let signing_did_key = pubkey_to_did_key(&public_key);
-    let rotation_did_key = signing_did_key.clone(); // Same key for rotation (labeler is service-operated)
+
+    // PLC rotation keys are ordered by priority and control the identity: a key
+    // listed here can rewrite the DID document, including replacing the signing
+    // key. Defaulting to the signing key alone makes that key a single point of
+    // failure — lose it and the DID is unrecoverable. Passing a dedicated
+    // recovery key puts it ahead of the signing key so the identity survives a
+    // lost or compromised service key. Granting rotation authority needs only
+    // the public did:key, never the recovery private key.
+    let recovery_did_key = get_arg(&args, "--rotation-key").ok();
+    let rotation_keys: Vec<String> = match &recovery_did_key {
+        Some(recovery) => vec![recovery.clone(), signing_did_key.clone()],
+        None => vec![signing_did_key.clone()],
+    };
 
     eprintln!("Signing key (did:key): {signing_did_key}");
+    eprintln!("Rotation keys (priority order): {rotation_keys:?}");
 
     // Build PLC operation
     let mut verification_methods = BTreeMap::new();
@@ -44,7 +63,7 @@ fn main() -> Result<()> {
 
     let mut operation = serde_json::json!({
         "type": "plc_operation",
-        "rotationKeys": [rotation_did_key],
+        "rotationKeys": rotation_keys,
         "verificationMethods": verification_methods,
         "alsoKnownAs": [format!("at://{handle}")],
         "services": services,
