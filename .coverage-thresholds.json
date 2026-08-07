@@ -13,6 +13,11 @@
     ],
     "allow_uncovered": [
       {"path": "crates/divine-atbridge/src/bin/repair_legacy_badjwt.rs", "line": 93, "reason": "rustc assigns no counter to the covered question-mark expression"},
+      {"path": "crates/divine-labeler/src/bin/create_labeler_did.rs", "line": 35, "reason": "main() argument wiring for a one-off CLI whose only run performs a live PLC directory write; build_rotation_keys is covered directly"},
+      {"path": "crates/divine-labeler/src/bin/create_labeler_did.rs", "line": 36, "reason": "main() argument wiring for a one-off CLI whose only run performs a live PLC directory write; build_rotation_keys is covered directly"},
+      {"path": "crates/divine-labeler/src/bin/create_labeler_did.rs", "line": 39, "reason": "operator progress output in main(); the rotation keys it prints are covered by build_rotation_keys tests"},
+      {"path": "crates/divine-labeler/src/bin/create_labeler_did.rs", "line": 41, "reason": "main() call into build_plc_operation, which is covered directly"},
+      {"path": "crates/divine-labeler/src/bin/create_labeler_did.rs", "line": 42, "reason": "main() call into build_plc_operation, which is covered directly"},
       {"path": "crates/divine-atbridge/src/legacy_repair.rs", "line": 186, "reason": "rustc assigns no counter to the covered question-mark expression"},
       {"path": "crates/divine-atbridge/src/legacy_repair.rs", "line": 191, "reason": "defense-in-depth check dominated by the preceding digest comparison"},
       {"path": "crates/divine-atbridge/src/legacy_repair.rs", "line": 197, "reason": "serializable transaction and row predicates make partial update unreachable without database corruption"},
