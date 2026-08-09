@@ -10,7 +10,8 @@ use divine_bridge_db::{
     cancel_publish_job, claim_next_backfill_job, claim_next_live_job, enqueue_publish_job,
     get_publish_job, list_accounts_requiring_backfill, mark_account_backfill_completed,
     mark_account_backfill_failed, mark_account_backfill_started, mark_publish_job_completed,
-    mark_publish_job_completed_for_owner, mark_publish_job_failed, renew_publish_job_lease,
+    mark_publish_job_completed_for_owner, mark_publish_job_failed,
+    mark_publish_job_ineligible_for_owner, renew_publish_job_lease,
     reserve_publish_job_prepared_record, reserve_publish_job_rkey,
 };
 use divine_bridge_types::PublishJobSource;
@@ -239,9 +240,62 @@ fn lease_renewal_and_finalization_require_the_current_owner() {
     assert!(
         mark_publish_job_completed_for_owner(&mut conn, "evt-owned-lease", "worker-b").is_err()
     );
+    assert!(mark_publish_job_ineligible_for_owner(
+        &mut conn,
+        "evt-owned-lease",
+        "worker-b",
+        "invalid signature",
+    )
+    .is_err());
     let completed = mark_publish_job_completed_for_owner(&mut conn, "evt-owned-lease", "worker-a")
         .expect("current owner should complete");
     assert_eq!(completed.state, "published");
+}
+
+#[test]
+fn ineligible_finalization_requires_the_current_owner() {
+    let _guard = test_db_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let database_url = test_database_url();
+    reset_database(&database_url);
+    let mut conn =
+        PgConnection::establish(&database_url).expect("test database should be reachable");
+    enqueue_publish_job(
+        &mut conn,
+        &NewPublishJob {
+            nostr_event_id: "evt-ineligible-lease",
+            nostr_pubkey: "npub1alice",
+            event_created_at: Utc::now(),
+            event_payload: json!({"id": "evt-ineligible-lease"}),
+            job_source: PublishJobSource::Live.as_str(),
+            state: "pending",
+        },
+    )
+    .expect("job should enqueue");
+    claim_next_live_job(&mut conn, "worker-a", Utc::now() + Duration::minutes(5))
+        .expect("claim should work")
+        .expect("job should be claimable");
+
+    assert!(mark_publish_job_ineligible_for_owner(
+        &mut conn,
+        "evt-ineligible-lease",
+        "worker-b",
+        "invalid signature",
+    )
+    .is_err());
+    let ineligible = mark_publish_job_ineligible_for_owner(
+        &mut conn,
+        "evt-ineligible-lease",
+        "worker-a",
+        "invalid signature",
+    )
+    .expect("current owner should mark ineligible");
+    assert_eq!(ineligible.state, "ineligible");
+    assert_eq!(ineligible.error.as_deref(), Some("invalid signature"));
+    assert!(ineligible.completed_at.is_some());
+    assert!(ineligible.lease_owner.is_none());
+    assert!(ineligible.lease_expires_at.is_none());
 }
 
 #[test]

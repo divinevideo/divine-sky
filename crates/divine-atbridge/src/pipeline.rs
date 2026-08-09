@@ -76,8 +76,45 @@ pub enum ProcessResult {
     Published { at_uri: String, rkey: String },
     ProfileSynced { at_uri: String, rkey: String },
     Deleted { at_uri: String },
-    Skipped { reason: String },
+    Skipped { reason: SkipReason },
     Error { message: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SkipReason {
+    InvalidSignature,
+    SignatureError(String),
+    NotOptedIn,
+    UnknownAccount,
+    AlreadyProcessed,
+    UnsupportedKind(u64),
+    DeleteMissingTag,
+    DeleteNoMapping,
+    DeleteAlreadyDeleted,
+    DeleteRejected(String),
+}
+
+impl SkipReason {
+    pub fn should_mark_ineligible(&self) -> bool {
+        !matches!(self, Self::AlreadyProcessed)
+    }
+}
+
+impl std::fmt::Display for SkipReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::InvalidSignature => f.write_str("invalid signature"),
+            Self::SignatureError(error) => write!(f, "signature verification error: {error}"),
+            Self::NotOptedIn => f.write_str("user has not opted in"),
+            Self::UnknownAccount => f.write_str("unknown pubkey — no account link"),
+            Self::AlreadyProcessed => f.write_str("event already processed"),
+            Self::UnsupportedKind(kind) => write!(f, "unsupported event kind: {kind}"),
+            Self::DeleteMissingTag => f.write_str("deletion event has no 'e' tag"),
+            Self::DeleteNoMapping => f.write_str("no record mapping found for deleted event"),
+            Self::DeleteAlreadyDeleted => f.write_str("record already deleted"),
+            Self::DeleteRejected(error) => f.write_str(error),
+        }
+    }
 }
 
 /// Queue-ready payload for a publish or tombstone job.
@@ -558,12 +595,12 @@ where
             Ok(true) => {}
             Ok(false) => {
                 return Ok(ProcessResult::Skipped {
-                    reason: "invalid signature".to_string(),
+                    reason: SkipReason::InvalidSignature,
                 });
             }
             Err(e) => {
                 return Ok(ProcessResult::Skipped {
-                    reason: format!("signature verification error: {e}"),
+                    reason: SkipReason::SignatureError(e.to_string()),
                 });
             }
         }
@@ -579,12 +616,12 @@ where
             Some(a) if a.opted_in => a,
             Some(_) => {
                 return Ok(ProcessResult::Skipped {
-                    reason: "user has not opted in".to_string(),
+                    reason: SkipReason::NotOptedIn,
                 });
             }
             None => {
                 return Ok(ProcessResult::Skipped {
-                    reason: "unknown pubkey — no account link".to_string(),
+                    reason: SkipReason::UnknownAccount,
                 });
             }
         };
@@ -610,7 +647,7 @@ where
         };
         if already_processed {
             return Ok(ProcessResult::Skipped {
-                reason: "event already processed".to_string(),
+                reason: SkipReason::AlreadyProcessed,
             });
         }
 
@@ -626,7 +663,7 @@ where
         }
 
         Ok(ProcessResult::Skipped {
-            reason: format!("unsupported event kind: {}", event.kind),
+            reason: SkipReason::UnsupportedKind(event.kind),
         })
     }
 
@@ -929,7 +966,7 @@ where
             Some(id) => id.to_string(),
             None => {
                 return Ok(ProcessResult::Skipped {
-                    reason: "deletion event has no 'e' tag".to_string(),
+                    reason: SkipReason::DeleteMissingTag,
                 });
             }
         };
@@ -943,26 +980,20 @@ where
             Some(m) => m,
             None => {
                 return Ok(ProcessResult::Skipped {
-                    reason: "no record mapping found for deleted event".to_string(),
+                    reason: SkipReason::DeleteNoMapping,
                 });
             }
         };
 
         if mapping.deleted {
             return Ok(ProcessResult::Skipped {
-                reason: "record already deleted".to_string(),
-            });
-        }
-
-        if mapping.deleted {
-            return Ok(ProcessResult::Skipped {
-                reason: "record already deleted".to_string(),
+                reason: SkipReason::DeleteAlreadyDeleted,
             });
         }
 
         if let Err(err) = validate_delete_request(event, &account.did, &mapping.did) {
             return Ok(ProcessResult::Skipped {
-                reason: err.to_string(),
+                reason: SkipReason::DeleteRejected(err.to_string()),
             });
         }
 
@@ -993,6 +1024,59 @@ mod tests {
     use secp256k1::{Keypair, Secp256k1};
     use sha2::{Digest, Sha256};
     use std::sync::{Arc, Mutex};
+
+    #[test]
+    fn skip_reason_display_preserves_existing_messages() {
+        let cases = [
+            (
+                SkipReason::InvalidSignature,
+                "invalid signature".to_string(),
+            ),
+            (
+                SkipReason::SignatureError("bad sig".to_string()),
+                "signature verification error: bad sig".to_string(),
+            ),
+            (SkipReason::NotOptedIn, "user has not opted in".to_string()),
+            (
+                SkipReason::UnknownAccount,
+                "unknown pubkey — no account link".to_string(),
+            ),
+            (
+                SkipReason::AlreadyProcessed,
+                "event already processed".to_string(),
+            ),
+            (
+                SkipReason::UnsupportedKind(12345),
+                "unsupported event kind: 12345".to_string(),
+            ),
+            (
+                SkipReason::DeleteMissingTag,
+                "deletion event has no 'e' tag".to_string(),
+            ),
+            (
+                SkipReason::DeleteNoMapping,
+                "no record mapping found for deleted event".to_string(),
+            ),
+            (
+                SkipReason::DeleteAlreadyDeleted,
+                "record already deleted".to_string(),
+            ),
+            (
+                SkipReason::DeleteRejected("delete request does not own record".to_string()),
+                "delete request does not own record".to_string(),
+            ),
+        ];
+
+        for (reason, expected) in cases {
+            assert_eq!(reason.to_string(), expected);
+        }
+    }
+
+    #[test]
+    fn only_already_processed_skip_completes_as_publish_no_op() {
+        assert!(!SkipReason::AlreadyProcessed.should_mark_ineligible());
+        assert!(SkipReason::InvalidSignature.should_mark_ineligible());
+    }
 
     // -----------------------------------------------------------------------
     // Test helpers: create signed Nostr events
@@ -1513,7 +1597,7 @@ mod tests {
 
         match &result {
             ProcessResult::Skipped { reason } => {
-                assert!(reason.contains("unknown pubkey"), "got: {}", reason);
+                assert_eq!(reason, &SkipReason::UnknownAccount);
             }
             other => panic!("expected Skipped, got {:?}", other),
         }
@@ -1532,7 +1616,7 @@ mod tests {
 
         match &result {
             ProcessResult::Skipped { reason } => {
-                assert!(reason.contains("already processed"), "got: {}", reason);
+                assert_eq!(reason, &SkipReason::AlreadyProcessed);
             }
             other => panic!("expected Skipped, got {:?}", other),
         }
@@ -1556,12 +1640,50 @@ mod tests {
 
         match &result {
             ProcessResult::Skipped { reason } => {
-                assert!(
-                    reason.contains("invalid signature")
-                        || reason.contains("signature verification error"),
-                    "got: {}",
-                    reason
-                );
+                assert!(matches!(
+                    reason,
+                    SkipReason::InvalidSignature | SkipReason::SignatureError(_)
+                ));
+            }
+            other => panic!("expected Skipped, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn malformed_signature_skipped() {
+        let mut event = make_video_event("test");
+        event.sig = "not-a-hex-signature".to_string();
+
+        let accounts = MockAccountStore {
+            links: vec![account_for(&event.pubkey)],
+        };
+        let records = MockRecordStore::new();
+        let pipeline = make_pipeline(accounts, records);
+
+        let result = pipeline.process_event(&event).await;
+
+        match &result {
+            ProcessResult::Skipped { reason } => {
+                assert!(matches!(reason, SkipReason::SignatureError(_)));
+            }
+            other => panic!("expected Skipped, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn unsupported_kind_skipped() {
+        let event = make_signed_event(12345, "unsupported", vec![]);
+        let accounts = MockAccountStore {
+            links: vec![account_for(&event.pubkey)],
+        };
+        let records = MockRecordStore::new();
+        let pipeline = make_pipeline(accounts, records);
+
+        let result = pipeline.process_event(&event).await;
+
+        match &result {
+            ProcessResult::Skipped { reason } => {
+                assert_eq!(reason, &SkipReason::UnsupportedKind(12345));
             }
             other => panic!("expected Skipped, got {:?}", other),
         }
@@ -1628,13 +1750,33 @@ mod tests {
 
         match result {
             ProcessResult::Skipped { reason } => {
-                assert!(reason.contains("does not own"), "got: {reason}");
+                assert!(reason.to_string().contains("does not own"), "got: {reason}");
             }
             other => panic!("expected Skipped, got {other:?}"),
         }
 
         assert!(pipeline.pds_publisher.deleted.lock().unwrap().is_empty());
         assert!(pipeline.record_store.deleted.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn deletion_without_target_tag_skipped() {
+        let del_event = make_signed_event(5, "", vec![]);
+
+        let accounts = MockAccountStore {
+            links: vec![account_for(&del_event.pubkey)],
+        };
+        let records = MockRecordStore::new();
+        let pipeline = make_pipeline(accounts, records);
+
+        let result = pipeline.process_event(&del_event).await;
+
+        match &result {
+            ProcessResult::Skipped { reason } => {
+                assert_eq!(reason, &SkipReason::DeleteMissingTag);
+            }
+            other => panic!("expected Skipped, got {:?}", other),
+        }
     }
 
     #[tokio::test]
@@ -1651,7 +1793,34 @@ mod tests {
 
         match &result {
             ProcessResult::Skipped { reason } => {
-                assert!(reason.contains("no record mapping"), "got: {}", reason);
+                assert_eq!(reason, &SkipReason::DeleteNoMapping);
+            }
+            other => panic!("expected Skipped, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn deletion_with_deleted_mapping_skipped() {
+        let del_event = make_deletion_event_for("already-deleted-event");
+
+        let accounts = MockAccountStore {
+            links: vec![account_for(&del_event.pubkey)],
+        };
+        let records = MockRecordStore::new().with_mappings(vec![RecordMapping {
+            nostr_event_id: "already-deleted-event".to_string(),
+            at_uri: "at://did:plc:testuser/app.bsky.feed.post/rkey".to_string(),
+            did: "did:plc:testuser".to_string(),
+            collection: "app.bsky.feed.post".to_string(),
+            rkey: "rkey".to_string(),
+            deleted: true,
+        }]);
+        let pipeline = make_pipeline(accounts, records);
+
+        let result = pipeline.process_event(&del_event).await;
+
+        match &result {
+            ProcessResult::Skipped { reason } => {
+                assert_eq!(reason, &SkipReason::DeleteAlreadyDeleted);
             }
             other => panic!("expected Skipped, got {:?}", other),
         }
@@ -1670,7 +1839,7 @@ mod tests {
 
         match &result {
             ProcessResult::Skipped { reason } => {
-                assert!(reason.contains("not opted in"), "got: {}", reason);
+                assert_eq!(reason, &SkipReason::NotOptedIn);
             }
             other => panic!("expected Skipped, got {:?}", other),
         }

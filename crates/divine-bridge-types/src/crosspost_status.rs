@@ -99,6 +99,23 @@ pub fn derive_crosspost_status(
     account: Option<&CrosspostAccountContext>,
     job: Option<&CrosspostJobContext>,
 ) -> CrosspostVideoStatus {
+    if let Some(job) = job {
+        if let Some(record_status) = job.record_status.as_deref() {
+            return if record_status == RecordStatus::Published.as_str() && job.at_uri.is_some() {
+                CrosspostVideoStatus {
+                    nostr_event_id,
+                    status: CrosspostStatus::Published,
+                    at_uri: job.at_uri.clone(),
+                    cid: job.cid.clone(),
+                    failure: None,
+                    updated_at: Some(job.updated_at),
+                }
+            } else {
+                removed(nostr_event_id, job.updated_at)
+            };
+        }
+    }
+
     if !account_is_ready(account) {
         return not_applicable(nostr_event_id);
     }
@@ -124,30 +141,14 @@ pub fn derive_crosspost_status(
             failure: None,
             updated_at: Some(job.updated_at),
         },
-        // A completed job does not prove a record was ever written: the pipeline
-        // reports skips (unsupported kind, unverified signature, not opted in) as
-        // successful completion, which the scheduler stores as `published` with no
-        // row in `record_mappings`. Only an actual mapping that is no longer
-        // published means the post was taken down; a job with no mapping at all
-        // never reached Bluesky, so it is not applicable rather than removed.
         state if state == PublishState::Published.as_str() => {
-            match (job.record_status.as_deref(), job.at_uri.as_ref()) {
-                (Some(record_status), Some(_))
-                    if record_status == RecordStatus::Published.as_str() =>
-                {
-                    CrosspostVideoStatus {
-                        nostr_event_id,
-                        status: CrosspostStatus::Published,
-                        at_uri: job.at_uri.clone(),
-                        cid: job.cid.clone(),
-                        failure: None,
-                        updated_at: Some(job.updated_at),
-                    }
-                }
-                (Some(_), _) => removed(nostr_event_id, job.updated_at),
-                (None, _) => not_applicable(nostr_event_id),
-            }
+            tracing::warn!(
+                nostr_event_id = %nostr_event_id,
+                "published publish job has no record mapping"
+            );
+            not_applicable(nostr_event_id)
         }
+        state if state == PublishState::Ineligible.as_str() => not_applicable(nostr_event_id),
         state if state == PublishState::Failed.as_str() && job.completed_at.is_none() => {
             CrosspostVideoStatus {
                 nostr_event_id,
@@ -422,6 +423,40 @@ mod tests {
             Some(&base_job("skipped")),
         );
         assert_eq!(status.status, CrosspostStatus::Removed);
+    }
+
+    #[test]
+    fn ineligible_job_reports_not_applicable() {
+        let status = derive_crosspost_status(
+            EVENT_ID.to_string(),
+            Some(&ready_account()),
+            Some(&base_job("ineligible")),
+        );
+        assert_eq!(status.status, CrosspostStatus::NotApplicable);
+    }
+
+    #[test]
+    fn ineligible_job_with_published_mapping_reports_published() {
+        let mut job = base_job("ineligible");
+        job.at_uri = Some("at://did:plc:alice/app.bsky.feed.post/rkey".to_string());
+        job.cid = Some("bafyrecord".to_string());
+        job.record_status = Some("published".to_string());
+        let status =
+            derive_crosspost_status(EVENT_ID.to_string(), Some(&ready_account()), Some(&job));
+        assert_eq!(status.status, CrosspostStatus::Published);
+        assert_eq!(status.at_uri, job.at_uri);
+        assert_eq!(status.cid, job.cid);
+    }
+
+    #[test]
+    fn published_mapping_reports_published_for_disabled_account() {
+        let mut account = ready_account();
+        account.crosspost_enabled = false;
+        let mut job = base_job("published");
+        job.at_uri = Some("at://did:plc:alice/app.bsky.feed.post/rkey".to_string());
+        job.record_status = Some("published".to_string());
+        let status = derive_crosspost_status(EVENT_ID.to_string(), Some(&account), Some(&job));
+        assert_eq!(status.status, CrosspostStatus::Published);
     }
 
     #[test]

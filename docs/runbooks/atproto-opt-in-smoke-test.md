@@ -96,6 +96,7 @@ For a localnet run instead of staging:
 18. Query the per-video crosspost status route for the live post's full Nostr event ID.
     - expected status while `publish_jobs.state = 'pending'`: `queued`
     - expected status while `publish_jobs.state = 'in_progress'`: `publishing`
+    - expected status for `publish_jobs.state = 'ineligible'`: `not_applicable`
     - expected status after publish completion plus a published `record_mappings` row: `published`, with full `at_uri` and `cid`
     - expected status for `publish_jobs.state = 'failed'` and `completed_at IS NULL`: `retrying`, with `retryable = true`
     - expected status for `publish_jobs.state = 'failed'` and `completed_at IS NOT NULL`: `failed`, with `retryable = false`

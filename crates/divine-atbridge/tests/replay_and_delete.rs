@@ -371,7 +371,7 @@ async fn replay_and_delete_rejects_delete_owner_mismatch() {
 
     match result {
         ProcessResult::Skipped { reason } => {
-            assert!(reason.contains("does not own"), "got: {reason}");
+            assert!(reason.to_string().contains("does not own"), "got: {reason}");
         }
         other => panic!("expected Skipped, got {other:?}"),
     }

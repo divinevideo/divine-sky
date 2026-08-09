@@ -12,7 +12,7 @@ use async_trait::async_trait;
 use divine_atbridge::nostr_consumer::{NostrConsumer, RelayConnection};
 use divine_atbridge::pipeline::{
     AccountLink, AccountStore, AssetManifestRecord, BridgePipeline, HttpBlobFetcher, ProcessResult,
-    QueueDecision, RecordMapping, RecordStore,
+    QueueDecision, RecordMapping, RecordStore, SkipReason,
 };
 use divine_atbridge::publisher::PdsClient;
 use divine_atbridge::run_bridge_session;
@@ -405,7 +405,7 @@ async fn publish_path_integration_skips_when_account_is_not_opted_in() {
     let result = pipeline.process_event(&event).await;
     match result {
         ProcessResult::Skipped { reason } => {
-            assert!(reason.contains("not opted in"), "got: {reason}");
+            assert_eq!(reason, SkipReason::NotOptedIn);
         }
         other => panic!("expected skipped for opted-out account, got {other:?}"),
     }
