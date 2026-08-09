@@ -221,7 +221,7 @@ fn classify_failure_reason(error: Option<&str>) -> CrosspostFailureReason {
     let Some(error) = error else {
         return CrosspostFailureReason::Internal;
     };
-    if error.contains("daily_vid_limit_exceeded") {
+    if error.contains(crate::UPLOAD_QUOTA_ERROR_MARKER) {
         CrosspostFailureReason::Quota
     } else if error.to_ascii_lowercase().contains("unsupported") {
         CrosspostFailureReason::Unsupported

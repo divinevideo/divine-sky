@@ -1128,7 +1128,7 @@ const UPLOAD_QUOTA_RETRY_SECS_BACKFILL: i64 = 12 * 60 * 60;
 /// The video service reports its per-DID daily cap as `daily_vid_limit_exceeded`
 /// (inside an HTTP 401 body, confusingly). Treat it as a throttle, not a defect.
 fn is_upload_quota_error(error_msg: &str) -> bool {
-    error_msg.contains("daily_vid_limit_exceeded")
+    error_msg.contains(divine_bridge_types::UPLOAD_QUOTA_ERROR_MARKER)
 }
 
 const MAX_PUBLISH_JOB_BACKOFF_SECS: i64 = 600;

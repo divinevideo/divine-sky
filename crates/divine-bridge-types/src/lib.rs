@@ -123,6 +123,12 @@ impl std::fmt::Display for PublishState {
     }
 }
 
+/// Marker the video service returns when a DID exhausts its daily upload cap.
+///
+/// Scheduling treats it as a throttle rather than a failed attempt, and status
+/// reporting maps it to a quota reason, so both must recognise the same token.
+pub const UPLOAD_QUOTA_ERROR_MARKER: &str = "daily_vid_limit_exceeded";
+
 /// Source lane for a publish job.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
