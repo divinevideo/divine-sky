@@ -49,11 +49,15 @@ pub struct DbFeedStore {
 }
 
 impl DbFeedStore {
+    pub fn connect(database_url: &str) -> Result<Self> {
+        Ok(Self {
+            pool: build_pool(database_url)?,
+        })
+    }
+
     pub fn from_env() -> Self {
         let database_url = std::env::var("DATABASE_URL").expect("DATABASE_URL is required");
-        Self {
-            pool: build_pool(&database_url).expect("failed to build feedgen database pool"),
-        }
+        Self::connect(&database_url).expect("failed to build feedgen database pool")
     }
 }
 

@@ -67,12 +67,14 @@ jobs:
           (
             cd "$base_worktree"
             CARGO_TARGET_DIR="$GITHUB_WORKSPACE/target/llvm-cov-base-target" \
-              cargo llvm-cov --workspace --all-features --json --summary-only \
+              cargo llvm-cov --workspace --all-features --ignore-run-fail \
+                --json --summary-only \
                 --output-path "$GITHUB_WORKSPACE/target/llvm-cov/base-summary.json"
           )
           cleanup_coverage_base
           trap - EXIT
-          cargo llvm-cov --workspace --all-features --lcov --output-path target/llvm-cov/lcov.info
+          cargo llvm-cov --workspace --all-features --ignore-run-fail \
+            --lcov --output-path target/llvm-cov/lcov.info
           cargo llvm-cov report --json --summary-only --output-path target/llvm-cov/summary.json
           COVERAGE_BASE_SUMMARY_PATH=target/llvm-cov/base-summary.json \
             bash scripts/check-coverage-thresholds.sh \

@@ -39,6 +39,10 @@ pub fn build_pool(database_url: &str) -> Result<DbPool> {
     Pool::builder()
         .max_size(max_size)
         .min_idle(Some(1))
+        // Avoid r2d2's background reaper racing libpq process teardown in
+        // Linux test binaries. Checkout validation still rejects stale handles.
+        .max_lifetime(None)
+        .idle_timeout(None)
         .build(manager)
         .context("failed to build database connection pool")
 }

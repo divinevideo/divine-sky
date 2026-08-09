@@ -1,7 +1,4 @@
-use std::sync::{Arc, Mutex};
-
 use anyhow::{Context, Result};
-use diesel::Connection;
 use diesel::PgConnection;
 use divine_bridge_db::{
     build_pool, disable_account_link, enable_account_link, get_account_link_lifecycle,
@@ -13,27 +10,13 @@ use crate::AccountLinkRecord;
 
 #[derive(Clone)]
 pub struct DbStore {
-    connection: ConnectionMode,
-}
-
-#[derive(Clone)]
-enum ConnectionMode {
-    Pool(DbPool),
-    Single(Arc<Mutex<PgConnection>>),
+    pool: DbPool,
 }
 
 impl DbStore {
     pub fn connect(database_url: &str) -> Result<Self> {
         Ok(Self {
-            connection: ConnectionMode::Pool(build_pool(database_url)?),
-        })
-    }
-
-    pub fn connect_single(database_url: &str) -> Result<Self> {
-        let connection =
-            PgConnection::establish(database_url).context("failed to connect to PostgreSQL")?;
-        Ok(Self {
-            connection: ConnectionMode::Single(Arc::new(Mutex::new(connection))),
+            pool: build_pool(database_url)?,
         })
     }
 
@@ -142,18 +125,12 @@ impl DbStore {
     where
         T: Send + 'static,
     {
-        let connection = self.connection.clone();
-        tokio::task::spawn_blocking(move || match connection {
-            ConnectionMode::Pool(pool) => {
-                let mut connection = pool
-                    .get()
-                    .context("failed to check out PostgreSQL connection")?;
-                f(&mut connection)
-            }
-            ConnectionMode::Single(connection) => {
-                let mut connection = connection.lock().unwrap();
-                f(&mut connection)
-            }
+        let pool = self.pool.clone();
+        tokio::task::spawn_blocking(move || {
+            let mut connection = pool
+                .get()
+                .context("failed to check out PostgreSQL connection")?;
+            f(&mut connection)
         })
         .await
         .context("database task panicked")?
