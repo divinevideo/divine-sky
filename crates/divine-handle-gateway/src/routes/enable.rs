@@ -10,6 +10,7 @@ pub async fn handler(
 ) -> Result<Json<AccountLinkRecord>, StatusCode> {
     let record = state
         .enable_by_pubkey_result(&nostr_pubkey)
+        .await
         .map_err(|error| {
             tracing::error!(error = %error, "failed to enable account link");
             StatusCode::INTERNAL_SERVER_ERROR

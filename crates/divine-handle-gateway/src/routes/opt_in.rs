@@ -27,6 +27,7 @@ pub async fn handler(
             payload.handle,
             payload.crosspost_enabled,
         )
+        .await
         .map_err(|error| {
             tracing::error!(error = %error, "failed to persist pending opt-in");
             StatusCode::INTERNAL_SERVER_ERROR

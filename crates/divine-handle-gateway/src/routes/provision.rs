@@ -16,11 +16,13 @@ pub async fn handler(
     State(state): State<AppState>,
     Json(payload): Json<ProvisionRequest>,
 ) -> Result<Json<AccountLinkRecord>, StatusCode> {
-    let record = state.upsert_ready(
-        payload.nostr_pubkey.clone(),
-        payload.handle.clone(),
-        payload.did.clone(),
-    );
+    let record = state
+        .upsert_ready(
+            payload.nostr_pubkey.clone(),
+            payload.handle.clone(),
+            payload.did.clone(),
+        )
+        .await;
 
     state
         .sync_ready_state(&payload.nostr_pubkey, &payload.handle, &payload.did)

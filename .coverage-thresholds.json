@@ -47,7 +47,7 @@
       {"path": "crates/divine-bridge-db/src/queries.rs", "line": 41, "reason": "Diesel QueryableByName derive declaration"},
       {"path": "crates/divine-bridge-db/src/queries.rs", "line": 843, "reason": "enqueue transaction returns the inserted primary key; missing row would require database corruption or trigger deletion"},
       {"path": "crates/divine-bridge-db/src/queries.rs", "line": 847, "reason": "rustc closing-expression counter artifact for the same enqueue invariant check"},
-      {"path": "crates/divine-handle-gateway/src/lib.rs", "line": 111, "reason": "production pooled handle-gateway path; integration tests use single connection to avoid known live pooled libpq Linux test-binary teardown segfault"},
+      {"path": "crates/divine-handle-gateway/src/lib.rs", "line": 113, "reason": "TODO(#45): production pooled handle-gateway path; integration tests use single connection to avoid known live pooled libpq Linux test-binary teardown segfault"},
       {"path": "crates/divine-bridge-db/src/schema.rs", "line": 118, "reason": "Diesel table macro closing token has no runtime counter"},
       {"path": "crates/divine-feedgen/src/skeleton.rs", "line": 52, "reason": "live pooled libpq test segfaults during Linux test-binary teardown"},
       {"path": "crates/divine-feedgen/src/skeleton.rs", "line": 53, "reason": "live pooled libpq test segfaults during Linux test-binary teardown"},

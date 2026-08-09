@@ -27,18 +27,22 @@ pub async fn handler(
         return Err(StatusCode::BAD_REQUEST);
     }
 
-    let account = state.get_by_pubkey_result(&nostr_pubkey).map_err(|error| {
-        tracing::error!(
-            nostr_pubkey = %nostr_pubkey,
-            error = %error,
-            "failed to load account link for crosspost status",
-        );
-        StatusCode::INTERNAL_SERVER_ERROR
-    })?;
+    let account = state
+        .get_by_pubkey_result(&nostr_pubkey)
+        .await
+        .map_err(|error| {
+            tracing::error!(
+                nostr_pubkey = %nostr_pubkey,
+                error = %error,
+                "failed to load account link for crosspost status",
+            );
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
     let account_context = account.as_ref().map(account_context);
 
     let rows = state
         .list_crosspost_status_result(&nostr_pubkey, &payload.nostr_event_ids)
+        .await
         .map_err(|error| {
             tracing::error!(
                 nostr_pubkey = %nostr_pubkey,

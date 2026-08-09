@@ -75,6 +75,8 @@ pub struct AppState {
 #[derive(Debug, Clone)]
 pub struct AppConfig {
     pub database_url: String,
+    // TODO(#45): Remove this test escape hatch once pooled libpq teardown is
+    // stable enough for integration tests to cover the production path.
     pub use_database_pool: bool,
     pub keycast_atproto_token: String,
     pub atproto_provisioning_url: String,
@@ -139,7 +141,7 @@ impl AppState {
         })
     }
 
-    pub(crate) fn upsert_pending_result(
+    pub(crate) async fn upsert_pending_result(
         &self,
         nostr_pubkey: String,
         handle: String,
@@ -147,6 +149,7 @@ impl AppState {
     ) -> anyhow::Result<AccountLinkRecord> {
         self.store
             .upsert_pending_opt_in(&nostr_pubkey, &handle, crosspost_enabled)
+            .await
     }
 
     pub(crate) fn enqueue_provisioning(&self, nostr_pubkey: &str, handle: &str) {
@@ -154,7 +157,7 @@ impl AppState {
             .enqueue(nostr_pubkey.to_string(), handle.to_string());
     }
 
-    pub(crate) fn upsert_ready(
+    pub(crate) async fn upsert_ready(
         &self,
         nostr_pubkey: String,
         handle: String,
@@ -163,16 +166,19 @@ impl AppState {
         if self
             .store
             .get_by_pubkey(&nostr_pubkey)
+            .await
             .ok()
             .flatten()
             .is_none()
         {
             let _ = self
                 .store
-                .upsert_pending_opt_in(&nostr_pubkey, &handle, true);
+                .upsert_pending_opt_in(&nostr_pubkey, &handle, true)
+                .await;
         }
         self.store
             .mark_ready(&nostr_pubkey, &did)
+            .await
             .expect("failed to mark account link ready")
     }
 
@@ -188,18 +194,18 @@ impl AppState {
             .await
     }
 
-    pub(crate) fn get_by_pubkey_result(
+    pub(crate) async fn get_by_pubkey_result(
         &self,
         nostr_pubkey: &str,
     ) -> anyhow::Result<Option<AccountLinkRecord>> {
-        self.store.get_by_pubkey(nostr_pubkey)
+        self.store.get_by_pubkey(nostr_pubkey).await
     }
 
-    pub(crate) fn disable_by_pubkey_result(
+    pub(crate) async fn disable_by_pubkey_result(
         &self,
         nostr_pubkey: &str,
     ) -> anyhow::Result<Option<AccountLinkRecord>> {
-        self.store.disable(nostr_pubkey)
+        self.store.disable(nostr_pubkey).await
     }
 
     pub(crate) async fn sync_disabled_state(
@@ -213,19 +219,21 @@ impl AppState {
             .await
     }
 
-    pub(crate) fn enable_by_pubkey_result(
+    pub(crate) async fn enable_by_pubkey_result(
         &self,
         nostr_pubkey: &str,
     ) -> anyhow::Result<Option<AccountLinkRecord>> {
-        self.store.enable(nostr_pubkey)
+        self.store.enable(nostr_pubkey).await
     }
 
-    pub(crate) fn list_crosspost_status_result(
+    pub(crate) async fn list_crosspost_status_result(
         &self,
         nostr_pubkey: &str,
         event_ids: &[String],
     ) -> anyhow::Result<Vec<divine_bridge_db::models::PublishStatusRow>> {
-        self.store.list_crosspost_status(nostr_pubkey, event_ids)
+        self.store
+            .list_crosspost_status(nostr_pubkey, event_ids)
+            .await
     }
 
     pub(crate) async fn sync_enabled_state(
