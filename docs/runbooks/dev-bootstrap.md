@@ -5,18 +5,19 @@
 - Rust toolchain with `cargo`
 - Docker and Docker Compose
 - PostgreSQL client libraries
+- `jq`, used by the shell self-tests in `scripts/test-workspace.sh`
 
 On macOS with Homebrew:
 
 ```bash
-brew install libpq
+brew install libpq jq
 ```
 
 On Debian or Ubuntu:
 
 ```bash
 sudo apt-get update
-sudo apt-get install -y libpq-dev pkg-config
+sudo apt-get install -y libpq-dev pkg-config jq
 ```
 
 ## Local Infra

@@ -57,8 +57,14 @@ The `sky` namespace should be declared under `k8s/cluster-config/namespaces/`.
 Pull requests build the images but do not push them. Pushes to `main` wait for
 the Rust workflow to pass for the same commit before publishing to both
 `containers-staging` and `containers-production`. Manual republishes use the
-Docker workflow's `workflow_dispatch` input and publish the requested branch,
-tag, or SHA after the same Rust gate passes.
+Docker workflow's `workflow_dispatch` input, which takes a branch, tag, or SHA
+that resolves to a commit already on `main`. The Rust gate only accepts a Rust
+run from a `push` event, and `rust.yml` runs on `push` for `main` alone, so a
+ref that never landed on `main` is rejected rather than published.
+
+The gate itself lives in `scripts/wait-for-rust-run.sh`. Pull requests skip the
+gate job, so its behaviour is covered by `scripts/tests/wait-for-rust-run.sh`,
+which `scripts/test-workspace.sh` runs against a stubbed `gh`.
 
 Pin the seven-character SHA tag, never the branch tag. Only the `<sha7>` tags
 are immutable. Pushes to `main` also publish a floating `main` tag as a

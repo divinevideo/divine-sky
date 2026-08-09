@@ -31,7 +31,10 @@ on:
   workflow_dispatch:
     inputs:
       ref:
-        description: Branch, tag, or SHA to publish
+        # Must resolve to a commit that has landed on main: the rust-gate below
+        # only accepts a Rust run from a `push` event, and rust.yml only runs on
+        # `push` for main.
+        description: Branch, tag, or SHA to publish (must be a commit on main)
         required: true
         default: main
 
@@ -71,45 +74,15 @@ jobs:
     permissions:
       actions: read
     steps:
+      # Checks out the ref this workflow was loaded from, which is where the
+      # gate script belongs, not the ref being published.
+      - uses: actions/checkout@v4
+
       - name: Wait for Rust test to pass
         env:
           GH_TOKEN: ${{ github.token }}
           HEAD_SHA: ${{ needs.resolve-ref.outputs.target-sha }}
-        run: |
-          for attempt in {1..120}; do
-            result="$(
-              gh run list \
-                --repo "$GITHUB_REPOSITORY" \
-                --workflow rust.yml \
-                --commit "$HEAD_SHA" \
-                --event push \
-                --json conclusion,status \
-                --jq 'map(select(.status == "completed")) | .[0].conclusion // ""'
-            )" || result=""
-
-            case "$result" in
-              success)
-                echo "Rust workflow passed for ${HEAD_SHA}."
-                exit 0
-                ;;
-              failure|cancelled|timed_out|action_required)
-                echo "::error::Rust workflow concluded '${result}' for ${HEAD_SHA}; refusing to publish images."
-                exit 1
-                ;;
-              "")
-                ;;
-              *)
-                echo "::error::Rust workflow concluded '${result}' for ${HEAD_SHA}; refusing to publish images."
-                exit 1
-                ;;
-            esac
-
-            echo "Waiting for Rust workflow to complete for ${HEAD_SHA} (attempt ${attempt}/120)."
-            sleep 15
-          done
-
-          echo "::error::Timed out waiting for Rust workflow to pass for ${HEAD_SHA}; refusing to publish images."
-          exit 1
+        run: bash scripts/wait-for-rust-run.sh
 
   docker:
     name: Docker (${{ matrix.image }})
