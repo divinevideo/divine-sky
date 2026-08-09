@@ -17,9 +17,12 @@ name: Docker
 # secrets on this repo, which are not set yet. Manifest bumps stay manual PRs
 # against divine-iac-coreconfig until they are.
 #
-# Production deploys must pin immutable SHA tags in divine-iac-coreconfig. This
-# workflow intentionally does not publish latest, because Kubernetes treats
-# :latest images as imagePullPolicy: Always.
+# Production deploys must pin the immutable short-SHA tags in
+# divine-iac-coreconfig. This workflow intentionally does not publish latest,
+# because Kubernetes treats :latest images as imagePullPolicy: Always. The
+# `main` tag it does publish is a floating human-facing pointer: it moves, and
+# under overlapping merges it can settle on the older commit, so it must never
+# appear in a coreconfig overlay.
 
 on:
   push:

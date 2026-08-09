@@ -60,10 +60,13 @@ the Rust workflow to pass for the same commit before publishing to both
 Docker workflow's `workflow_dispatch` input and publish the requested branch,
 tag, or SHA after the same Rust gate passes.
 
-Published tags are immutable commit tags. The workflow intentionally does not
-publish `latest`. Do not point staging or production overlays at `latest`;
-Kubernetes treats `:latest` images as `imagePullPolicy: Always`, which can make
-pod restarts pull a new image without a coreconfig manifest diff.
+Pin the seven-character SHA tag, never the branch tag. Only the `<sha7>` tags
+are immutable. Pushes to `main` also publish a floating `main` tag as a
+human-facing pointer; it moves on every merge and, because publish runs are
+keyed by commit rather than serialized, overlapping merges can leave it on the
+older commit. The workflow intentionally does not publish `latest` at all,
+because Kubernetes treats `:latest` images as `imagePullPolicy: Always`, which
+can make pod restarts pull a new image without a coreconfig manifest diff.
 
 Before relying on the Docker workflow, `divinevideo/divine-sky` must be
 allow-listed in the staging and production Workload Identity providers in
@@ -79,7 +82,8 @@ allow-listed in the staging and production Workload Identity providers in
 ## Promotion
 
 Promote a build by pinning the target service overlay in
-`../divine-iac-coreconfig` to the published seven-character SHA tag. The
+`../divine-iac-coreconfig` to the published seven-character SHA tag, never to
+`main` or `latest`. The
 `divine-sky` workflow only publishes images; it does not dispatch `image-deploy`
 or update Kubernetes manifests.
 
