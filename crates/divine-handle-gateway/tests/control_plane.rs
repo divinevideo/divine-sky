@@ -55,6 +55,7 @@ fn reset_database(database_url: &str) {
 fn build_app(database_url: String, name_server_url: String) -> axum::Router {
     let config = AppConfig {
         database_url,
+        use_database_pool: false,
         keycast_atproto_token: "test-keycast-token".to_string(),
         atproto_provisioning_url: format!("{name_server_url}/provision"),
         atproto_provisioning_token: None,

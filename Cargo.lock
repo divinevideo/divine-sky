@@ -703,6 +703,7 @@ dependencies = [
  "chrono",
  "diesel",
  "divine-bridge-db",
+ "divine-bridge-types",
  "mockito",
  "reqwest",
  "serde",

@@ -75,6 +75,9 @@ pub struct AppState {
 #[derive(Debug, Clone)]
 pub struct AppConfig {
     pub database_url: String,
+    // TODO(#45): Remove this test escape hatch once pooled libpq teardown is
+    // stable enough for integration tests to cover the production path.
+    pub use_database_pool: bool,
     pub keycast_atproto_token: String,
     pub atproto_provisioning_url: String,
     pub atproto_provisioning_token: Option<String>,
@@ -88,6 +91,7 @@ impl AppConfig {
         Ok(Self {
             database_url: std::env::var("DATABASE_URL")
                 .context("DATABASE_URL must be set for handle gateway")?,
+            use_database_pool: true,
             keycast_atproto_token: std::env::var("KEYCAST_ATPROTO_TOKEN")
                 .context("KEYCAST_ATPROTO_TOKEN must be set for handle gateway")?,
             atproto_provisioning_url: std::env::var("ATPROTO_PROVISIONING_URL")
@@ -105,7 +109,11 @@ impl AppConfig {
 
 impl AppState {
     pub(crate) fn from_config(config: AppConfig) -> anyhow::Result<Self> {
-        let store = store::DbStore::connect(&config.database_url)?;
+        let store = if config.use_database_pool {
+            store::DbStore::connect(&config.database_url)?
+        } else {
+            store::DbStore::connect_single(&config.database_url)?
+        };
         let name_server_client = name_server_client::NameServerClient::new(
             config.atproto_name_server_sync_url,
             config.atproto_name_server_sync_token,
@@ -133,7 +141,7 @@ impl AppState {
         })
     }
 
-    pub(crate) fn upsert_pending_result(
+    pub(crate) async fn upsert_pending_result(
         &self,
         nostr_pubkey: String,
         handle: String,
@@ -141,6 +149,7 @@ impl AppState {
     ) -> anyhow::Result<AccountLinkRecord> {
         self.store
             .upsert_pending_opt_in(&nostr_pubkey, &handle, crosspost_enabled)
+            .await
     }
 
     pub(crate) fn enqueue_provisioning(&self, nostr_pubkey: &str, handle: &str) {
@@ -148,7 +157,7 @@ impl AppState {
             .enqueue(nostr_pubkey.to_string(), handle.to_string());
     }
 
-    pub(crate) fn upsert_ready(
+    pub(crate) async fn upsert_ready(
         &self,
         nostr_pubkey: String,
         handle: String,
@@ -157,16 +166,19 @@ impl AppState {
         if self
             .store
             .get_by_pubkey(&nostr_pubkey)
+            .await
             .ok()
             .flatten()
             .is_none()
         {
             let _ = self
                 .store
-                .upsert_pending_opt_in(&nostr_pubkey, &handle, true);
+                .upsert_pending_opt_in(&nostr_pubkey, &handle, true)
+                .await;
         }
         self.store
             .mark_ready(&nostr_pubkey, &did)
+            .await
             .expect("failed to mark account link ready")
     }
 
@@ -182,18 +194,18 @@ impl AppState {
             .await
     }
 
-    pub(crate) fn get_by_pubkey_result(
+    pub(crate) async fn get_by_pubkey_result(
         &self,
         nostr_pubkey: &str,
     ) -> anyhow::Result<Option<AccountLinkRecord>> {
-        self.store.get_by_pubkey(nostr_pubkey)
+        self.store.get_by_pubkey(nostr_pubkey).await
     }
 
-    pub(crate) fn disable_by_pubkey_result(
+    pub(crate) async fn disable_by_pubkey_result(
         &self,
         nostr_pubkey: &str,
     ) -> anyhow::Result<Option<AccountLinkRecord>> {
-        self.store.disable(nostr_pubkey)
+        self.store.disable(nostr_pubkey).await
     }
 
     pub(crate) async fn sync_disabled_state(
@@ -207,11 +219,21 @@ impl AppState {
             .await
     }
 
-    pub(crate) fn enable_by_pubkey_result(
+    pub(crate) async fn enable_by_pubkey_result(
         &self,
         nostr_pubkey: &str,
     ) -> anyhow::Result<Option<AccountLinkRecord>> {
-        self.store.enable(nostr_pubkey)
+        self.store.enable(nostr_pubkey).await
+    }
+
+    pub(crate) async fn list_crosspost_status_result(
+        &self,
+        nostr_pubkey: &str,
+        event_ids: &[String],
+    ) -> anyhow::Result<Vec<divine_bridge_db::models::PublishStatusRow>> {
+        self.store
+            .list_crosspost_status(nostr_pubkey, event_ids)
+            .await
     }
 
     pub(crate) async fn sync_enabled_state(
@@ -250,6 +272,10 @@ fn app_with_state(state: AppState) -> Router {
         .route(
             "/api/account-links/:nostr_pubkey/status",
             get(routes::status::handler),
+        )
+        .route(
+            "/api/account-links/:nostr_pubkey/crosspost-status",
+            post(routes::crosspost_status::handler),
         )
         .route(
             "/api/account-links/:nostr_pubkey/disable",
@@ -339,6 +365,7 @@ a { color: var(--primary); }
 <div class="endpoint"><code>POST</code> <code>/api/account-links/opt-in</code> &mdash; Opt-in to ATProto bridge (authenticated)</div>
 <div class="endpoint"><code>POST</code> <code>/api/account-links/provision</code> &mdash; Provision ATProto account (authenticated)</div>
 <div class="endpoint"><code>GET</code> <code>/api/account-links/:pubkey/status</code> &mdash; Check provisioning status (authenticated)</div>
+<div class="endpoint"><code>POST</code> <code>/api/account-links/:pubkey/crosspost-status</code> &mdash; Check per-video crosspost status (authenticated)</div>
 <div class="endpoint"><code>GET</code> <code>/.well-known/atproto-did</code> &mdash; DID resolution</div>
 <div class="endpoint"><code>GET</code> <code>/health</code> &mdash; Health check</div>
 

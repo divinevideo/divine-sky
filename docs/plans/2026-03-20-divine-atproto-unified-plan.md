@@ -130,6 +130,9 @@ When this file conflicts with older repo docs, this file wins.
 - Use the NIP-71 `d` tag as `rkey` when valid; otherwise derive a deterministic stable key.
 - Keep a durable `record_mappings` table keyed by `nostr_event_id`.
 - On NIP-09 deletion, delete the mapped AT record and preserve the mapping row as tombstoned provenance.
+- Expose per-video crosspost status through the internal account-link control plane, scoped by Nostr pubkey and queried in bounded batches.
+- Treat `publish_jobs.state = 'failed'` with `completed_at IS NULL` as retrying, not as terminal failure. Terminal failure requires `completed_at IS NOT NULL`.
+- Never expose raw upstream publish errors to user-facing callers. Map publish errors to a closed reason set before returning them through keycast or mobile.
 
 ### Blob handling
 

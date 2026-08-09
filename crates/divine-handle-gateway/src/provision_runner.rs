@@ -80,10 +80,10 @@ impl ProvisioningClient {
             .error_for_status()
             .context("provisioning request returned non-success status")?;
 
-        Ok(response
+        response
             .json::<ProvisionResponse>()
             .await
-            .context("failed to decode provisioning response")?)
+            .context("failed to decode provisioning response")
     }
 }
 
@@ -248,6 +248,7 @@ impl ProvisionRunner {
             Ok(response) => {
                 self.store
                     .mark_ready(nostr_pubkey, &response.did)
+                    .await
                     .context("failed to mark account link ready")?;
                 self.sync_ready_state(nostr_pubkey, handle, &response.did)
                     .await?;
@@ -256,6 +257,7 @@ impl ProvisionRunner {
                 let message = error.to_string();
                 self.store
                     .mark_failed(nostr_pubkey, None, &message)
+                    .await
                     .context("failed to mark account link failed")?;
                 self.sync_failed_state(nostr_pubkey, handle, &message)
                     .await?;

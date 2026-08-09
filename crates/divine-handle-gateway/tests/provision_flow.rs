@@ -85,6 +85,7 @@ fn build_app(
 ) -> axum::Router {
     let config = AppConfig {
         database_url,
+        use_database_pool: false,
         keycast_atproto_token: "test-keycast-token".to_string(),
         atproto_provisioning_url: provision_url,
         atproto_provisioning_token: None,

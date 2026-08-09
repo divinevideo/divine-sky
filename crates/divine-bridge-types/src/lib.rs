@@ -6,6 +6,9 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+pub mod crosspost_status;
+pub use crosspost_status::*;
+
 // ---------------------------------------------------------------------------
 // Nostr types
 // ---------------------------------------------------------------------------
@@ -119,6 +122,12 @@ impl std::fmt::Display for PublishState {
         f.write_str(self.as_str())
     }
 }
+
+/// Marker the video service returns when a DID exhausts its daily upload cap.
+///
+/// Scheduling treats it as a throttle rather than a failed attempt, and status
+/// reporting maps it to a quota reason, so both must recognise the same token.
+pub const UPLOAD_QUOTA_ERROR_MARKER: &str = "daily_vid_limit_exceeded";
 
 /// Source lane for a publish job.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

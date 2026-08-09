@@ -10,6 +10,7 @@ pub async fn handler(
 ) -> Result<Json<AccountLinkRecord>, StatusCode> {
     let record = state
         .disable_by_pubkey_result(&nostr_pubkey)
+        .await
         .map_err(|error| {
             tracing::error!(error = %error, "failed to disable account link");
             StatusCode::INTERNAL_SERVER_ERROR

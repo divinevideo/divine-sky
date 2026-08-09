@@ -9,6 +9,7 @@ path = "src/main.rs"
 
 [dependencies]
 divine-bridge-db = { path = "../divine-bridge-db" }
+divine-bridge-types = { path = "../divine-bridge-types" }
 anyhow = { workspace = true }
 axum = { version = "0.7", features = ["macros", "json"] }
 chrono = { workspace = true }
