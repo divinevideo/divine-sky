@@ -63,6 +63,9 @@ completed_failure='[{"conclusion":"failure","status":"completed"}]'
 completed_neutral='[{"conclusion":"neutral","status":"completed"}]'
 in_progress='[{"conclusion":"","status":"in_progress"}]'
 no_runs='[]'
+# gh run list returns newest first, so this is a rerun that failed stacked over
+# an earlier success for the same commit.
+newest_failed='[{"conclusion":"failure","status":"completed"},{"conclusion":"success","status":"completed"}]'
 
 # run_waiter <name> <attempts> <missing-limit> <stub-script>
 run_waiter() {
@@ -127,6 +130,23 @@ expect_fail_matching unknown-conclusion 5 3 "$completed_neutral" "concluded 'neu
 expect_fail_matching no-run 99 3 "$no_runs" "No Rust workflow run on main"
 
 expect_fail_matching never-completes 3 99 "$in_progress" "Timed out waiting"
+
+# Only the newest completed run decides. Reading any other element, or treating
+# "some run succeeded" as success, would publish off a superseded green run.
+expect_fail_matching newest-run-decides 5 3 "$newest_failed" "concluded 'failure'"
+
+# `gh run list --commit ""` matches an unrelated commit's run, so an empty
+# target-sha from the resolve-ref job must stop the gate, not widen it.
+if env -u HEAD_SHA "$waiter" >"$tmp_dir/out-missing-head-sha" 2>&1; then
+  echo "expected an unset HEAD_SHA to fail:" >&2
+  cat "$tmp_dir/out-missing-head-sha" >&2
+  exit 1
+fi
+if ! grep -q "HEAD_SHA" "$tmp_dir/out-missing-head-sha"; then
+  echo "expected an unset HEAD_SHA to say so:" >&2
+  cat "$tmp_dir/out-missing-head-sha" >&2
+  exit 1
+fi
 
 # The narrow query is the whole "must have landed on main" guarantee, so assert
 # it directly as well as through the stub's wider-query behaviour above.
