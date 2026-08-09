@@ -477,3 +477,72 @@ async fn crosspost_status_returns_internal_error_on_publish_status_query_failure
 
     assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
 }
+
+#[tokio::test]
+#[serial]
+async fn crosspost_status_mixed_batch_answers_in_request_order() {
+    let database_url = test_database_url();
+    reset_database(&database_url);
+
+    let queued_event_id = format!("{:064x}", 0x9ee1u128);
+    let unknown_event_id = format!("{:064x}", 0x4e04u128);
+    let at_uri = "at://did:plc:alice/app.bsky.feed.post/orderedrecordkey";
+    let cid = "bafyreialiceorderedcidvalue";
+
+    {
+        let mut conn =
+            PgConnection::establish(&database_url).expect("test database should be reachable");
+        insert_ready_account(
+            &mut conn,
+            ALICE_PUBKEY,
+            "alice.divine.video",
+            "did:plc:alice",
+        );
+        insert_publish_job(&mut conn, ALICE_EVENT_ID, ALICE_PUBKEY, "published");
+        insert_published_mapping(&mut conn, ALICE_EVENT_ID, "did:plc:alice", at_uri, cid);
+        insert_publish_job(&mut conn, &queued_event_id, ALICE_PUBKEY, "pending");
+    }
+
+    let name_server = mockito::Server::new_async().await;
+    let app = build_app(database_url, name_server.url());
+
+    // Deliberately not sorted and not the row order the join returns: mobile
+    // pairs each answer with the request slot it sent, so the response must
+    // echo the requested sequence including IDs with no publish job at all.
+    let requested = vec![
+        queued_event_id.clone(),
+        unknown_event_id.clone(),
+        ALICE_EVENT_ID.to_string(),
+    ];
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!(
+                    "/api/account-links/{ALICE_PUBKEY}/crosspost-status"
+                ))
+                .header("content-type", "application/json")
+                .header("authorization", AUTH_HEADER)
+                .body(Body::from(
+                    json!({"nostr_event_ids": requested}).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let payload = response_json(response).await;
+    let videos = payload["videos"].as_array().expect("videos to be an array");
+
+    assert_eq!(videos.len(), requested.len());
+    for (index, expected_event_id) in requested.iter().enumerate() {
+        assert_eq!(videos[index]["nostr_event_id"], *expected_event_id);
+    }
+    assert_eq!(videos[0]["status"], "queued");
+    assert_eq!(videos[1]["status"], "not_applicable");
+    assert_eq!(videos[2]["status"], "published");
+    assert_eq!(videos[2]["at_uri"], at_uri);
+    assert_eq!(videos[2]["cid"], cid);
+}

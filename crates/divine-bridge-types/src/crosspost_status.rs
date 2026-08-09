@@ -427,6 +427,17 @@ mod tests {
     }
 
     #[test]
+    fn published_job_without_a_mapped_uri_reports_removed() {
+        let mut job = base_job("published");
+        job.record_status = Some("published".to_string());
+        let status =
+            derive_crosspost_status(EVENT_ID.to_string(), Some(&ready_account()), Some(&job));
+        assert_eq!(status.status, CrosspostStatus::Removed);
+        assert!(status.at_uri.is_none());
+        assert!(status.cid.is_none());
+    }
+
+    #[test]
     fn unknown_job_state_reports_internal_failure() {
         let status = derive_crosspost_status(
             EVENT_ID.to_string(),
