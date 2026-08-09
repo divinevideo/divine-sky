@@ -22,6 +22,25 @@ cat >"$tmp_dir/bin/gh" <<'STUB'
 attempt="$(cat "$GH_STUB_STATE" 2>/dev/null || echo 0)"
 attempt=$((attempt + 1))
 echo "$attempt" >"$GH_STUB_STATE"
+printf '%s\n' "$*" >>"$GH_STUB_ARGV"
+
+# The query itself is the gate's guarantee: `--event push` on `rust.yml` for the
+# target commit is the only reason "has landed on main" is true. Model a wider
+# query the way GitHub would answer it -- the commit's pull_request run is
+# visible, and reports success -- so dropping any of those flags turns the
+# no-run cases green and fails this suite.
+query_is_narrow=1
+for required in "--workflow rust.yml" "--event push" "--commit $HEAD_SHA"; do
+  case " $* " in
+    *" $required "*) ;;
+    *) query_is_narrow=0 ;;
+  esac
+done
+if [[ "$query_is_narrow" -eq 0 ]]; then
+  echo '[{"conclusion":"success","status":"completed"}]'
+  exit 0
+fi
+
 response="$(printf '%s\n' "$GH_STUB_SCRIPT" | sed -n "${attempt}p")"
 if [[ -z "$response" ]]; then
   response="$(printf '%s\n' "$GH_STUB_SCRIPT" | tail -n 1)"
@@ -52,7 +71,8 @@ run_waiter() {
   export MISSING_RUN_ATTEMPTS="$3"
   export GH_STUB_SCRIPT="$4"
   export GH_STUB_STATE="$tmp_dir/state-$name"
-  rm -f "$GH_STUB_STATE"
+  export GH_STUB_ARGV="$tmp_dir/argv-$name"
+  rm -f "$GH_STUB_STATE" "$GH_STUB_ARGV"
   set +e
   "$waiter" >"$tmp_dir/out-$name" 2>&1
   local status=$?
@@ -107,5 +127,15 @@ expect_fail_matching unknown-conclusion 5 3 "$completed_neutral" "concluded 'neu
 expect_fail_matching no-run 99 3 "$no_runs" "No Rust workflow run on main"
 
 expect_fail_matching never-completes 3 99 "$in_progress" "Timed out waiting"
+
+# The narrow query is the whole "must have landed on main" guarantee, so assert
+# it directly as well as through the stub's wider-query behaviour above.
+for required in "--workflow rust.yml" "--event push" "--commit $HEAD_SHA"; do
+  if ! grep -qF -- "$required" "$tmp_dir/argv-passing-run"; then
+    echo "expected the gate to query gh with '$required':" >&2
+    cat "$tmp_dir/argv-passing-run" >&2
+    exit 1
+  fi
+done
 
 echo "rust-gate waiter self-tests passed"
