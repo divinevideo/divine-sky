@@ -76,7 +76,16 @@ can make pod restarts pull a new image without a coreconfig manifest diff.
 
 Before relying on the Docker workflow, `divinevideo/divine-sky` must be
 allow-listed in the staging and production Workload Identity providers in
-`../divine-iac-coreconfig`. The repository also needs these GitHub variables:
+`../divine-iac-coreconfig`.
+
+Scope that allow-list to pushes on `main`, not to the repository alone. The
+build job runs on pull requests too, and a pull request can edit the workflow it
+runs under. Repository-only scoping therefore lets any branch that can open a
+pull request mint the image-writer credential; binding the provider condition to
+the `push` event on `main` is what actually keeps an unreviewed branch out of
+`containers-production`.
+
+The repository also needs these GitHub variables:
 
 - `WORKLOAD_IDENTITY_PROVIDER_STAGING`
 - `SERVICE_ACCOUNT_STAGING`
