@@ -58,7 +58,18 @@ Response:
       "nostr_event_id": "<full 64-hex event id>",
       "status": "published",
       "at_uri": "at://did:plc:.../app.bsky.feed.post/...",
-      "cid": "bafy..."
+      "cid": "bafy...",
+      "updated_at": "2026-08-04T20:00:00Z"
+    },
+    {
+      "nostr_event_id": "<full 64-hex event id>",
+      "status": "retrying",
+      "failure": {
+        "reason": "quota",
+        "retryable": true,
+        "next_attempt_at": "2026-08-04T21:00:00Z"
+      },
+      "updated_at": "2026-08-04T20:00:00Z"
     }
   ]
 }
@@ -66,10 +77,23 @@ Response:
 
 Supported `videos[].status` values are `not_applicable`, `queued`, `publishing`, `published`, `retrying`, `failed`, and `removed`.
 
+`at_uri`, `cid`, `failure`, and `updated_at` are omitted when they do not apply, so treat every one of them as optional.
+
+`failure` is present for `retrying` and `failed` only:
+
+- `failure.reason` is one of `quota`, `unsupported`, or `internal`. It is a display hint, not a status.
+- `failure.retryable` is `true` while the job still has attempts left, and `false` once it is terminal.
+- `failure.next_attempt_at` is set only while `retryable` is `true`, and carries the backoff or quota-park deadline.
+
+Response entries are returned in the same order as `nostr_event_ids`, one entry per requested ID.
+
 Privacy rules:
 
 - The path pubkey is authoritative.
 - Event IDs without a publish job for that pubkey return `not_applicable`.
+- Event IDs whose job completed without writing a record — an unsupported kind, an
+  unverified signature, or a user who was not opted in — also return `not_applicable`.
+  `removed` means a record existed and is no longer published.
 - Event IDs owned by another pubkey must never return that user's `at_uri` or `cid`.
 - Raw `publish_jobs.error` text must never pass through the response.
 

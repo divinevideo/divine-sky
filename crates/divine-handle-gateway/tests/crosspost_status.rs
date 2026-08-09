@@ -546,3 +546,51 @@ async fn crosspost_status_mixed_batch_answers_in_request_order() {
     assert_eq!(videos[2]["at_uri"], at_uri);
     assert_eq!(videos[2]["cid"], cid);
 }
+
+#[tokio::test]
+#[serial]
+async fn crosspost_status_completed_job_without_mapping_reports_not_applicable() {
+    let database_url = test_database_url();
+    reset_database(&database_url);
+
+    {
+        let mut conn =
+            PgConnection::establish(&database_url).expect("test database should be reachable");
+        insert_ready_account(
+            &mut conn,
+            ALICE_PUBKEY,
+            "alice.divine.video",
+            "did:plc:alice",
+        );
+        // The pipeline reports a skip (unsupported kind, unverified signature, not
+        // opted in) as successful completion, so the job lands in `published` with
+        // no record mapping. Nothing reached Bluesky, so this must not read as a
+        // post that was taken down.
+        insert_publish_job(&mut conn, ALICE_EVENT_ID, ALICE_PUBKEY, "published");
+    }
+
+    let name_server = mockito::Server::new_async().await;
+    let app = build_app(database_url, name_server.url());
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!(
+                    "/api/account-links/{ALICE_PUBKEY}/crosspost-status"
+                ))
+                .header("content-type", "application/json")
+                .header("authorization", AUTH_HEADER)
+                .body(Body::from(
+                    json!({"nostr_event_ids": [ALICE_EVENT_ID]}).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let payload = response_json(response).await;
+    assert_eq!(payload["videos"][0]["status"], "not_applicable");
+    assert!(payload["videos"][0]["at_uri"].is_null());
+}

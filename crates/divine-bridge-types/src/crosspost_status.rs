@@ -124,20 +124,28 @@ pub fn derive_crosspost_status(
             failure: None,
             updated_at: Some(job.updated_at),
         },
+        // A completed job does not prove a record was ever written: the pipeline
+        // reports skips (unsupported kind, unverified signature, not opted in) as
+        // successful completion, which the scheduler stores as `published` with no
+        // row in `record_mappings`. Only an actual mapping that is no longer
+        // published means the post was taken down; a job with no mapping at all
+        // never reached Bluesky, so it is not applicable rather than removed.
         state if state == PublishState::Published.as_str() => {
-            if job.record_status.as_deref() == Some(RecordStatus::Published.as_str())
-                && job.at_uri.is_some()
-            {
-                CrosspostVideoStatus {
-                    nostr_event_id,
-                    status: CrosspostStatus::Published,
-                    at_uri: job.at_uri.clone(),
-                    cid: job.cid.clone(),
-                    failure: None,
-                    updated_at: Some(job.updated_at),
+            match (job.record_status.as_deref(), job.at_uri.as_ref()) {
+                (Some(record_status), Some(_))
+                    if record_status == RecordStatus::Published.as_str() =>
+                {
+                    CrosspostVideoStatus {
+                        nostr_event_id,
+                        status: CrosspostStatus::Published,
+                        at_uri: job.at_uri.clone(),
+                        cid: job.cid.clone(),
+                        failure: None,
+                        updated_at: Some(job.updated_at),
+                    }
                 }
-            } else {
-                removed(nostr_event_id, job.updated_at)
+                (Some(_), _) => removed(nostr_event_id, job.updated_at),
+                (None, _) => not_applicable(nostr_event_id),
             }
         }
         state if state == PublishState::Failed.as_str() && job.completed_at.is_none() => {
@@ -427,14 +435,29 @@ mod tests {
     }
 
     #[test]
-    fn published_job_without_a_mapped_uri_reports_removed() {
+    fn completed_job_without_a_record_mapping_reports_not_applicable() {
+        // The pipeline reports an unsupported kind or an unverified signature as a
+        // skip, and the scheduler stores that as a completed `published` job with no
+        // record mapping. Nothing was ever posted, so this must not read as removed.
+        let status = derive_crosspost_status(
+            EVENT_ID.to_string(),
+            Some(&ready_account()),
+            Some(&base_job("published")),
+        );
+        assert_eq!(status.status, CrosspostStatus::NotApplicable);
+        assert!(status.at_uri.is_none());
+        assert!(status.cid.is_none());
+    }
+
+    #[test]
+    fn mapped_record_without_a_uri_reports_removed() {
+        // A mapping row means a record existed. Without a usable URI it is not
+        // something the app can link to, so report it as removed rather than live.
         let mut job = base_job("published");
         job.record_status = Some("published".to_string());
         let status =
             derive_crosspost_status(EVENT_ID.to_string(), Some(&ready_account()), Some(&job));
         assert_eq!(status.status, CrosspostStatus::Removed);
-        assert!(status.at_uri.is_none());
-        assert!(status.cid.is_none());
     }
 
     #[test]
