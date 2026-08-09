@@ -79,11 +79,17 @@ allow-listed in the staging and production Workload Identity providers in
 `../divine-iac-coreconfig`.
 
 Scope that allow-list to pushes on `main`, not to the repository alone. The
-build job runs on pull requests too, and a pull request can edit the workflow it
-runs under. Repository-only scoping therefore lets any branch that can open a
-pull request mint the image-writer credential; binding the provider condition to
-the `push` event on `main` is what actually keeps an unreviewed branch out of
-`containers-production`.
+build job also runs on pull requests, and a pull request in this repository can
+edit the workflow it runs under, so under repository-only scoping the workflow's
+own step-level guard is the last thing between an unreviewed branch and
+`containers-production`. Fork pull requests are not part of this: they run with a
+read-only token and cannot mint the credential at all.
+
+Adding `divine-sky` to the existing list does not achieve that on its own. The
+shared provider condition and the image-writer impersonation binding are both
+keyed on repository today and map, but do not condition on, the ref, so scoping
+by event and ref is a change to the shared workload-identity module in
+`../divine-iac-coreconfig`.
 
 The repository also needs these GitHub variables:
 
