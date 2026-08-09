@@ -93,7 +93,9 @@ Privacy rules:
 - Event IDs without a publish job for that pubkey return `not_applicable`.
 - Event IDs whose job completed without writing a record — an unsupported kind, an
   unverified signature, or a user who was not opted in — also return `not_applicable`.
-  `removed` means a record existed and is no longer published.
+- `removed` means the crosspost was withdrawn: either a published record that is no
+  longer published, or a crosspost cancelled by a delete that landed before it was
+  written.
 - Event IDs owned by another pubkey must never return that user's `at_uri` or `cid`.
 - Raw `publish_jobs.error` text must never pass through the response.
 
