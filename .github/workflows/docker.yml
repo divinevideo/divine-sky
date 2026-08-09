@@ -73,6 +73,9 @@ jobs:
     if: github.event_name != 'pull_request'
     permissions:
       actions: read
+      # Naming any permission drops the rest to none, and this job checks out
+      # the gate script.
+      contents: read
     steps:
       # Checks out the ref this workflow was loaded from, which is where the
       # gate script belongs, not the ref being published.
