@@ -107,7 +107,7 @@ pub fn derive_crosspost_status(
         return not_applicable(nostr_event_id);
     };
 
-    let status = match job.state.as_str() {
+    match job.state.as_str() {
         state if state == PublishState::Pending.as_str() => CrosspostVideoStatus {
             nostr_event_id,
             status: CrosspostStatus::Queued,
@@ -179,9 +179,7 @@ pub fn derive_crosspost_status(
             }),
             updated_at: Some(job.updated_at),
         },
-    };
-
-    status
+    }
 }
 
 fn account_is_ready(account: Option<&CrosspostAccountContext>) -> bool {
