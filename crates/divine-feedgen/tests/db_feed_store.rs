@@ -71,15 +71,21 @@ fn seed_posts(database_url: &str) {
     .expect("appview posts should insert");
 }
 
-// Dropping the store releases its pooled connections and stops r2d2 from
-// scheduling further background connects: queued `add_connection` jobs only
-// hold a `Weak` to the pool. An establish that is already in flight is doing
-// OpenSSL work inside libpq, so give it a moment to finish before the test
-// binary reaches `exit()` and libc runs `OPENSSL_cleanup`. Without this the two
-// race and the process segfaults after the assertions have already passed.
-async fn settle_pool_teardown(store: DbFeedStore) {
-    drop(store);
-    tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+// r2d2 replenishes toward `min_idle` in the background, so the last checkout can
+// leave a `PQconnectdb` running on the pool's thread pool. That handshake is
+// inside OpenSSL, and libc runs `OPENSSL_cleanup` as soon as the test binary
+// reaches `exit()`; the two race and segfault the process after the assertions
+// have already passed.
+//
+// Call this once nothing in the test still holds a pool. Dropping first is what
+// stops r2d2 scheduling more connects, because a queued `add_connection` job
+// only holds a `Weak` to the pool; this wait is for the one that already
+// started.
+async fn settle_pool_teardown() {
+    // An in-flight connect was measured to finish well inside 25ms even with
+    // every core saturated. Keep an order of magnitude of headroom for CI.
+    const SETTLE: std::time::Duration = std::time::Duration::from_millis(250);
+    tokio::time::sleep(SETTLE).await;
 }
 
 #[tokio::test]
@@ -99,7 +105,8 @@ async fn db_feed_store_lists_latest_posts_from_pool() {
         posts,
         vec!["at://did:plc:feedgen/app.bsky.feed.post/newest"]
     );
-    settle_pool_teardown(store).await;
+    drop(store);
+    settle_pool_teardown().await;
 }
 
 #[tokio::test]
@@ -122,7 +129,8 @@ async fn db_feed_store_lists_trending_posts_from_pool() {
             "at://did:plc:feedgen/app.bsky.feed.post/old",
         ]
     );
-    settle_pool_teardown(store).await;
+    drop(store);
+    settle_pool_teardown().await;
 }
 
 #[tokio::test]
@@ -143,5 +151,6 @@ async fn db_feed_store_returns_empty_posts_from_pool() {
         .await
         .expect("trending posts should load")
         .is_empty());
-    settle_pool_teardown(store).await;
+    drop(store);
+    settle_pool_teardown().await;
 }

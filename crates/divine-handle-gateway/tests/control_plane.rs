@@ -67,13 +67,21 @@ fn build_app(database_url: String, name_server_url: String) -> axum::Router {
     app_with_config(config).expect("test app should build")
 }
 
-// r2d2 replenishes toward `min_idle` in the background, so a checkout can leave
-// a `PQconnectdb` running on the pool's thread pool after the store is dropped.
-// That handshake is inside OpenSSL, and libc runs `OPENSSL_cleanup` as soon as
-// the test binary reaches `exit()`; the two race and segfault the process after
-// the assertions have already passed. Let the in-flight connect finish first.
+// r2d2 replenishes toward `min_idle` in the background, so the last checkout can
+// leave a `PQconnectdb` running on the pool's thread pool. That handshake is
+// inside OpenSSL, and libc runs `OPENSSL_cleanup` as soon as the test binary
+// reaches `exit()`; the two race and segfault the process after the assertions
+// have already passed.
+//
+// Call this once nothing in the test still holds a pool. Dropping first is what
+// stops r2d2 scheduling more connects, because a queued `add_connection` job
+// only holds a `Weak` to the pool; this wait is for the one that already
+// started.
 async fn settle_pool_teardown() {
-    tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+    // An in-flight connect was measured to finish well inside 25ms even with
+    // every core saturated. Keep an order of magnitude of headroom for CI.
+    const SETTLE: std::time::Duration = std::time::Duration::from_millis(250);
+    tokio::time::sleep(SETTLE).await;
 }
 
 #[tokio::test]
@@ -104,6 +112,7 @@ async fn control_plane_health_endpoints_are_public() {
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK, "path {path}");
     }
+    drop(app);
     settle_pool_teardown().await;
 }
 
@@ -560,6 +569,7 @@ async fn control_plane_enable_re_enables_disabled_account() {
     assert_eq!(payload["crosspost_enabled"], true);
     assert_eq!(payload["provisioning_state"], "ready");
     assert!(payload["disabled_at"].is_null());
+    drop(app);
     settle_pool_teardown().await;
 }
 
