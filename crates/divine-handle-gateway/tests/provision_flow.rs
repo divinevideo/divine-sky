@@ -445,6 +445,7 @@ async fn startup_replay_retries_preexisting_pending_rows() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(payload["provisioning_state"], "ready");
     assert_eq!(payload["did"], "did:plc:replay");
+    drop(runner);
     settle_pool_teardown().await;
 }
 
@@ -508,6 +509,7 @@ async fn startup_reconciliation_republishes_ready_rows() {
 
     keycast_ready_mock.assert_async().await;
     name_server_ready_mock.assert_async().await;
+    drop(runner);
     settle_pool_teardown().await;
 }
 
@@ -571,6 +573,7 @@ async fn startup_reconciliation_republishes_failed_rows() {
 
     keycast_failed_mock.assert_async().await;
     name_server_failed_mock.assert_async().await;
+    drop(runner);
     settle_pool_teardown().await;
 }
 
@@ -634,6 +637,7 @@ async fn startup_reconciliation_republishes_disabled_rows() {
 
     keycast_disabled_mock.assert_async().await;
     name_server_disabled_mock.assert_async().await;
+    drop(runner);
     settle_pool_teardown().await;
 }
 
