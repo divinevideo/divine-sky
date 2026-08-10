@@ -1,5 +1,5 @@
 mod skeleton;
-pub use skeleton::FeedStore;
+pub use skeleton::{DbFeedStore, FeedStore};
 
 use std::sync::Arc;
 

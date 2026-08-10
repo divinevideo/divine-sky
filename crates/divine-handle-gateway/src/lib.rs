@@ -75,9 +75,6 @@ pub struct AppState {
 #[derive(Debug, Clone)]
 pub struct AppConfig {
     pub database_url: String,
-    // TODO(#45): Remove this test escape hatch once pooled libpq teardown is
-    // stable enough for integration tests to cover the production path.
-    pub use_database_pool: bool,
     pub keycast_atproto_token: String,
     pub atproto_provisioning_url: String,
     pub atproto_provisioning_token: Option<String>,
@@ -91,7 +88,6 @@ impl AppConfig {
         Ok(Self {
             database_url: std::env::var("DATABASE_URL")
                 .context("DATABASE_URL must be set for handle gateway")?,
-            use_database_pool: true,
             keycast_atproto_token: std::env::var("KEYCAST_ATPROTO_TOKEN")
                 .context("KEYCAST_ATPROTO_TOKEN must be set for handle gateway")?,
             atproto_provisioning_url: std::env::var("ATPROTO_PROVISIONING_URL")
@@ -109,11 +105,7 @@ impl AppConfig {
 
 impl AppState {
     pub(crate) fn from_config(config: AppConfig) -> anyhow::Result<Self> {
-        let store = if config.use_database_pool {
-            store::DbStore::connect(&config.database_url)?
-        } else {
-            store::DbStore::connect_single(&config.database_url)?
-        };
+        let store = store::DbStore::connect(&config.database_url)?;
         let name_server_client = name_server_client::NameServerClient::new(
             config.atproto_name_server_sync_url,
             config.atproto_name_server_sync_token,
