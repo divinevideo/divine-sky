@@ -68,42 +68,10 @@ require_cmd() {
   fi
 }
 
-run_cargo_test_allowing_libpq_teardown_segv() {
-  local log_file
-  log_file="$(mktemp)"
-
-  set +e
-  cargo test "$@" 2>&1 | tee "$log_file"
-  local status="${PIPESTATUS[0]}"
-  set -e
-
-  if [[ "$status" -eq 0 ]]; then
-    rm -f "$log_file"
-    return 0
-  fi
-
-  if grep -q "signal: 11, SIGSEGV" "$log_file" \
-    && grep -q "test result: ok" "$log_file" \
-    && ! grep -q "FAILED" "$log_file"; then
-    echo "accepted known pooled libpq teardown SIGSEGV after successful tests: cargo test $*" >&2
-    rm -f "$log_file"
-    return 0
-  fi
-
-  rm -f "$log_file"
-  return "$status"
-}
-
 require_cmd cargo
 configure_libpq
 
 cargo check --workspace
 cargo test -p divine-atbridge
 cargo test -p divine-video-worker
-cargo test --workspace \
-  --exclude divine-feedgen \
-  --exclude divine-handle-gateway \
-  --exclude divine-labeler
-run_cargo_test_allowing_libpq_teardown_segv -p divine-feedgen
-run_cargo_test_allowing_libpq_teardown_segv -p divine-handle-gateway
-run_cargo_test_allowing_libpq_teardown_segv -p divine-labeler
+cargo test --workspace
