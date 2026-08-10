@@ -135,6 +135,15 @@ async fn get_json(app: axum::Router, uri: &str, auth: &str) -> (StatusCode, serd
     (status, payload)
 }
 
+// r2d2 replenishes toward `min_idle` in the background, so a checkout can leave
+// a `PQconnectdb` running on the pool's thread pool after the store is dropped.
+// That handshake is inside OpenSSL, and libc runs `OPENSSL_cleanup` as soon as
+// the test binary reaches `exit()`; the two race and segfault the process after
+// the assertions have already passed. Let the in-flight connect finish first.
+async fn settle_pool_teardown() {
+    tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+}
+
 #[tokio::test]
 #[serial]
 async fn successful_provision_syncs_ready_state_to_name_server() {
@@ -227,6 +236,7 @@ async fn successful_provision_syncs_ready_state_to_name_server() {
     provision_mock.assert_async().await;
     keycast_ready_mock.assert_async().await;
     sync_ready_mock.assert_async().await;
+    settle_pool_teardown().await;
 }
 
 #[tokio::test]
@@ -316,6 +326,7 @@ async fn failed_provision_syncs_failed_state_to_keycast_and_name_server() {
     provision_mock.assert_async().await;
     keycast_failed_mock.assert_async().await;
     sync_failed_mock.assert_async().await;
+    settle_pool_teardown().await;
 }
 
 #[tokio::test]
@@ -424,6 +435,7 @@ async fn startup_replay_retries_preexisting_pending_rows() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(payload["provisioning_state"], "ready");
     assert_eq!(payload["did"], "did:plc:replay");
+    settle_pool_teardown().await;
 }
 
 #[tokio::test]
@@ -486,6 +498,7 @@ async fn startup_reconciliation_republishes_ready_rows() {
 
     keycast_ready_mock.assert_async().await;
     name_server_ready_mock.assert_async().await;
+    settle_pool_teardown().await;
 }
 
 #[tokio::test]
@@ -548,6 +561,7 @@ async fn startup_reconciliation_republishes_failed_rows() {
 
     keycast_failed_mock.assert_async().await;
     name_server_failed_mock.assert_async().await;
+    settle_pool_teardown().await;
 }
 
 #[tokio::test]
@@ -610,6 +624,7 @@ async fn startup_reconciliation_republishes_disabled_rows() {
 
     keycast_disabled_mock.assert_async().await;
     name_server_disabled_mock.assert_async().await;
+    settle_pool_teardown().await;
 }
 
 #[tokio::test]
@@ -698,4 +713,5 @@ async fn disable_syncs_disabled_state_to_name_server() {
     assert_eq!(response.status(), StatusCode::OK);
     keycast_disabled_mock.assert_async().await;
     sync_disabled_mock.assert_async().await;
+    settle_pool_teardown().await;
 }

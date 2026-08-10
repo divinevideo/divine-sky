@@ -93,10 +93,15 @@ fn build_app(database_url: String) -> axum::Router {
     app_with_state(state)
 }
 
-fn keep_pool_alive_through_process_teardown<T>(value: T) {
-    // The coverage runner records the assertions but loses this test target's
-    // data if libpq segfaults while the r2d2 pool drops during process teardown.
-    std::mem::forget(value);
+// Dropping the store releases its pooled connections and stops r2d2 from
+// scheduling further background connects: queued `add_connection` jobs only
+// hold a `Weak` to the pool. An establish that is already in flight is doing
+// OpenSSL work inside libpq, so give it a moment to finish before the test
+// binary reaches `exit()` and libc runs `OPENSSL_cleanup`. Without this the two
+// race and the process segfaults after the assertions have already passed.
+async fn settle_pool_teardown<T>(value: T) {
+    drop(value);
+    tokio::time::sleep(std::time::Duration::from_millis(250)).await;
 }
 
 #[test]
@@ -220,7 +225,7 @@ async fn webhook_route_persists_labels_through_pooled_store() {
             )
         ]
     );
-    keep_pool_alive_through_process_teardown(app);
+    settle_pool_teardown(app).await;
 }
 
 #[tokio::test]
@@ -275,5 +280,5 @@ async fn webhook_route_falls_back_to_sha_uri_through_pooled_store() {
             "human".to_string()
         )]
     );
-    keep_pool_alive_through_process_teardown(app);
+    settle_pool_teardown(app).await;
 }

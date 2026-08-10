@@ -74,10 +74,15 @@ fn seed_record_mapping(database_url: &str) {
     );
 }
 
-fn keep_pool_alive_through_process_teardown(store: DbStore) {
-    // The coverage runner records the assertions but loses this test target's
-    // data if libpq segfaults while the r2d2 pool drops during process teardown.
-    std::mem::forget(store);
+// Dropping the store releases its pooled connections and stops r2d2 from
+// scheduling further background connects: queued `add_connection` jobs only
+// hold a `Weak` to the pool. An establish that is already in flight is doing
+// OpenSSL work inside libpq, so give it a moment to finish before the test
+// binary reaches `exit()` and libc runs `OPENSSL_cleanup`. Without this the two
+// race and the process segfaults after the assertions have already passed.
+async fn settle_pool_teardown(store: DbStore) {
+    drop(store);
+    tokio::time::sleep(std::time::Duration::from_millis(250)).await;
 }
 
 #[tokio::test]
@@ -149,5 +154,5 @@ async fn db_store_exercises_labeler_event_queries_through_pool() {
     assert_eq!(events.len(), 1);
     assert_eq!(events[0].seq, second.seq);
     assert_eq!(events[0].val, "!takedown");
-    keep_pool_alive_through_process_teardown(store);
+    settle_pool_teardown(store).await;
 }

@@ -67,6 +67,15 @@ fn build_app(database_url: String, name_server_url: String) -> axum::Router {
     app_with_config(config).expect("test app should build")
 }
 
+// r2d2 replenishes toward `min_idle` in the background, so a checkout can leave
+// a `PQconnectdb` running on the pool's thread pool after the store is dropped.
+// That handshake is inside OpenSSL, and libc runs `OPENSSL_cleanup` as soon as
+// the test binary reaches `exit()`; the two race and segfault the process after
+// the assertions have already passed. Let the in-flight connect finish first.
+async fn settle_pool_teardown() {
+    tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+}
+
 #[tokio::test]
 #[serial]
 async fn control_plane_health_endpoints_are_public() {
@@ -95,6 +104,7 @@ async fn control_plane_health_endpoints_are_public() {
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK, "path {path}");
     }
+    settle_pool_teardown().await;
 }
 
 #[tokio::test]
@@ -160,6 +170,7 @@ async fn control_plane_opt_in_creates_pending_status() {
     let payload = response_json(response).await;
     assert_eq!(payload["provisioning_state"], "pending");
     assert_eq!(payload["crosspost_enabled"], true);
+    settle_pool_teardown().await;
 }
 
 #[tokio::test]
@@ -206,6 +217,7 @@ async fn control_plane_opt_in_respects_crosspost_enabled_false() {
     let payload = response_json(response).await;
     assert_eq!(payload["provisioning_state"], "pending");
     assert_eq!(payload["crosspost_enabled"], false);
+    settle_pool_teardown().await;
 }
 
 #[tokio::test]
@@ -277,6 +289,7 @@ async fn control_plane_status_and_export_reflect_provisioned_link() {
         .unwrap();
 
     assert_eq!(export_response.status(), StatusCode::OK);
+    settle_pool_teardown().await;
 }
 
 #[tokio::test]
@@ -338,6 +351,7 @@ async fn control_plane_manual_provision_syncs_ready_state_downstream() {
     assert_eq!(provision_response.status(), StatusCode::OK);
     keycast_sync.assert_async().await;
     name_server_sync.assert_async().await;
+    settle_pool_teardown().await;
 }
 
 #[tokio::test]
@@ -378,6 +392,7 @@ async fn control_plane_export_returns_internal_error_on_store_failure() {
         .unwrap();
 
     assert_eq!(export_response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    settle_pool_teardown().await;
 }
 
 #[tokio::test]
@@ -465,6 +480,7 @@ async fn control_plane_disable_does_not_expose_public_well_known_resolution() {
         .unwrap();
 
     assert_eq!(well_known_disabled.status(), StatusCode::NOT_FOUND);
+    settle_pool_teardown().await;
 }
 
 #[tokio::test]
@@ -544,6 +560,7 @@ async fn control_plane_enable_re_enables_disabled_account() {
     assert_eq!(payload["crosspost_enabled"], true);
     assert_eq!(payload["provisioning_state"], "ready");
     assert!(payload["disabled_at"].is_null());
+    settle_pool_teardown().await;
 }
 
 #[tokio::test]
@@ -578,6 +595,7 @@ async fn control_plane_enable_returns_404_for_unknown_pubkey() {
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    settle_pool_teardown().await;
 }
 
 #[tokio::test]
@@ -640,6 +658,7 @@ async fn control_plane_enable_is_idempotent() {
     assert_eq!(response.status(), StatusCode::OK);
     let payload = response_json(response).await;
     assert_eq!(payload["crosspost_enabled"], true);
+    settle_pool_teardown().await;
 }
 
 #[tokio::test]
@@ -722,4 +741,5 @@ async fn control_plane_enable_returns_bad_gateway_on_sync_failure() {
         .unwrap();
 
     assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+    settle_pool_teardown().await;
 }

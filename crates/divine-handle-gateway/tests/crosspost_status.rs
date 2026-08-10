@@ -130,6 +130,15 @@ fn insert_published_mapping(
     .unwrap();
 }
 
+// r2d2 replenishes toward `min_idle` in the background, so a checkout can leave
+// a `PQconnectdb` running on the pool's thread pool after the store is dropped.
+// That handshake is inside OpenSSL, and libc runs `OPENSSL_cleanup` as soon as
+// the test binary reaches `exit()`; the two race and segfault the process after
+// the assertions have already passed. Let the in-flight connect finish first.
+async fn settle_pool_teardown() {
+    tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+}
+
 #[tokio::test]
 #[serial]
 async fn crosspost_status_requires_bearer_auth() {
@@ -154,6 +163,7 @@ async fn crosspost_status_requires_bearer_auth() {
         .unwrap();
 
     assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    settle_pool_teardown().await;
 }
 
 #[tokio::test]
@@ -184,6 +194,7 @@ async fn crosspost_status_rejects_over_cap_batches() {
         .unwrap();
 
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    settle_pool_teardown().await;
 }
 
 #[tokio::test]
@@ -216,6 +227,7 @@ async fn crosspost_status_unknown_account_reports_not_applicable() {
     let payload = response_json(response).await;
     assert_eq!(payload["account"]["provisioning_state"], "missing");
     assert_eq!(payload["videos"][0]["status"], "not_applicable");
+    settle_pool_teardown().await;
 }
 
 #[tokio::test]
@@ -245,6 +257,7 @@ async fn crosspost_status_empty_batch_returns_empty_videos() {
     assert_eq!(response.status(), StatusCode::OK);
     let payload = response_json(response).await;
     assert_eq!(payload["videos"], json!([]));
+    settle_pool_teardown().await;
 }
 
 #[tokio::test]
@@ -292,6 +305,7 @@ async fn crosspost_status_non_ready_accounts_report_not_applicable() {
         assert_eq!(payload["account"]["provisioning_state"], provisioning_state);
         assert_eq!(payload["videos"][0]["status"], "not_applicable");
     }
+    settle_pool_teardown().await;
 }
 
 #[tokio::test]
@@ -345,6 +359,7 @@ async fn crosspost_status_event_owned_by_another_pubkey_is_not_disclosed() {
     assert_eq!(payload["videos"][0]["status"], "not_applicable");
     assert!(payload["videos"][0]["at_uri"].is_null());
     assert!(payload["videos"][0]["cid"].is_null());
+    settle_pool_teardown().await;
 }
 
 #[tokio::test]
@@ -394,6 +409,7 @@ async fn crosspost_status_published_row_returns_full_at_uri_and_cid() {
     assert_eq!(payload["videos"][0]["status"], "published");
     assert_eq!(payload["videos"][0]["at_uri"], at_uri);
     assert_eq!(payload["videos"][0]["cid"], cid);
+    settle_pool_teardown().await;
 }
 
 #[tokio::test]
@@ -429,6 +445,7 @@ async fn crosspost_status_returns_internal_error_on_account_store_failure() {
         .unwrap();
 
     assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    settle_pool_teardown().await;
 }
 
 #[tokio::test]
@@ -475,6 +492,7 @@ async fn crosspost_status_returns_internal_error_on_publish_status_query_failure
         .unwrap();
 
     assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    settle_pool_teardown().await;
 }
 
 #[tokio::test]
@@ -544,6 +562,7 @@ async fn crosspost_status_mixed_batch_answers_in_request_order() {
     assert_eq!(videos[2]["status"], "published");
     assert_eq!(videos[2]["at_uri"], at_uri);
     assert_eq!(videos[2]["cid"], cid);
+    settle_pool_teardown().await;
 }
 
 #[tokio::test]
@@ -592,4 +611,5 @@ async fn crosspost_status_completed_job_without_mapping_reports_not_applicable()
     let payload = response_json(response).await;
     assert_eq!(payload["videos"][0]["status"], "not_applicable");
     assert!(payload["videos"][0]["at_uri"].is_null());
+    settle_pool_teardown().await;
 }

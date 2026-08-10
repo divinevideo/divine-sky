@@ -71,10 +71,15 @@ fn seed_posts(database_url: &str) {
     .expect("appview posts should insert");
 }
 
-fn keep_pool_alive_through_process_teardown(store: DbFeedStore) {
-    // The coverage runner records the assertions but loses this test target's
-    // data if libpq segfaults while the r2d2 pool drops during process teardown.
-    std::mem::forget(store);
+// Dropping the store releases its pooled connections and stops r2d2 from
+// scheduling further background connects: queued `add_connection` jobs only
+// hold a `Weak` to the pool. An establish that is already in flight is doing
+// OpenSSL work inside libpq, so give it a moment to finish before the test
+// binary reaches `exit()` and libc runs `OPENSSL_cleanup`. Without this the two
+// race and the process segfaults after the assertions have already passed.
+async fn settle_pool_teardown(store: DbFeedStore) {
+    drop(store);
+    tokio::time::sleep(std::time::Duration::from_millis(250)).await;
 }
 
 #[tokio::test]
@@ -94,7 +99,7 @@ async fn db_feed_store_lists_latest_posts_from_pool() {
         posts,
         vec!["at://did:plc:feedgen/app.bsky.feed.post/newest"]
     );
-    keep_pool_alive_through_process_teardown(store);
+    settle_pool_teardown(store).await;
 }
 
 #[tokio::test]
@@ -117,7 +122,7 @@ async fn db_feed_store_lists_trending_posts_from_pool() {
             "at://did:plc:feedgen/app.bsky.feed.post/old",
         ]
     );
-    keep_pool_alive_through_process_teardown(store);
+    settle_pool_teardown(store).await;
 }
 
 #[tokio::test]
@@ -138,5 +143,5 @@ async fn db_feed_store_returns_empty_posts_from_pool() {
         .await
         .expect("trending posts should load")
         .is_empty());
-    keep_pool_alive_through_process_teardown(store);
+    settle_pool_teardown(store).await;
 }
