@@ -45,6 +45,10 @@ fn reset_database(database_url: &str) {
         &mut conn,
         include_str!("../../../migrations/008_publish_job_reserved_rkey/up.sql"),
     );
+    execute_batch(
+        &mut conn,
+        include_str!("../../../migrations/009_publish_job_ineligible_state/up.sql"),
+    );
 }
 
 // Tests in this binary share the database, so they serialize on a
@@ -296,6 +300,60 @@ fn ineligible_finalization_requires_the_current_owner() {
     assert!(ineligible.completed_at.is_some());
     assert!(ineligible.lease_owner.is_none());
     assert!(ineligible.lease_expires_at.is_none());
+}
+
+#[test]
+fn cancel_publish_job_leaves_ineligible_jobs_terminal() {
+    let _guard = test_db_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let database_url = test_database_url();
+    reset_database(&database_url);
+    let mut conn =
+        PgConnection::establish(&database_url).expect("test database should be reachable");
+    enqueue_publish_job(
+        &mut conn,
+        &NewPublishJob {
+            nostr_event_id: "evt-ineligible-delete",
+            nostr_pubkey: "npub1alice",
+            event_created_at: Utc::now(),
+            event_payload: json!({"id": "evt-ineligible-delete"}),
+            job_source: PublishJobSource::Live.as_str(),
+            state: "pending",
+        },
+    )
+    .expect("job should enqueue");
+    claim_next_live_job(&mut conn, "worker-a", Utc::now() + Duration::minutes(5))
+        .expect("claim should work")
+        .expect("job should be claimable");
+    mark_publish_job_ineligible_for_owner(
+        &mut conn,
+        "evt-ineligible-delete",
+        "worker-a",
+        "user has not opted in",
+    )
+    .expect("current owner should mark ineligible");
+
+    let cancelled = cancel_publish_job(
+        &mut conn,
+        &NewPublishJob {
+            nostr_event_id: "evt-ineligible-delete",
+            nostr_pubkey: "npub1alice",
+            event_created_at: Utc::now(),
+            event_payload: json!({
+                "id": "delete-evt",
+                "kind": 5,
+                "tags": [["e", "evt-ineligible-delete"]]
+            }),
+            job_source: PublishJobSource::Live.as_str(),
+            state: "pending",
+        },
+        Some("live delete replay"),
+    )
+    .expect("cancel should preserve terminal ineligible job");
+
+    assert_eq!(cancelled.state, "ineligible");
+    assert_eq!(cancelled.error.as_deref(), Some("user has not opted in"));
 }
 
 #[test]

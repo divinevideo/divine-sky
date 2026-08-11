@@ -63,6 +63,10 @@ const MIGRATIONS: &[EmbeddedMigration] = &[
         name: "008_publish_job_reserved_rkey",
         up_sql: include_str!("../../../migrations/008_publish_job_reserved_rkey/up.sql"),
     },
+    EmbeddedMigration {
+        name: "009_publish_job_ineligible_state",
+        up_sql: include_str!("../../../migrations/009_publish_job_ineligible_state/up.sql"),
+    },
 ];
 
 /// Apply all bridge-owned migrations to `database_url` on startup.
@@ -210,5 +214,54 @@ mod tests {
             "account_links",
             "publish_backfill_state"
         ));
+    }
+
+    #[test]
+    fn migrations_backfill_published_jobs_without_mappings_to_ineligible() {
+        let _guard = test_db_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut conn = PgConnection::establish(&test_database_url())
+            .expect("test database should be reachable");
+
+        conn.batch_execute(
+            "DROP TABLE IF EXISTS operator_actions, record_mappings, moderation_actions, publish_jobs, \
+             asset_manifest, ingest_offsets, provisioning_keys, account_links CASCADE",
+        )
+        .unwrap();
+
+        conn.batch_execute(include_str!("../../../migrations/001_bridge_tables/up.sql"))
+            .expect("seed base schema");
+        conn.batch_execute(include_str!(
+            "../../../migrations/004_publish_job_scheduler/up.sql"
+        ))
+        .expect("seed scheduler schema");
+        conn.batch_execute(include_str!(
+            "../../../migrations/008_publish_job_reserved_rkey/up.sql"
+        ))
+        .expect("seed reserved rkey schema");
+        conn.batch_execute(
+            "INSERT INTO publish_jobs (
+                nostr_event_id, nostr_pubkey, event_created_at, event_payload, job_source, state
+             ) VALUES (
+                'evt-no-mapping', 'npub1alice', NOW(), '{}'::jsonb, 'live', 'published'
+             )",
+        )
+        .expect("seed historical job without mapping");
+
+        run_pending_migrations_on(&mut conn).expect("migration should backfill state");
+
+        #[derive(QueryableByName)]
+        struct StateRow {
+            #[diesel(sql_type = diesel::sql_types::Text)]
+            state: String,
+        }
+
+        let row = diesel::sql_query(
+            "SELECT state FROM publish_jobs WHERE nostr_event_id = 'evt-no-mapping'",
+        )
+        .get_result::<StateRow>(&mut conn)
+        .expect("publish job should exist");
+        assert_eq!(row.state, "ineligible");
     }
 }

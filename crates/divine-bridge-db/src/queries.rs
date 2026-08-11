@@ -1302,7 +1302,7 @@ fn mark_publish_job_skipped(
 /// Cancel a publish job due to a delete signal.
 ///
 /// If the row does not yet exist, inserts a tombstone row in `skipped` state.
-/// Existing `published` and `skipped` rows are left untouched.
+/// Existing terminal rows are left untouched.
 pub fn cancel_publish_job(
     conn: &mut PgConnection,
     tombstone_job: &NewPublishJob,
@@ -1312,6 +1312,7 @@ pub fn cancel_publish_job(
     if let Some(existing) = get_publish_job(conn, nostr_event_id)? {
         if existing.state == PublishState::Published.as_str()
             || existing.state == PublishState::Skipped.as_str()
+            || existing.state == PublishState::Ineligible.as_str()
         {
             return Ok(existing);
         }

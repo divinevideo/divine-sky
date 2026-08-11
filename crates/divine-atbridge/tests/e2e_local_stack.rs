@@ -131,6 +131,10 @@ fn reset_database(database_url: &str) {
         &mut conn,
         include_str!("../../../migrations/008_publish_job_reserved_rkey/up.sql"),
     );
+    execute_batch(
+        &mut conn,
+        include_str!("../../../migrations/009_publish_job_ineligible_state/up.sql"),
+    );
 }
 
 fn test_db_lock() -> &'static Mutex<()> {

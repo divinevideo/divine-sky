@@ -141,13 +141,7 @@ pub fn derive_crosspost_status(
             failure: None,
             updated_at: Some(job.updated_at),
         },
-        state if state == PublishState::Published.as_str() => {
-            tracing::warn!(
-                nostr_event_id = %nostr_event_id,
-                "published publish job has no record mapping"
-            );
-            not_applicable(nostr_event_id)
-        }
+        state if state == PublishState::Published.as_str() => not_applicable(nostr_event_id),
         state if state == PublishState::Ineligible.as_str() => not_applicable(nostr_event_id),
         state if state == PublishState::Failed.as_str() && job.completed_at.is_none() => {
             CrosspostVideoStatus {
@@ -175,7 +169,7 @@ pub fn derive_crosspost_status(
             }),
             updated_at: Some(job.updated_at),
         },
-        state if state == PublishState::Skipped.as_str() => removed(nostr_event_id, job.updated_at),
+        state if state == PublishState::Skipped.as_str() => not_applicable(nostr_event_id),
         _ => CrosspostVideoStatus {
             nostr_event_id,
             status: CrosspostStatus::Failed,
@@ -416,13 +410,13 @@ mod tests {
     }
 
     #[test]
-    fn skipped_job_reports_removed() {
+    fn skipped_job_without_mapping_reports_not_applicable() {
         let status = derive_crosspost_status(
             EVENT_ID.to_string(),
             Some(&ready_account()),
             Some(&base_job("skipped")),
         );
-        assert_eq!(status.status, CrosspostStatus::Removed);
+        assert_eq!(status.status, CrosspostStatus::NotApplicable);
     }
 
     #[test]

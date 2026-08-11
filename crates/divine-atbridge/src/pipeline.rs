@@ -139,7 +139,7 @@ pub enum QueueDecision {
         tombstone_job: PublishJobEnvelope,
     },
     Skip {
-        reason: String,
+        reason: SkipReason,
     },
 }
 
@@ -481,12 +481,12 @@ where
             Ok(true) => {}
             Ok(false) => {
                 return Ok(QueueDecision::Skip {
-                    reason: "invalid signature".to_string(),
+                    reason: SkipReason::InvalidSignature,
                 });
             }
             Err(e) => {
                 return Ok(QueueDecision::Skip {
-                    reason: format!("signature verification error: {e}"),
+                    reason: SkipReason::SignatureError(e.to_string()),
                 });
             }
         }
@@ -502,12 +502,12 @@ where
             Some(a) if a.opted_in => a,
             Some(_) => {
                 return Ok(QueueDecision::Skip {
-                    reason: "user has not opted in".to_string(),
+                    reason: SkipReason::NotOptedIn,
                 });
             }
             None => {
                 return Ok(QueueDecision::Skip {
-                    reason: "unknown pubkey — no account link".to_string(),
+                    reason: SkipReason::UnknownAccount,
                 });
             }
         };
@@ -518,7 +518,7 @@ where
                 Some(id) => id.to_string(),
                 None => {
                     return Ok(QueueDecision::Skip {
-                        reason: "deletion event has no 'e' tag".to_string(),
+                        reason: SkipReason::DeleteMissingTag,
                     });
                 }
             };
@@ -536,7 +536,7 @@ where
             .context("failed to check idempotency")?
         {
             return Ok(QueueDecision::Skip {
-                reason: "event already processed".to_string(),
+                reason: SkipReason::AlreadyProcessed,
             });
         }
 
@@ -549,7 +549,7 @@ where
         }
 
         Ok(QueueDecision::Skip {
-            reason: format!("unsupported event kind: {}", event.kind),
+            reason: SkipReason::UnsupportedKind(event.kind),
         })
     }
 
@@ -1455,9 +1455,110 @@ mod tests {
         }
     }
 
+    async fn assert_prepare_skip(
+        event: NostrEvent,
+        accounts: MockAccountStore,
+        records: MockRecordStore,
+        expected_reason: SkipReason,
+    ) {
+        let pipeline = make_pipeline(accounts, records);
+        let decision = pipeline
+            .prepare_publish_job(&event)
+            .await
+            .expect("prepare should classify event");
+        assert_eq!(
+            decision,
+            QueueDecision::Skip {
+                reason: expected_reason
+            }
+        );
+    }
+
     // -----------------------------------------------------------------------
     // Tests
     // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn prepare_publish_job_returns_typed_skip_reasons() {
+        let mut invalid_signature = make_video_event("test");
+        invalid_signature.content = "tampered".to_string();
+        assert_prepare_skip(
+            invalid_signature.clone(),
+            MockAccountStore {
+                links: vec![account_for(&invalid_signature.pubkey)],
+            },
+            MockRecordStore::new(),
+            SkipReason::InvalidSignature,
+        )
+        .await;
+
+        let mut malformed_signature = make_video_event("test");
+        malformed_signature.sig = "not-a-hex-signature".to_string();
+        assert_prepare_skip(
+            malformed_signature.clone(),
+            MockAccountStore {
+                links: vec![account_for(&malformed_signature.pubkey)],
+            },
+            MockRecordStore::new(),
+            SkipReason::SignatureError("invalid signature hex".to_string()),
+        )
+        .await;
+
+        let not_opted_in_event = make_video_event("test");
+        let mut not_opted_in = account_for(&not_opted_in_event.pubkey);
+        not_opted_in.opted_in = false;
+        assert_prepare_skip(
+            not_opted_in_event,
+            MockAccountStore {
+                links: vec![not_opted_in],
+            },
+            MockRecordStore::new(),
+            SkipReason::NotOptedIn,
+        )
+        .await;
+
+        let unknown_account = make_video_event("test");
+        assert_prepare_skip(
+            unknown_account,
+            MockAccountStore { links: vec![] },
+            MockRecordStore::new(),
+            SkipReason::UnknownAccount,
+        )
+        .await;
+
+        let delete_missing_tag = make_signed_event(5, "", vec![]);
+        assert_prepare_skip(
+            delete_missing_tag.clone(),
+            MockAccountStore {
+                links: vec![account_for(&delete_missing_tag.pubkey)],
+            },
+            MockRecordStore::new(),
+            SkipReason::DeleteMissingTag,
+        )
+        .await;
+
+        let already_processed = make_video_event("test");
+        assert_prepare_skip(
+            already_processed.clone(),
+            MockAccountStore {
+                links: vec![account_for(&already_processed.pubkey)],
+            },
+            MockRecordStore::new().with_processed(vec![already_processed.id.clone()]),
+            SkipReason::AlreadyProcessed,
+        )
+        .await;
+
+        let unsupported = make_signed_event(12345, "unsupported", vec![]);
+        assert_prepare_skip(
+            unsupported.clone(),
+            MockAccountStore {
+                links: vec![account_for(&unsupported.pubkey)],
+            },
+            MockRecordStore::new(),
+            SkipReason::UnsupportedKind(12345),
+        )
+        .await;
+    }
 
     #[tokio::test]
     async fn video_with_text_track_publishes_captions() {
