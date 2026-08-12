@@ -169,7 +169,7 @@ pub fn derive_crosspost_status(
             }),
             updated_at: Some(job.updated_at),
         },
-        state if state == PublishState::Skipped.as_str() => not_applicable(nostr_event_id),
+        state if state == PublishState::Skipped.as_str() => removed(nostr_event_id, job.updated_at),
         _ => CrosspostVideoStatus {
             nostr_event_id,
             status: CrosspostStatus::Failed,
@@ -410,13 +410,13 @@ mod tests {
     }
 
     #[test]
-    fn skipped_job_without_mapping_reports_not_applicable() {
+    fn skipped_job_without_mapping_reports_removed() {
         let status = derive_crosspost_status(
             EVENT_ID.to_string(),
             Some(&ready_account()),
             Some(&base_job("skipped")),
         );
-        assert_eq!(status.status, CrosspostStatus::NotApplicable);
+        assert_eq!(status.status, CrosspostStatus::Removed);
     }
 
     #[test]

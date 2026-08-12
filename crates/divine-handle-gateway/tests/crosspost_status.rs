@@ -624,7 +624,7 @@ async fn crosspost_status_ineligible_job_reports_not_applicable() {
 
 #[tokio::test]
 #[serial]
-async fn crosspost_status_skipped_job_without_mapping_reports_not_applicable() {
+async fn crosspost_status_skipped_job_without_mapping_reports_removed() {
     let database_url = test_database_url();
     reset_database(&database_url);
 
@@ -662,7 +662,7 @@ async fn crosspost_status_skipped_job_without_mapping_reports_not_applicable() {
 
     assert_eq!(response.status(), StatusCode::OK);
     let payload = response_json(response).await;
-    assert_eq!(payload["videos"][0]["status"], "not_applicable");
+    assert_eq!(payload["videos"][0]["status"], "removed");
     assert!(payload["videos"][0]["at_uri"].is_null());
     settle_pool_teardown().await;
 }
