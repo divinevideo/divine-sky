@@ -110,6 +110,37 @@ for metric in lines functions regions; do
   fi
 done
 
+cat >"$tmp_dir/docs-only.diff" <<'DIFF'
+diff --git a/docs/runbooks/example.md b/docs/runbooks/example.md
+--- a/docs/runbooks/example.md
++++ b/docs/runbooks/example.md
+@@ -0,0 +1 @@
++documentation only
+DIFF
+
+COVERAGE_BASE_SUMMARY_PATH="$tmp_dir/base-summary.json" "$checker" \
+  --thresholds "$tmp_dir/thresholds.json" \
+  --lcov "$tmp_dir/covered.info" \
+  --summary-json "$tmp_dir/regressed-lines-summary.json" \
+  --diff "$tmp_dir/docs-only.diff"
+
+cat >"$tmp_dir/production-deletion.diff" <<'DIFF'
+diff --git a/crates/example/src/lib.rs b/crates/example/src/lib.rs
+--- a/crates/example/src/lib.rs
++++ b/crates/example/src/lib.rs
+@@ -10 +9,0 @@
+-covered();
+DIFF
+
+if COVERAGE_BASE_SUMMARY_PATH="$tmp_dir/base-summary.json" "$checker" \
+  --thresholds "$tmp_dir/thresholds.json" \
+  --lcov "$tmp_dir/covered.info" \
+  --summary-json "$tmp_dir/regressed-lines-summary.json" \
+  --diff "$tmp_dir/production-deletion.diff"; then
+  echo "expected production Rust deletion with coverage regression to fail" >&2
+  exit 1
+fi
+
 if "$checker" \
   --thresholds "$tmp_dir/thresholds.json" \
   --lcov "$tmp_dir/covered.info" \
@@ -130,7 +161,7 @@ DIFF
 "$checker" \
   --thresholds "$tmp_dir/thresholds.json" \
   --lcov "$tmp_dir/covered.info" \
-  --summary-json "$tmp_dir/summary.json" \
+  --summary-json "$tmp_dir/regressed-lines-summary.json" \
   --diff "$tmp_dir/test-source.diff"
 
 cat >"$tmp_dir/missing-file.diff" <<'DIFF'

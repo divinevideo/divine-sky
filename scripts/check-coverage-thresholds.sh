@@ -69,12 +69,26 @@ if [[ -z "$diff_path" ]]; then
 fi
 
 changed_path="$(mktemp)"
+production_rust_changed_path="$(mktemp)"
 uncovered_path="$(mktemp)"
 covered_files_path="$(mktemp)"
-trap 'rm -f "$tmp_diff" "$changed_path" "$uncovered_path" "$covered_files_path"' EXIT
+trap 'rm -f "$tmp_diff" "$changed_path" "$production_rust_changed_path" "$uncovered_path" "$covered_files_path"' EXIT
 
-awk '
-  /^\+\+\+ b\// { file = substr($0, 7); next }
+awk -v production_rust_changed_path="$production_rust_changed_path" '
+  function is_production_rust(path) {
+    return path ~ /\.rs$/ && path !~ /(^|\/)tests\//
+  }
+  /^--- a\// {
+    old_file = substr($0, 7)
+    if (is_production_rust(old_file)) print "1" > production_rust_changed_path
+    next
+  }
+  /^\+\+\+ b\// {
+    file = substr($0, 7)
+    if (is_production_rust(file)) print "1" > production_rust_changed_path
+    next
+  }
+  /^\+\+\+ \/dev\/null$/ { file = old_file; next }
   /^@@ / {
     if (file !~ /\.rs$/) next
     # Integration-test sources drive instrumented code but cargo-llvm-cov does
@@ -172,7 +186,7 @@ check_floor lines "$line_pct" "$(jq -r '.global.lines' "$thresholds")"
 check_floor functions "$function_pct" "$(jq -r '.global.functions' "$thresholds")"
 check_floor regions "$region_pct" "$(jq -r '.global.regions' "$thresholds")"
 
-if [[ "$(jq -r '.global.non_decreasing' "$thresholds")" == "true" ]]; then
+if [[ "$(jq -r '.global.non_decreasing' "$thresholds")" == "true" && -s "$production_rust_changed_path" ]]; then
   [[ -f "$base_summary_json_path" ]] || {
     echo "non-decreasing coverage requires COVERAGE_BASE_SUMMARY_PATH" >&2
     exit 2
