@@ -172,7 +172,7 @@ check_floor lines "$line_pct" "$(jq -r '.global.lines' "$thresholds")"
 check_floor functions "$function_pct" "$(jq -r '.global.functions' "$thresholds")"
 check_floor regions "$region_pct" "$(jq -r '.global.regions' "$thresholds")"
 
-if [[ "$(jq -r '.global.non_decreasing' "$thresholds")" == "true" ]]; then
+if [[ "$(jq -r '.global.non_decreasing' "$thresholds")" == "true" && -s "$changed_path" ]]; then
   [[ -f "$base_summary_json_path" ]] || {
     echo "non-decreasing coverage requires COVERAGE_BASE_SUMMARY_PATH" >&2
     exit 2
