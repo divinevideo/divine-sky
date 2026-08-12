@@ -66,11 +66,12 @@ enum PublishJobOutcome {
 
 fn publish_job_outcome(execution: Result<ProcessResult>) -> PublishJobOutcome {
     match execution {
-        Ok(
-            ProcessResult::Published { .. }
-            | ProcessResult::ProfileSynced { .. }
-            | ProcessResult::Deleted { .. },
-        ) => PublishJobOutcome::Completed,
+        Ok(ProcessResult::Published { .. } | ProcessResult::ProfileSynced { .. }) => {
+            PublishJobOutcome::Completed
+        }
+        Ok(ProcessResult::Deleted { .. }) => PublishJobOutcome::Ineligible(
+            "delete event does not publish an ATProto record".to_string(),
+        ),
         Ok(ProcessResult::Skipped { reason }) if reason.should_mark_ineligible() => {
             PublishJobOutcome::Ineligible(reason.to_string())
         }
@@ -847,7 +848,7 @@ mod tests {
     }
 
     #[test]
-    fn publish_job_outcome_maps_side_effect_results_to_completed() {
+    fn publish_job_outcome_maps_record_writes_to_completed() {
         assert_eq!(
             publish_job_outcome(Ok(ProcessResult::Published {
                 at_uri: "at://did:plc:test/app.bsky.feed.post/rkey".to_string(),
@@ -862,11 +863,17 @@ mod tests {
             })),
             PublishJobOutcome::Completed
         );
+    }
+
+    #[test]
+    fn publish_job_outcome_maps_delete_execution_to_ineligible() {
         assert_eq!(
             publish_job_outcome(Ok(ProcessResult::Deleted {
                 at_uri: "at://did:plc:test/app.bsky.feed.post/rkey".to_string(),
             })),
-            PublishJobOutcome::Completed
+            PublishJobOutcome::Ineligible(
+                "delete event does not publish an ATProto record".to_string()
+            )
         );
     }
 
