@@ -43,7 +43,7 @@
       {"path": "crates/divine-atbridge/src/runtime.rs", "line": 513, "reason": "heartbeat DB-error branch is defensive logging around renew_publish_job_lease, whose normal/miss paths are covered directly"},
       {"path": "crates/divine-atbridge/src/runtime.rs", "line": 515, "reason": "heartbeat DB-error branch is defensive logging around renew_publish_job_lease, whose normal/miss paths are covered directly"},
       {"path": "crates/divine-atbridge/src/runtime.rs", "line": 545, "reason": "rustc assigns no counter to the covered question-mark finalization expression"},
-      {"path": "crates/divine-atbridge/src/runtime.rs", "line": 567, "reason": "rustc assigns no counter to the covered question-mark in ineligible finalization; runtime_resilience covers the ineligible worker path"},
+      {"path": "crates/divine-atbridge/src/runtime.rs", "line": 568, "reason": "rustc assigns no counter to the covered question-mark in ineligible finalization; runtime_resilience covers the ineligible worker path"},
       {"path": "crates/divine-atbridge/src/tid.rs", "line": 44, "reason": "compare_exchange_weak retry is a nondeterministic atomic race; monotonic TID behavior is covered by repeated generation"},
       {"path": "crates/divine-bridge-db/src/migrations.rs", "line": 254, "reason": "Diesel QueryableByName derive declaration in migration backfill regression test"},
       {"path": "crates/divine-bridge-db/src/models.rs", "line": 281, "reason": "Diesel QueryableByName derive declaration"},
