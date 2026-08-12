@@ -69,7 +69,10 @@ require_cmd() {
 }
 
 require_cmd cargo
+require_cmd jq
 configure_libpq
+
+bash scripts/wait-for-rust-run.sh --self-test
 
 cargo check --workspace
 cargo test -p divine-atbridge

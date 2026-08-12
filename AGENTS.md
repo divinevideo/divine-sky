@@ -31,6 +31,8 @@ The Rust workspace lives at the repository root in `crates/`. Current crates are
 
 Use `cargo check --workspace` for a fast compile pass and `bash scripts/test-workspace.sh` for the full baseline verification suite. Package-level checks are `cargo test -p divine-atbridge` and `cargo test -p divine-video-worker`. Start local infra with `docker compose -f config/docker-compose.yml up -d`; `docs/runbooks/dev-bootstrap.md` documents the required `libpq` setup before Diesel-linked tests.
 
+The Docker workflow builds all four runnable service images on pull requests and, after the Rust workflow passes, publishes immutable `<sha7>` tags plus a floating `main` tag from `main`. Use the workflow's manual dispatch input to republish a branch, tag, or SHA that already points at a commit on `main`; deployment still happens by pinning the `<sha7>` tags, never `main`, in `../divine-iac-coreconfig`.
+
 ## Coding Style & Naming Conventions
 
 Rust code should follow `rustfmt` defaults and idiomatic snake_case naming for modules, files, and tests. Use lowercase, hyphenated names for Markdown docs such as `docs/runbooks/dev-bootstrap.md`. Keep Markdown and YAML indentation consistent with two spaces, and avoid introducing a second build or lint path that bypasses the Cargo workspace.

@@ -1,0 +1,188 @@
+name: Docker
+
+# Publishes the four divine-sky service images to Artifact Registry.
+#
+# Why this exists: until now nothing in this repo built a container. All four
+# images were pushed by hand, which is why only divine-atbridge and
+# divine-handle-gateway ever reached containers-production, and why the
+# divine-labeler and divine-feedgen production Deployments have sat in
+# ImagePullBackOff against tags that were never published.
+#
+# Pushing requires divinevideo/divine-sky to be allow-listed by the Workload
+# Identity provider's attribute_condition in both environments — see
+# divine-iac-coreconfig#1457. Until that is applied, the push steps 403.
+#
+# This workflow publishes images only. It does not dispatch image-deploy:
+# that needs the CORECONFIG_DISPATCH_APP_ID / CORECONFIG_DISPATCH_APP_PRIVATE_KEY
+# secrets on this repo, which are not set yet. Manifest bumps stay manual PRs
+# against divine-iac-coreconfig until they are.
+#
+# Production deploys must pin the immutable short-SHA tags in
+# divine-iac-coreconfig. This workflow intentionally does not publish latest,
+# because Kubernetes treats :latest images as imagePullPolicy: Always. The
+# `main` tag it does publish is a floating human-facing pointer: it moves, and
+# under overlapping merges it can settle on the older commit, so it must never
+# appear in a coreconfig overlay.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      ref:
+        # Must resolve to a commit that has landed on main: the rust-gate below
+        # only accepts a Rust run from a `push` event, and rust.yml only runs on
+        # `push` for main.
+        description: Branch, tag, or SHA to publish (must be a commit on main)
+        required: true
+        default: main
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.event_name == 'push' && github.sha || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  GCP_REGION: us-central1
+
+jobs:
+  resolve-ref:
+    name: Resolve Ref
+    runs-on: ubuntu-latest
+    outputs:
+      target-sha: ${{ steps.resolve.outputs.target-sha }}
+      short-sha: ${{ steps.resolve.outputs.short-sha }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.ref || github.sha }}
+
+      - name: Resolve target SHA
+        id: resolve
+        run: |
+          target_sha="$(git rev-parse HEAD)"
+          {
+            echo "target-sha=${target_sha}"
+            echo "short-sha=${target_sha::7}"
+          } >> "$GITHUB_OUTPUT"
+
+  rust-gate:
+    name: Wait for Rust
+    runs-on: ubuntu-latest
+    needs: resolve-ref
+    if: github.event_name != 'pull_request'
+    permissions:
+      actions: read
+      # Naming any permission drops the rest to none, and this job checks out
+      # the gate script.
+      contents: read
+    steps:
+      # Checks out the ref this workflow was loaded from, which is where the
+      # gate script belongs, not the ref being published.
+      - uses: actions/checkout@v4
+
+      - name: Wait for Rust test to pass
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HEAD_SHA: ${{ needs.resolve-ref.outputs.target-sha }}
+        run: bash scripts/wait-for-rust-run.sh
+
+  docker:
+    name: Docker (${{ matrix.image }})
+    runs-on: ubuntu-latest
+    needs: [resolve-ref, rust-gate]
+    if: ${{ !cancelled() && needs.resolve-ref.result == 'success' && (github.event_name == 'pull_request' || needs.rust-gate.result == 'success') }}
+    permissions:
+      id-token: write
+      contents: read
+    strategy:
+      # One image failing to build should not hide the state of the others.
+      fail-fast: false
+      matrix:
+        include:
+          - image: divine-labeler
+            dockerfile: Dockerfile.labeler
+          - image: divine-feedgen
+            dockerfile: Dockerfile.feedgen
+          - image: divine-atbridge
+            dockerfile: Dockerfile.atbridge
+          - image: divine-handle-gateway
+            dockerfile: Dockerfile.handle-gateway
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.resolve-ref.outputs.target-sha }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # Pull requests never push, so they never need tags. `main` pushes get the
+      # floating `main` pointer alongside the immutable short SHA; a manual
+      # republish gets the short SHA only.
+      - name: Generate image tags
+        id: tags
+        if: github.event_name != 'pull_request'
+        env:
+          SHORT_SHA: ${{ needs.resolve-ref.outputs.short-sha }}
+        run: |
+          if [[ "$GITHUB_EVENT_NAME" == "push" ]]; then
+            tags="${GITHUB_REF_NAME},${SHORT_SHA}"
+          else
+            tags="${SHORT_SHA}"
+          fi
+
+          echo "tags=${tags}" >> "$GITHUB_OUTPUT"
+          echo "Generated tags: ${tags}"
+
+      # Build once and load locally, then push the same local image to each
+      # registry, so staging and production are byte-identical rather than two
+      # independent builds of the same commit.
+      - name: Build image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ${{ matrix.dockerfile }}
+          platforms: linux/amd64
+          push: false
+          load: true
+          tags: ${{ matrix.image }}:local
+          cache-from: type=gha,scope=${{ matrix.image }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.image }}
+
+      - name: Push to Staging
+        if: github.event_name != 'pull_request'
+        uses: divinevideo/divine-github-actions/docker-push-gcp@v1
+        with:
+          image-name: ${{ matrix.image }}:local
+          registry-image: ${{ matrix.image }}
+          tags: ${{ steps.tags.outputs.tags }}
+          wif-provider: ${{ vars.WORKLOAD_IDENTITY_PROVIDER_STAGING }}
+          service-account: ${{ vars.SERVICE_ACCOUNT_STAGING }}
+          project-id: ${{ vars.GCP_PROJECT_ID_STAGING }}
+          repository: containers-staging
+          region: ${{ env.GCP_REGION }}
+
+      - name: Push to Production
+        if: github.event_name != 'pull_request'
+        uses: divinevideo/divine-github-actions/docker-push-gcp@v1
+        with:
+          image-name: ${{ matrix.image }}:local
+          registry-image: ${{ matrix.image }}
+          tags: ${{ steps.tags.outputs.tags }}
+          wif-provider: ${{ vars.WORKLOAD_IDENTITY_PROVIDER_PRODUCTION }}
+          service-account: ${{ vars.SERVICE_ACCOUNT_PRODUCTION }}
+          project-id: ${{ vars.GCP_PROJECT_ID_PRODUCTION }}
+          repository: containers-production
+          region: ${{ env.GCP_REGION }}
+
+      - name: Summary
+        if: github.event_name != 'pull_request'
+        env:
+          IMAGE: ${{ matrix.image }}
+          TAGS: ${{ steps.tags.outputs.tags }}
+        run: |
+          {
+            printf -- '### %s published\n\n' "$IMAGE"
+            printf -- '- **Tags:** `%s`\n' "$TAGS"
+            printf -- '- **Registries:** containers-staging, containers-production\n'
+          } >> "$GITHUB_STEP_SUMMARY"
