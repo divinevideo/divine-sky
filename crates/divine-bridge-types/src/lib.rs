@@ -103,6 +103,7 @@ pub enum PublishState {
     Published,
     Failed,
     Skipped,
+    Ineligible,
 }
 
 impl PublishState {
@@ -113,6 +114,7 @@ impl PublishState {
             Self::Published => "published",
             Self::Failed => "failed",
             Self::Skipped => "skipped",
+            Self::Ineligible => "ineligible",
         }
     }
 }
@@ -120,6 +122,17 @@ impl PublishState {
 impl std::fmt::Display for PublishState {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(self.as_str())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn publish_state_ineligible_uses_expected_storage_value() {
+        assert_eq!(PublishState::Ineligible.as_str(), "ineligible");
+        assert_eq!(PublishState::Ineligible.to_string(), "ineligible");
     }
 }
 

@@ -14,8 +14,8 @@ use divine_bridge_db::{
     get_account_link_lifecycle, get_account_pds_access_jwt_by_did,
     get_account_pds_refresh_jwt_by_did, get_ingest_offset, get_publish_job, get_record_mapping,
     insert_asset, insert_record_mapping, mark_publish_job_completed_for_owner,
-    mark_publish_job_failed_for_owner, renew_publish_job_lease,
-    reserve_publish_job_prepared_record, reserve_publish_job_rkey,
+    mark_publish_job_failed_for_owner, mark_publish_job_ineligible_for_owner,
+    renew_publish_job_lease, reserve_publish_job_prepared_record, reserve_publish_job_rkey,
     store_account_pds_session_by_did,
     update_record_mapping_status as update_record_mapping_status_query, upsert_ingest_offset,
 };
@@ -27,7 +27,7 @@ use crate::config::{DEFAULT_BACKFILL_BATCH_SIZE, DEFAULT_BACKFILL_PLANNER_INTERV
 use crate::health::RuntimeHealthState;
 use crate::nostr_consumer::WebSocketRelayConnection;
 use crate::pipeline::{
-    AccountLink, AccountStore, AssetManifestRecord, BridgePipeline, HttpBlobFetcher,
+    AccountLink, AccountStore, AssetManifestRecord, BridgePipeline, HttpBlobFetcher, ProcessResult,
     PublishJobEnvelope, QueueDecision, RecordMapping, RecordStore,
 };
 use crate::publisher::PdsClient;
@@ -55,6 +55,30 @@ pub enum WorkerRunResult {
         nostr_event_id: String,
         error: String,
     },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum PublishJobOutcome {
+    Completed,
+    Ineligible(String),
+    Failed(String),
+}
+
+fn publish_job_outcome(execution: Result<ProcessResult>) -> PublishJobOutcome {
+    match execution {
+        Ok(ProcessResult::Published { .. } | ProcessResult::ProfileSynced { .. }) => {
+            PublishJobOutcome::Completed
+        }
+        Ok(ProcessResult::Deleted { .. }) => PublishJobOutcome::Ineligible(
+            "delete event does not publish an ATProto record".to_string(),
+        ),
+        Ok(ProcessResult::Skipped { reason }) if reason.should_mark_ineligible() => {
+            PublishJobOutcome::Ineligible(reason.to_string())
+        }
+        Ok(ProcessResult::Skipped { .. }) => PublishJobOutcome::Completed,
+        Ok(ProcessResult::Error { message }) => PublishJobOutcome::Failed(message),
+        Err(error) => PublishJobOutcome::Failed(format!("{error:#}")),
+    }
 }
 
 #[derive(Clone)]
@@ -522,20 +546,31 @@ where
         }
     });
 
-    let execution = pipeline.execute_publish_job(&envelope).await;
+    let execution = publish_job_outcome(pipeline.execute_publish_job(&envelope).await);
     let _ = stop_heartbeat.send(());
     let _ = heartbeat.await;
 
     match execution {
-        Ok(_) => {
+        PublishJobOutcome::Completed => {
             let mut conn = connection.lock().unwrap();
             mark_publish_job_completed_for_owner(&mut conn, &job.nostr_event_id, &lease_owner)?;
             Ok(WorkerRunResult::Completed {
                 nostr_event_id: job.nostr_event_id,
             })
         }
-        Err(error) => {
-            let error_message = format!("{error:#}");
+        PublishJobOutcome::Ineligible(reason) => {
+            let mut conn = connection.lock().unwrap();
+            mark_publish_job_ineligible_for_owner(
+                &mut conn,
+                &job.nostr_event_id,
+                &lease_owner,
+                &reason,
+            )?;
+            Ok(WorkerRunResult::Completed {
+                nostr_event_id: job.nostr_event_id,
+            })
+        }
+        PublishJobOutcome::Failed(error_message) => {
             let mut conn = connection.lock().unwrap();
             mark_publish_job_failed_for_owner(
                 &mut conn,
@@ -744,6 +779,7 @@ pub async fn run_service_with_state(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::pipeline::SkipReason;
 
     fn sample_event(id: &str, created_at: i64) -> NostrEvent {
         NostrEvent {
@@ -793,5 +829,65 @@ mod tests {
         assert_ne!(first, second);
         assert!(first.starts_with("live-worker-1:"));
         assert!(second.starts_with("live-worker-1:"));
+    }
+
+    #[test]
+    fn publish_job_outcome_distinguishes_skip_types() {
+        assert_eq!(
+            publish_job_outcome(Ok(ProcessResult::Skipped {
+                reason: SkipReason::NotOptedIn,
+            })),
+            PublishJobOutcome::Ineligible("user has not opted in".to_string())
+        );
+        assert_eq!(
+            publish_job_outcome(Ok(ProcessResult::Skipped {
+                reason: SkipReason::AlreadyProcessed,
+            })),
+            PublishJobOutcome::Completed
+        );
+    }
+
+    #[test]
+    fn publish_job_outcome_maps_record_writes_to_completed() {
+        assert_eq!(
+            publish_job_outcome(Ok(ProcessResult::Published {
+                at_uri: "at://did:plc:test/app.bsky.feed.post/rkey".to_string(),
+                rkey: "rkey".to_string(),
+            })),
+            PublishJobOutcome::Completed
+        );
+        assert_eq!(
+            publish_job_outcome(Ok(ProcessResult::ProfileSynced {
+                at_uri: "at://did:plc:test/app.bsky.actor.profile/self".to_string(),
+                rkey: "self".to_string(),
+            })),
+            PublishJobOutcome::Completed
+        );
+    }
+
+    #[test]
+    fn publish_job_outcome_maps_delete_execution_to_ineligible() {
+        assert_eq!(
+            publish_job_outcome(Ok(ProcessResult::Deleted {
+                at_uri: "at://did:plc:test/app.bsky.feed.post/rkey".to_string(),
+            })),
+            PublishJobOutcome::Ineligible(
+                "delete event does not publish an ATProto record".to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn publish_job_outcome_maps_error_results_to_failure() {
+        assert_eq!(
+            publish_job_outcome(Ok(ProcessResult::Error {
+                message: "pipeline failed".to_string(),
+            })),
+            PublishJobOutcome::Failed("pipeline failed".to_string())
+        );
+        assert_eq!(
+            publish_job_outcome(Err(anyhow::anyhow!("outer failure"))),
+            PublishJobOutcome::Failed("outer failure".to_string())
+        );
     }
 }

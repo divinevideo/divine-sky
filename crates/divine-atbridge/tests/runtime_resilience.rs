@@ -123,6 +123,10 @@ fn reset_database(database_url: &str) {
         &mut conn,
         include_str!("../../../migrations/008_publish_job_reserved_rkey/up.sql"),
     );
+    execute_batch(
+        &mut conn,
+        include_str!("../../../migrations/009_publish_job_ineligible_state/up.sql"),
+    );
 }
 
 fn test_db_lock() -> &'static Mutex<()> {
@@ -229,8 +233,14 @@ impl RecordStore for TrackingRecordStore {
         Ok(())
     }
 
-    async fn get_mapping_by_nostr_id(&self, _event_id: &str) -> Result<Option<RecordMapping>> {
-        Ok(None)
+    async fn get_mapping_by_nostr_id(&self, event_id: &str) -> Result<Option<RecordMapping>> {
+        Ok(self
+            .mappings
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|mapping| mapping.nostr_event_id == event_id)
+            .cloned())
     }
 
     async fn mark_deleted(&self, _event_id: &str) -> Result<()> {
@@ -755,6 +765,149 @@ async fn runtime_scheduler_reclaims_expired_worker_leases() {
         .expect("job lookup should succeed")
         .expect("job should still exist");
     assert_eq!(job.state, "published");
+}
+
+#[tokio::test]
+async fn publish_worker_marks_pipeline_skip_as_ineligible() {
+    let _guard = test_db_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let database_url = test_database_url();
+    reset_database(&database_url);
+    let connection = shared_connection(&database_url);
+
+    let secp = Secp256k1::new();
+    let keypair = Keypair::new(&secp, &mut OsRng);
+    let event = make_profile_event(&keypair, 1_700_100_030, "Skipped Profile");
+    {
+        let mut conn = connection.lock().unwrap();
+        enqueue_publish_job(
+            &mut conn,
+            &NewPublishJob {
+                nostr_event_id: &event.id,
+                nostr_pubkey: &event.pubkey,
+                event_created_at: Utc
+                    .timestamp_opt(event.created_at, 0)
+                    .single()
+                    .expect("event timestamp should be valid"),
+                event_payload: serde_json::to_value(&event).expect("event should serialize"),
+                job_source: divine_bridge_types::PublishJobSource::Live.as_str(),
+                state: "pending",
+            },
+        )
+        .expect("job should enqueue");
+    }
+
+    let pipeline = BridgePipeline::new(
+        StaticAccountStore {
+            link: AccountLink {
+                nostr_pubkey: event.pubkey.clone(),
+                did: "did:plc:skip".to_string(),
+                opted_in: false,
+            },
+        },
+        TrackingRecordStore::default(),
+        NoopBlobFetcher,
+        NoopBlobUploader,
+        FlakyPublisher::default(),
+    );
+
+    let result = run_publish_worker_once(
+        &connection,
+        &pipeline,
+        divine_bridge_types::PublishJobSource::Live,
+        "runtime-live-worker",
+    )
+    .await
+    .expect("worker should complete the skipped job");
+    assert!(matches!(
+        result,
+        WorkerRunResult::Completed { ref nostr_event_id } if nostr_event_id == &event.id
+    ));
+
+    let mut conn = connection.lock().unwrap();
+    let job = get_publish_job(&mut conn, &event.id)
+        .expect("job lookup should succeed")
+        .expect("job should still exist");
+    assert_eq!(job.state, "ineligible");
+    assert_eq!(job.error.as_deref(), Some("user has not opted in"));
+    assert!(job.completed_at.is_some());
+}
+
+#[tokio::test]
+async fn publish_worker_marks_already_processed_skip_as_published() {
+    let _guard = test_db_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let database_url = test_database_url();
+    reset_database(&database_url);
+    let connection = shared_connection(&database_url);
+
+    let secp = Secp256k1::new();
+    let keypair = Keypair::new(&secp, &mut OsRng);
+    let event = make_profile_event(&keypair, 1_700_100_031, "Already Processed Profile");
+    {
+        let mut conn = connection.lock().unwrap();
+        enqueue_publish_job(
+            &mut conn,
+            &NewPublishJob {
+                nostr_event_id: &event.id,
+                nostr_pubkey: &event.pubkey,
+                event_created_at: Utc
+                    .timestamp_opt(event.created_at, 0)
+                    .single()
+                    .expect("event timestamp should be valid"),
+                event_payload: serde_json::to_value(&event).expect("event should serialize"),
+                job_source: divine_bridge_types::PublishJobSource::Live.as_str(),
+                state: "pending",
+            },
+        )
+        .expect("job should enqueue");
+    }
+
+    let pipeline = BridgePipeline::new(
+        StaticAccountStore {
+            link: AccountLink {
+                nostr_pubkey: event.pubkey.clone(),
+                did: "did:plc:already".to_string(),
+                opted_in: true,
+            },
+        },
+        TrackingRecordStore {
+            mappings: Mutex::new(vec![RecordMapping {
+                nostr_event_id: event.id.clone(),
+                at_uri: "at://did:plc:already/app.bsky.feed.post/rkey".to_string(),
+                did: "did:plc:already".to_string(),
+                collection: "app.bsky.feed.post".to_string(),
+                rkey: "rkey".to_string(),
+                deleted: false,
+            }]),
+            statuses: Mutex::new(vec![]),
+        },
+        NoopBlobFetcher,
+        NoopBlobUploader,
+        FlakyPublisher::default(),
+    );
+
+    let result = run_publish_worker_once(
+        &connection,
+        &pipeline,
+        divine_bridge_types::PublishJobSource::Live,
+        "runtime-live-worker",
+    )
+    .await
+    .expect("worker should complete the replay no-op");
+    assert!(matches!(
+        result,
+        WorkerRunResult::Completed { ref nostr_event_id } if nostr_event_id == &event.id
+    ));
+
+    let mut conn = connection.lock().unwrap();
+    let job = get_publish_job(&mut conn, &event.id)
+        .expect("job lookup should succeed")
+        .expect("job should still exist");
+    assert_eq!(job.state, "published");
+    assert!(job.error.is_none());
 }
 
 #[tokio::test]

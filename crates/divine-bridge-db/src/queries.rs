@@ -1053,6 +1053,33 @@ pub fn mark_publish_job_completed_for_owner(
     mark_publish_job_completed_inner(conn, nostr_event_id, Some(lease_owner))
 }
 
+/// Mark a pipeline no-op as terminal only if this worker still owns the lease.
+pub fn mark_publish_job_ineligible_for_owner(
+    conn: &mut PgConnection,
+    nostr_event_id: &str,
+    lease_owner: &str,
+    reason: &str,
+) -> Result<PublishJob> {
+    let now = Utc::now();
+    let result = diesel::update(
+        publish_jobs::table
+            .filter(publish_jobs::nostr_event_id.eq(nostr_event_id))
+            .filter(publish_jobs::state.eq(PublishState::InProgress.as_str()))
+            .filter(publish_jobs::lease_owner.eq(lease_owner)),
+    )
+    .set((
+        publish_jobs::state.eq(PublishState::Ineligible.as_str()),
+        publish_jobs::error.eq(Some(reason.to_string())),
+        publish_jobs::lease_owner.eq(None::<String>),
+        publish_jobs::lease_expires_at.eq(None::<DateTime<Utc>>),
+        publish_jobs::completed_at.eq(Some(now)),
+        publish_jobs::updated_at.eq(now),
+    ))
+    .get_result::<PublishJob>(conn)
+    .with_context(|| format!("publish job lease lost before ineligible mark: {nostr_event_id}"))?;
+    Ok(result)
+}
+
 fn mark_publish_job_completed_inner(
     conn: &mut PgConnection,
     nostr_event_id: &str,
@@ -1275,7 +1302,7 @@ fn mark_publish_job_skipped(
 /// Cancel a publish job due to a delete signal.
 ///
 /// If the row does not yet exist, inserts a tombstone row in `skipped` state.
-/// Existing `published` and `skipped` rows are left untouched.
+/// Existing `published`, `skipped`, and `ineligible` rows are left untouched.
 pub fn cancel_publish_job(
     conn: &mut PgConnection,
     tombstone_job: &NewPublishJob,
@@ -1285,6 +1312,7 @@ pub fn cancel_publish_job(
     if let Some(existing) = get_publish_job(conn, nostr_event_id)? {
         if existing.state == PublishState::Published.as_str()
             || existing.state == PublishState::Skipped.as_str()
+            || existing.state == PublishState::Ineligible.as_str()
         {
             return Ok(existing);
         }

@@ -53,6 +53,10 @@ fn reset_database(database_url: &str) {
         &mut conn,
         include_str!("../../../migrations/004_publish_job_scheduler/up.sql"),
     );
+    execute_batch(
+        &mut conn,
+        include_str!("../../../migrations/009_publish_job_ineligible_state/up.sql"),
+    );
 }
 
 fn build_app(database_url: String, name_server_url: String) -> axum::Router {
@@ -575,7 +579,7 @@ async fn crosspost_status_mixed_batch_answers_in_request_order() {
 
 #[tokio::test]
 #[serial]
-async fn crosspost_status_completed_job_without_mapping_reports_not_applicable() {
+async fn crosspost_status_ineligible_job_reports_not_applicable() {
     let database_url = test_database_url();
     reset_database(&database_url);
 
@@ -588,10 +592,96 @@ async fn crosspost_status_completed_job_without_mapping_reports_not_applicable()
             "alice.divine.video",
             "did:plc:alice",
         );
-        // The pipeline reports a skip (unsupported kind, unverified signature, not
-        // opted in) as successful completion, so the job lands in `published` with
-        // no record mapping. Nothing reached Bluesky, so this must not read as a
-        // post that was taken down.
+        insert_publish_job(&mut conn, ALICE_EVENT_ID, ALICE_PUBKEY, "ineligible");
+    }
+
+    let name_server = mockito::Server::new_async().await;
+    let app = build_app(database_url, name_server.url());
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!(
+                    "/api/account-links/{ALICE_PUBKEY}/crosspost-status"
+                ))
+                .header("content-type", "application/json")
+                .header("authorization", AUTH_HEADER)
+                .body(Body::from(
+                    json!({"nostr_event_ids": [ALICE_EVENT_ID]}).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let payload = response_json(response).await;
+    assert_eq!(payload["videos"][0]["status"], "not_applicable");
+    assert!(payload["videos"][0]["at_uri"].is_null());
+    settle_pool_teardown().await;
+}
+
+#[tokio::test]
+#[serial]
+async fn crosspost_status_skipped_job_without_mapping_reports_removed() {
+    let database_url = test_database_url();
+    reset_database(&database_url);
+
+    {
+        let mut conn =
+            PgConnection::establish(&database_url).expect("test database should be reachable");
+        insert_ready_account(
+            &mut conn,
+            ALICE_PUBKEY,
+            "alice.divine.video",
+            "did:plc:alice",
+        );
+        insert_publish_job(&mut conn, ALICE_EVENT_ID, ALICE_PUBKEY, "skipped");
+    }
+
+    let name_server = mockito::Server::new_async().await;
+    let app = build_app(database_url, name_server.url());
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!(
+                    "/api/account-links/{ALICE_PUBKEY}/crosspost-status"
+                ))
+                .header("content-type", "application/json")
+                .header("authorization", AUTH_HEADER)
+                .body(Body::from(
+                    json!({"nostr_event_ids": [ALICE_EVENT_ID]}).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let payload = response_json(response).await;
+    assert_eq!(payload["videos"][0]["status"], "removed");
+    assert!(payload["videos"][0]["at_uri"].is_null());
+    settle_pool_teardown().await;
+}
+
+#[tokio::test]
+#[serial]
+async fn crosspost_status_legacy_completed_job_without_mapping_reports_not_applicable() {
+    let database_url = test_database_url();
+    reset_database(&database_url);
+
+    {
+        let mut conn =
+            PgConnection::establish(&database_url).expect("test database should be reachable");
+        insert_ready_account(
+            &mut conn,
+            ALICE_PUBKEY,
+            "alice.divine.video",
+            "did:plc:alice",
+        );
         insert_publish_job(&mut conn, ALICE_EVENT_ID, ALICE_PUBKEY, "published");
     }
 

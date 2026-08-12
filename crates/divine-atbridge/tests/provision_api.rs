@@ -41,6 +41,10 @@ fn reset_database(database_url: &str) {
     );
     execute_batch(
         &mut conn,
+        include_str!("../../../migrations/009_publish_job_ineligible_state/up.sql"),
+    );
+    execute_batch(
+        &mut conn,
         include_str!("../../../migrations/005_crosspost_default_true/up.sql"),
     );
     // Session columns (pds_access_jwt/refresh_jwt) — the rsky-native provisioner

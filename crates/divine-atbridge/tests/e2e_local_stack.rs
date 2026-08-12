@@ -131,6 +131,10 @@ fn reset_database(database_url: &str) {
         &mut conn,
         include_str!("../../../migrations/008_publish_job_reserved_rkey/up.sql"),
     );
+    execute_batch(
+        &mut conn,
+        include_str!("../../../migrations/009_publish_job_ineligible_state/up.sql"),
+    );
 }
 
 fn test_db_lock() -> &'static Mutex<()> {
@@ -480,7 +484,11 @@ async fn e2e_local_stack_scheduler_publishes_profiles_posts_and_deletes() {
         .expect("delete job should exist");
     assert_eq!(publish_job.state, "published");
     assert_eq!(profile_job.state, "published");
-    assert_eq!(delete_job.state, "published");
+    assert_eq!(delete_job.state, "ineligible");
+    assert_eq!(
+        delete_job.error.as_deref(),
+        Some("delete event does not publish an ATProto record")
+    );
 
     let cursor = get_ingest_offset(&mut conn, "runtime-e2e")
         .expect("cursor lookup should succeed")
