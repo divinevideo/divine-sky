@@ -89,7 +89,8 @@ Adding `divine-sky` to the existing list does not achieve that on its own. The
 shared provider condition and the image-writer impersonation binding are both
 keyed on repository today and map, but do not condition on, the ref, so scoping
 by event and ref is a change to the shared workload-identity module in
-`../divine-iac-coreconfig`.
+`../divine-iac-coreconfig`; track that follow-up in
+`divinevideo/divine-iac-coreconfig#1600`.
 
 The repository also needs these GitHub variables:
 
