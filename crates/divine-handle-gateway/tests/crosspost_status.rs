@@ -619,6 +619,7 @@ async fn crosspost_status_ineligible_job_reports_not_applicable() {
     let payload = response_json(response).await;
     assert_eq!(payload["videos"][0]["status"], "not_applicable");
     assert!(payload["videos"][0]["at_uri"].is_null());
+    settle_pool_teardown().await;
 }
 
 #[tokio::test]
@@ -663,6 +664,7 @@ async fn crosspost_status_skipped_job_without_mapping_reports_not_applicable() {
     let payload = response_json(response).await;
     assert_eq!(payload["videos"][0]["status"], "not_applicable");
     assert!(payload["videos"][0]["at_uri"].is_null());
+    settle_pool_teardown().await;
 }
 
 #[tokio::test]
