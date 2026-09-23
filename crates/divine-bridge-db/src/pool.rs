@@ -77,14 +77,21 @@ mod tests {
         std::env::var("TEST_DATABASE_URL").expect("TEST_DATABASE_URL must be set for pool tests")
     }
 
+    // Inspect the pool state instead of checking out a connection: taking the
+    // only idle connection drops the pool below `min_idle`, so r2d2 starts a
+    // replacement connect on a detached worker thread. When this is the last
+    // test to finish, the binary exits while that worker is still inside
+    // libpq, racing libpq's dependencies' exit-time teardown and intermittently
+    // crashing the test process with SIGSEGV.
     #[test]
     fn build_pool_uses_default_max_size_and_opens_a_connection() {
         let guard = env_lock().lock().unwrap();
         std::env::remove_var("DB_POOL_MAX_SIZE");
         let pool = build_pool(&test_database_url()).expect("pool builds against the test database");
         assert_eq!(pool.max_size(), DEFAULT_MAX_SIZE);
-        let conn = pool.get().expect("a connection can be checked out");
-        drop(conn);
+        let state = pool.state();
+        assert_eq!(state.connections, 1, "the eager connection is open");
+        assert_eq!(state.idle_connections, 1, "the eager connection is idle");
         drop(guard);
     }
 
