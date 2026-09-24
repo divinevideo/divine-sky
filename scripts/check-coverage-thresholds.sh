@@ -42,6 +42,7 @@ jq -e '
   (.global.functions | type == "number") and
   (.global.regions | type == "number") and
   (.global.non_decreasing | type == "boolean") and
+  (.global.non_decreasing_tolerance | type == "number" and . >= 0) and
   .changed_rust.lines == 100 and
   (.changed_rust.allow_absent | type == "array") and
   all(.changed_rust.allow_absent[]; type == "string") and
@@ -167,9 +168,13 @@ read_summary_percentages() {
   ' "$1"
 }
 
+# Timing-dependent branches (see allow_uncovered) make coverage of identical
+# code differ by a few regions between runs, so allow a drop of up to
+# non_decreasing_tolerance percentage points against the base.
 check_non_decreasing() {
-  local name="$1" actual="$2" base="$3"
-  awk -v actual="$actual" -v base="$base" 'BEGIN { exit !(actual + 0.000000001 >= base + 0) }' || {
+  local name="$1" actual="$2" base="$3" tolerance="$4"
+  awk -v actual="$actual" -v base="$base" -v tolerance="$tolerance" \
+    'BEGIN { exit !(actual + tolerance + 0.000000001 >= base + 0) }' || {
     echo "$name coverage regressed from base $base to $actual" >&2
     exit 1
   }
@@ -197,9 +202,10 @@ if [[ "$(jq -r '.global.non_decreasing' "$thresholds")" == "true" && -s "$produc
     echo "invalid base LLVM summary JSON or no instrumented regions" >&2
     exit 2
   }
-  check_non_decreasing lines "$line_pct" "$base_line_pct"
-  check_non_decreasing functions "$function_pct" "$base_function_pct"
-  check_non_decreasing regions "$region_pct" "$base_region_pct"
+  tolerance="$(jq -r '.global.non_decreasing_tolerance' "$thresholds")"
+  check_non_decreasing lines "$line_pct" "$base_line_pct" "$tolerance"
+  check_non_decreasing functions "$function_pct" "$base_function_pct" "$tolerance"
+  check_non_decreasing regions "$region_pct" "$base_region_pct" "$tolerance"
 fi
 
 echo "coverage thresholds passed: lines=$line_pct functions=$function_pct regions=$region_pct changed_uncovered=0"

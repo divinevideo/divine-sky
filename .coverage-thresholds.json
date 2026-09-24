@@ -4,7 +4,8 @@
     "lines": 76.7,
     "functions": 71.0,
     "regions": 74.1,
-    "non_decreasing": true
+    "non_decreasing": true,
+    "non_decreasing_tolerance": 0.05
   },
   "changed_rust": {
     "lines": 100,

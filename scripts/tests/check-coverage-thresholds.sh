@@ -9,7 +9,7 @@ trap 'rm -rf "$tmp_dir"' EXIT
 cat >"$tmp_dir/thresholds.json" <<'JSON'
 {
   "version": 1,
-  "global": {"lines": 50, "functions": 50, "regions": 50, "non_decreasing": true},
+  "global": {"lines": 50, "functions": 50, "regions": 50, "non_decreasing": true, "non_decreasing_tolerance": 0.05},
   "changed_rust": {
     "lines": 100,
     "allow_absent": ["crates/allowed/src/lib.rs"],
@@ -109,6 +109,18 @@ for metric in lines functions regions; do
     exit 1
   fi
 done
+
+cat >"$tmp_dir/noise-summary.json" <<'JSON'
+{"data":[{"totals":{"lines":{"count":20,"covered":19,"percent":94.97},"functions":{"count":20,"covered":19,"percent":94.97},"regions":{"count":20,"covered":19,"percent":94.97}}}]}
+JSON
+
+# Timing-dependent branches make coverage of identical code vary slightly
+# between runs; a drop within the tolerance must not fail the gate.
+COVERAGE_BASE_SUMMARY_PATH="$tmp_dir/base-summary.json" "$checker" \
+  --thresholds "$tmp_dir/thresholds.json" \
+  --lcov "$tmp_dir/covered.info" \
+  --summary-json "$tmp_dir/noise-summary.json" \
+  --diff "$tmp_dir/changed.diff"
 
 cat >"$tmp_dir/docs-only.diff" <<'DIFF'
 diff --git a/docs/runbooks/example.md b/docs/runbooks/example.md
